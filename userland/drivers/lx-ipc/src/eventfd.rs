@@ -14,6 +14,7 @@ use hydra_rt::sys;
 
 use crate::client::Cx;
 use crate::fdio::kbuf;
+use crate::kstore;
 use crate::lock::YLock;
 
 const EAGAIN: i64 = -11;
@@ -36,6 +37,10 @@ struct Waiter {
 }
 
 struct Efd {
+    /// wave9 GX3: its id (`kstore` record).
+    id: u64,
+    /// Partial answers of waiting calls, published after the record write.
+    pend: kstore::Pend,
     count: u64,
     semaphore: bool,
     readers: VecDeque<Waiter>,
@@ -54,6 +59,21 @@ impl Efd {
             ev |= 0x0104; // POLLOUT | POLLWRNORM
         }
         crate::obj::set_ready_ev(slot, ev, 0, event);
+    }
+
+    /// wave9 GX3: writes the record (the counter survives a restart).
+    fn persist(&self) {
+        if kstore::kept(self.id) {
+            let mut w = kstore::W::new(kstore::K_EFD);
+            w.u64(self.count).u8(self.semaphore as u8);
+            kstore::put_logged(self.id, &w.0);
+        }
+    }
+
+    /// Writes the record, then the waiting calls' answers.
+    fn commit(&mut self) {
+        self.persist();
+        kstore::flush(&mut self.pend);
     }
 
     fn take(&mut self) -> Option<u64> {
@@ -77,7 +97,10 @@ impl Efd {
                 let w = self.readers.pop_front().unwrap();
                 let v = self.take().unwrap();
                 match sys::lx_write(w.id, w.arg, &v.to_ne_bytes()) {
-                    Ok(()) => out.push((w.id, 8)),
+                    Ok(()) => {
+                        self.pend.push((w.id, 8));
+                        out.push((w.id, 8))
+                    }
                     Err(e) => {
                         self.count += v;
                         out.push((w.id, e));
@@ -91,6 +114,7 @@ impl Efd {
                 }
                 let w = self.writers.pop_front().unwrap();
                 self.count += w.arg;
+                self.pend.push((w.id, 8));
                 out.push((w.id, 8));
                 moved = true;
             }
@@ -111,16 +135,19 @@ pub fn create(cx: &Cx) -> (i64, u64) {
         Ok(s) => s,
         Err(e) => return (e, 0),
     };
+    let id = kstore::id();
     {
         let mut m = EFDS.lock();
-        let e = Efd { count: cx.args[0] as u32 as u64, semaphore: flags & EFD_SEMAPHORE != 0, readers: VecDeque::new(), writers: VecDeque::new() };
+        let e = Efd { id, pend: alloc::vec::Vec::new(), count: cx.args[0] as u32 as u64, semaphore: flags & EFD_SEMAPHORE != 0, readers: VecDeque::new(), writers: VecDeque::new() };
+        e.persist();
         e.publish(slot, false);
         m.insert(slot, e);
     }
-    match crate::obj::install(cx, slot, LX_OBJ_KIND_EVENTFD, (flags & (EFD_NONBLOCK | EFD_CLOEXEC)) as u32, 0o600, cx.c.euid, cx.c.egid, b"anon_inode:[eventfd]") {
+    match crate::obj::install_keyed(cx, slot, LX_OBJ_KIND_EVENTFD, (flags & (EFD_NONBLOCK | EFD_CLOEXEC)) as u32, 0o600, cx.c.euid, cx.c.egid, b"anon_inode:[eventfd]", 0, kstore::key(id)) {
         Ok(fd) => (fd, 0),
         Err(e) => {
             EFDS.lock().remove(&slot);
+            kstore::release(id);
             crate::obj::set_ready(slot, 0, 0);
             crate::obj::free(slot);
             (e, 0)
@@ -139,6 +166,8 @@ pub fn io(cx: &Cx) -> (i64, u64) {
     if iov.total() < 8 && cx.nr != 16 {
         return (EINVAL, 0);
     }
+    // wave9 GX3: a read or write is safe to send again until the counter changed
+    kstore::resend_safe(cx.page(), cx.id, true);
     match cx.nr {
         0 | 19 => {
             let mut done = alloc::vec::Vec::new();
@@ -149,6 +178,8 @@ pub fn io(cx: &Cx) -> (i64, u64) {
                     Some(v) => match iov.scatter(cx, &v.to_ne_bytes()) {
                         Ok(()) => {
                             e.settle(&mut done);
+                            e.commit();
+                            kstore::partial(cx.page(), cx.id, 8);
                             e.publish(slot, false);
                             (8, 0)
                         }
@@ -186,6 +217,8 @@ pub fn io(cx: &Cx) -> (i64, u64) {
                 if MAX - e.count >= v && e.writers.is_empty() {
                     e.count += v;
                     e.settle(&mut done);
+                    e.commit();
+                    kstore::partial(cx.page(), cx.id, 8);
                     e.publish(slot, true);
                     (8, 0)
                 } else if cx.nonblock() || kbuf(cx) {
@@ -217,7 +250,23 @@ pub fn count(slot: u32) -> Option<u64> {
 
 /// The last descriptor of eventfd `slot` went away.
 pub fn closed(slot: u32) {
-    EFDS.lock().remove(&slot);
+    if let Some(e) = EFDS.lock().remove(&slot) {
+        kstore::release(e.id);
+    }
+}
+
+/// wave9 GX3: a restarted lx-ipc takes eventfd `slot` back from record `rec` (id `id`).
+#[allow(dead_code)] // (linux-server never restores)
+pub fn restore(slot: u32, id: u64, rec: &[u8]) -> bool {
+    let mut r = kstore::R::new(rec);
+    let (Some(kstore::K_EFD), Some(count), Some(sem)) = (r.u8(), r.u64(), r.u8()) else { return false };
+    if count > MAX || !crate::obj::reserve(slot, LX_OBJ_KIND_EVENTFD) {
+        return false;
+    }
+    let e = Efd { id, pend: alloc::vec::Vec::new(), count, semaphore: sem != 0, readers: VecDeque::new(), writers: VecDeque::new() };
+    e.publish(slot, true);
+    EFDS.lock().insert(slot, e);
+    true
 }
 
 /// A signal for the caller of pending call `id`: `true` if it was one of ours.

@@ -17,6 +17,7 @@ use hydra_rt::sys;
 
 use crate::client::Cx;
 use crate::fdio::kbuf;
+use crate::kstore;
 use crate::lock::YLock;
 
 const EAGAIN: i64 = -11;
@@ -41,10 +42,21 @@ struct Reader {
 
 struct Sfd {
     masks: BTreeMap<u32, u64>,
+    /// wave9 GX3: each signalfd's id (`kstore` record: its mask).
+    ids: BTreeMap<u32, u64>,
     readers: Vec<Reader>,
 }
 
-static S: YLock<Sfd> = YLock::new(Sfd { masks: BTreeMap::new(), readers: Vec::new() });
+static S: YLock<Sfd> = YLock::new(Sfd { masks: BTreeMap::new(), ids: BTreeMap::new(), readers: Vec::new() });
+
+/// wave9 GX3: writes signalfd `id`'s record (its mask).
+fn persist(id: u64, mask: u64) {
+    if kstore::kept(id) {
+        let mut w = kstore::W::new(kstore::K_SFD);
+        w.u64(mask);
+        kstore::put(id, &w.0);
+    }
+}
 
 fn read_mask(cx: &Cx) -> Result<u64, i64> {
     if cx.args[2] != 8 {
@@ -71,7 +83,13 @@ pub fn signalfd(cx: &Cx) -> (i64, u64) {
             return (EINVAL, 0);
         }
         let slot = cx.c.obj as u32;
-        S.lock().masks.insert(slot, mask);
+        {
+            let mut s = S.lock();
+            s.masks.insert(slot, mask);
+            if let Some(&id) = s.ids.get(&slot) {
+                persist(id, mask);
+            }
+        }
         let _ = sys::lx_obj(LX_OBJ_SIGMASK, slot as u64, mask, 0);
         return (fd as i64, 0);
     }
@@ -82,14 +100,22 @@ pub fn signalfd(cx: &Cx) -> (i64, u64) {
         Ok(s) => s,
         Err(e) => return (e, 0),
     };
-    S.lock().masks.insert(slot, mask);
-    match crate::obj::install_tag(cx, slot, LX_OBJ_KIND_SIGNALFD, (flags & (SFD_NONBLOCK | SFD_CLOEXEC)) as u32, 0o600, cx.c.euid, cx.c.egid, b"anon_inode:[signalfd]", cx.c.tgid) {
+    let id = kstore::id();
+    {
+        let mut s = S.lock();
+        s.masks.insert(slot, mask);
+        s.ids.insert(slot, id);
+        persist(id, mask);
+    }
+    match crate::obj::install_keyed(cx, slot, LX_OBJ_KIND_SIGNALFD, (flags & (SFD_NONBLOCK | SFD_CLOEXEC)) as u32, 0o600, cx.c.euid, cx.c.egid, b"anon_inode:[signalfd]", cx.c.tgid, kstore::key(id)) {
         Ok(fd) => {
             let _ = sys::lx_obj(LX_OBJ_SIGMASK, slot as u64, mask, 0);
             (fd, 0)
         }
         Err(e) => {
             S.lock().masks.remove(&slot);
+            S.lock().ids.remove(&slot);
+            kstore::release(id);
             crate::obj::free(slot);
             (e, 0)
         }
@@ -205,5 +231,24 @@ pub fn on_exit(tgid: u64) {
 
 /// The last descriptor of signalfd `slot` went away.
 pub fn closed(slot: u32) {
-    S.lock().masks.remove(&slot);
+    let mut s = S.lock();
+    s.masks.remove(&slot);
+    if let Some(id) = s.ids.remove(&slot) {
+        kstore::release(id);
+    }
+}
+
+/// wave9 GX3: a restarted lx-ipc takes signalfd `slot` back from record `rec` (id `id`;
+/// the kernel kept its mask for `poll`).
+#[allow(dead_code)] // (linux-server never restores)
+pub fn restore(slot: u32, id: u64, rec: &[u8]) -> bool {
+    let mut r = kstore::R::new(rec);
+    let (Some(kstore::K_SFD), Some(mask)) = (r.u8(), r.u64()) else { return false };
+    if !crate::obj::reserve(slot, LX_OBJ_KIND_SIGNALFD) {
+        return false;
+    }
+    let mut s = S.lock();
+    s.masks.insert(slot, mask);
+    s.ids.insert(slot, id);
+    true
 }

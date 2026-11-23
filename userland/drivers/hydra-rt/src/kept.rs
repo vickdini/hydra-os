@@ -37,12 +37,65 @@ const COPY_HDR: usize = 16;
 /// record whenever a socket changes, so the bit-by-bit loop showed in its connect times;
 /// the same values as before).
 pub fn crc32c(data: &[u8]) -> u32 {
+    // wave9 GX3 begin: the CPU's own CRC-32C instruction when it has one (SSE4.2: every
+    // x86-64 CPU of the last 15 years; lx-ipc writes a record at each pipe and socket call)
+    #[cfg(target_arch = "x86_64")]
+    if hw_crc() {
+        // SAFETY: the CPU has SSE4.2 (checked just above)
+        return unsafe { crc32c_hw(data) };
+    }
+    // wave9 GX3 end
+    crc32c_table(data)
+}
+
+/// [`crc32c`] a byte at a time through the table.
+pub fn crc32c_table(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &b in data {
         crc = CRC_TABLE[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
     }
     !crc
 }
+
+// wave9 GX3 begin
+/// Whether the CPU has SSE4.2's `crc32` (asked once: 0 not yet, 1 no, 2 yes).
+#[cfg(target_arch = "x86_64")]
+fn hw_crc() -> bool {
+    use core::sync::atomic::{AtomicU8, Ordering};
+    static HW: AtomicU8 = AtomicU8::new(0);
+    match HW.load(Ordering::Relaxed) {
+        0 => {
+            // SAFETY: cpuid leaf 1 exists on every x86-64 CPU
+            #[allow(unused_unsafe)]
+            let yes = unsafe { core::arch::x86_64::__cpuid(1) }.ecx & (1 << 20) != 0;
+            HW.store(if yes { 2 } else { 1 }, Ordering::Relaxed);
+            yes
+        }
+        v => v == 2,
+    }
+}
+
+/// [`crc32c`] with SSE4.2's `crc32`, 8 bytes at a time (the same values as the table).
+///
+/// # Safety
+///
+/// The CPU must have SSE4.2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+unsafe fn crc32c_hw(data: &[u8]) -> u32 {
+    use core::arch::x86_64::{_mm_crc32_u64, _mm_crc32_u8};
+    let mut crc = !0u64;
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        crc = _mm_crc32_u64(crc, u64::from_le_bytes(c.try_into().unwrap()));
+    }
+    let mut c32 = crc as u32;
+    for &b in chunks.remainder() {
+        c32 = _mm_crc32_u8(c32, b);
+    }
+    !c32
+}
+// wave9 GX3 end
 
 /// The CRC-32C table (reflected polynomial 0x82F63B78), built at compile time.
 const CRC_TABLE: [u32; 256] = {

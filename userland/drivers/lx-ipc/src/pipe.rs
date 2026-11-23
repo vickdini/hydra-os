@@ -19,8 +19,10 @@ use alloc::vec::Vec;
 use hydra_rt::protocol::*;
 use hydra_rt::sys;
 
+use crate::arena::{self, Chain};
 use crate::client::Cx;
 use crate::fdio::{kbuf, sigpipe, Iov};
+use crate::kstore;
 use crate::lock::YLock;
 
 const EAGAIN: i64 = -11;
@@ -30,6 +32,7 @@ const EINVAL: i64 = -22;
 const EPIPE: i64 = -32;
 const EPERM: i64 = -1;
 const EBUSY: i64 = -16;
+const ENOMEM: i64 = -12;
 const ENOTTY: i64 = -25;
 const ERESTARTSYS: i64 = -512;
 
@@ -70,7 +73,12 @@ struct WWait {
 }
 
 struct Pipe {
-    buf: VecDeque<u8>,
+    /// Its id (`kstore`: its record).
+    id: u64,
+    /// wave9 GX3: the bytes, in the (kept) arena.
+    buf: Chain,
+    /// Partial answers of waiting calls, published after the record write.
+    pend: kstore::Pend,
     cap: usize,
     /// Open ends (slots).
     rslots: Vec<u32>,
@@ -98,7 +106,6 @@ struct Pipes {
     pipes: BTreeMap<u64, Pipe>,
     /// Slot -> (pipe, is a write end).
     ends: BTreeMap<u32, (u64, bool)>,
-    next: u64,
     /// FIFO ends opened `O_RDWR` (in `ends` as read ends, in both slot lists).
     rw: alloc::collections::BTreeSet<u32>,
     /// FIFO node -> its pipe.
@@ -107,19 +114,90 @@ struct Pipes {
     owait: Vec<OWait>,
 }
 
-static PIPES: YLock<Pipes> = YLock::new(Pipes { pipes: BTreeMap::new(), ends: BTreeMap::new(), next: 1, rw: alloc::collections::BTreeSet::new(), fifos: BTreeMap::new(), owait: Vec::new() });
+static PIPES: YLock<Pipes> = YLock::new(Pipes { pipes: BTreeMap::new(), ends: BTreeMap::new(), rw: alloc::collections::BTreeSet::new(), fifos: BTreeMap::new(), owait: Vec::new() });
 
 /// Answers to give once the lock is let go: `(request id, result)`.
 type Done = Vec<(u64, i64)>;
 
+/// Most data bytes in one arena segment of a pipe.
+const SEG_MAX: usize = 65536;
+/// A new segment is made at least this big (later small writes go into its room).
+const SEG_MIN: usize = 4096;
+
 impl Pipe {
+    fn new(id: u64, ino: u64, fifo: bool) -> Self {
+        Pipe { id, buf: Chain::new(), pend: Vec::new(), cap: DEFAULT_CAP, rslots: Vec::new(), wslots: Vec::new(), rwait: VecDeque::new(), wwait: VecDeque::new(), ino, fifo }
+    }
+
+    /// Bytes waiting.
+    fn len(&self) -> usize {
+        self.buf.bytes
+    }
+
     fn room(&self) -> usize {
-        self.cap.saturating_sub(self.buf.len())
+        self.cap.saturating_sub(self.len())
+    }
+
+    /// wave9 GX3: adds `data` behind the bytes waiting (into the arena); `false` if the
+    /// arena is full (nothing added).
+    fn put(&mut self, data: &[u8]) -> bool {
+        let a = arena::get();
+        let (segs, bytes) = (self.buf.segs.len(), self.buf.bytes);
+        let n = self.buf.append(a, data);
+        let mut rest = &data[n..];
+        while !rest.is_empty() {
+            let chunk = rest.len().min(SEG_MAX);
+            let spare = SEG_MIN.saturating_sub(arena::HDR + chunk);
+            if !self.buf.push(a, &[], &rest[..chunk], spare) {
+                // (undo: the new segments go, the tail's bytes are cut back)
+                while self.buf.segs.len() > segs {
+                    let t = self.buf.segs.pop_back().unwrap();
+                    a.free(t.unit, t.units as usize);
+                }
+                if let Some(t) = self.buf.segs.back_mut() {
+                    t.len -= n as u32;
+                }
+                self.buf.bytes = bytes;
+                return false;
+            }
+            rest = &rest[chunk..];
+        }
+        true
+    }
+
+    /// The first `n` bytes waiting (a copy).
+    fn peek(&self, n: usize) -> Vec<u8> {
+        let mut v = Vec::with_capacity(n);
+        self.buf.copy(arena::get(), 0, n, &mut v);
+        v
+    }
+
+    /// wave9 GX3: writes the pipe's record (its bytes are in the arena: the record says
+    /// where), then lets go of the arena space the change freed.
+    fn persist(&mut self) {
+        if kstore::kept(self.id) {
+            let mut w = kstore::W::new(kstore::K_PIPE);
+            w.u32(self.cap as u32).u64(self.ino).u8(self.fifo as u8).raw(&self.buf.image());
+            if !kstore::put_logged(self.id, &w.0) {
+                // (the old record still names the space freed: it stays taken)
+                kstore::flush(&mut self.pend);
+                return;
+            }
+        }
+        self.buf.release(arena::get());
+        kstore::flush(&mut self.pend);
+    }
+
+    /// The pipe is gone: its bytes and record.
+    fn dispose(&mut self) {
+        self.buf.clear();
+        self.buf.release(arena::get());
+        kstore::release(self.id);
     }
 
     /// Sets the ends' readiness words (`arrived`: bytes came in; `left`: room was made).
     fn publish(&self, arrived: bool, left: bool) {
-        let readable = !self.buf.is_empty();
+        let readable = self.len() > 0;
         let mut rev = if readable { POLLIN | POLLRDNORM } else { 0 };
         if self.wslots.is_empty() {
             rev |= POLLHUP;
@@ -138,19 +216,19 @@ impl Pipe {
 
     /// Hands buffered bytes to waiting readers (each takes what is there, up to its size).
     fn feed_readers(&mut self, done: &mut Done) {
-        while !self.buf.is_empty() {
+        while self.len() > 0 {
             let Some(r) = self.rwait.pop_front() else { break };
-            let n = r.iov.total().min(self.buf.len());
-            let data: Vec<u8> = self.buf.drain(..n).collect();
+            let n = r.iov.total().min(self.len());
+            let data = self.peek(n);
             match r.iov.scatter_later(r.id, &data) {
-                Ok(()) => done.push((r.id, n as i64)),
-                Err(e) => {
-                    // Its memory went bad: the bytes go back for the next reader
-                    for (i, b) in data.into_iter().enumerate() {
-                        self.buf.insert(i, b);
-                    }
-                    done.push((r.id, e));
+                Ok(()) => {
+                    self.buf.consume(n);
+                    // wave9 GX3: its answer if lx-ipc dies before it is given
+                    self.pend.push((r.id, n as i64));
+                    done.push((r.id, n as i64))
                 }
+                // Its memory went bad: the bytes stay for the next reader
+                Err(e) => done.push((r.id, e)),
             }
         }
     }
@@ -166,10 +244,19 @@ impl Pipe {
                 break;
             }
             let n = left.min(room);
-            match w.iov.gather_later(w.id, w.done, n) {
-                Ok(data) => {
-                    self.buf.extend(data);
+            let got = w.iov.gather_later(w.id, w.done, n);
+            let got = match got {
+                Ok(data) if self.put(&data) => Ok(()),
+                Ok(_) => Err(ENOMEM),
+                Err(e) => Err(e),
+            };
+            let w = self.wwait.front_mut().unwrap();
+            match got {
+                Ok(()) => {
                     w.done += n;
+                    // wave9 GX3: its bytes so far are its answer if lx-ipc dies now
+                    let (wid, wd) = (w.id, w.done as i64);
+                    self.pend.push((wid, wd));
                     if w.done == w.total {
                         let w = self.wwait.pop_front().unwrap();
                         done.push((w.id, w.total as i64));
@@ -186,10 +273,10 @@ impl Pipe {
     /// Moves bytes along after a change: writers' bytes in, readers' bytes out.
     fn settle(&mut self, done: &mut Done) {
         for _ in 0..64 {
-            let before = (self.buf.len(), self.rwait.len(), self.wwait.len());
+            let before = (self.len(), self.rwait.len(), self.wwait.len());
             self.feed_readers(done);
             self.feed_writers(done);
-            if (self.buf.len(), self.rwait.len(), self.wwait.len()) == before {
+            if (self.len(), self.rwait.len(), self.wwait.len()) == before {
                 break;
             }
         }
@@ -219,20 +306,24 @@ pub fn create(cx: &Cx) -> (i64, u64) {
             return (e, 0);
         }
     };
+    let id = kstore::id();
     let ino = {
         let mut p = PIPES.lock();
-        let id = p.next;
-        p.next += 1;
         let ino = 0x6000_0000 + id;
-        p.pipes.insert(id, Pipe { buf: VecDeque::new(), cap: DEFAULT_CAP, rslots: alloc::vec![r], wslots: alloc::vec![w], rwait: VecDeque::new(), wwait: VecDeque::new(), ino, fifo: false });
+        let mut pipe = Pipe::new(id, ino, false);
+        pipe.rslots.push(r);
+        pipe.wslots.push(w);
+        pipe.persist();
+        p.pipes.insert(id, pipe);
         p.ends.insert(r, (id, false));
         p.ends.insert(w, (id, true));
         p.pipes[&id].publish(false, false);
         ino
     };
+    let key = kstore::key(id);
     let name = alloc::format!("pipe:[{}]", ino);
     let f = (flags & (O_NONBLOCK | O_CLOEXEC)) as u32;
-    let fr = match crate::obj::install_tag(cx, r, LX_OBJ_KIND_PIPE_R, f, 0o10600, cx.c.euid, cx.c.egid, name.as_bytes(), ino) {
+    let fr = match crate::obj::install_keyed(cx, r, LX_OBJ_KIND_PIPE_R, f, 0o10600, cx.c.euid, cx.c.egid, name.as_bytes(), ino, key) {
         Ok(fd) => fd,
         Err(e) => {
             forget(r);
@@ -240,7 +331,7 @@ pub fn create(cx: &Cx) -> (i64, u64) {
             return (e, 0);
         }
     };
-    let fw = match crate::obj::install_tag(cx, w, LX_OBJ_KIND_PIPE_W, f, 0o10600, cx.c.euid, cx.c.egid, name.as_bytes(), ino) {
+    let fw = match crate::obj::install_keyed(cx, w, LX_OBJ_KIND_PIPE_W, f, 0o10600, cx.c.euid, cx.c.egid, name.as_bytes(), ino, key) {
         Ok(fd) => fd,
         Err(e) => {
             // The read end is installed: closing it tells us (the kernel does on exit too);
@@ -287,19 +378,23 @@ fn read(cx: &Cx, slot: u32) -> (i64, u64) {
     };
     let want = iov.total();
     let mut done = Done::new();
+    // wave9 GX3: safe to send again until the bytes are taken
+    kstore::resend_safe(cx.page(), cx.id, true);
     let r = {
         let mut ps = PIPES.lock();
         let Some(&(id, false)) = ps.ends.get(&slot) else { return (EBADF, 0) };
         let p = ps.pipes.get_mut(&id).unwrap();
         if want == 0 {
             (0, 0)
-        } else if !p.buf.is_empty() {
-            let n = want.min(p.buf.len());
-            let data: Vec<u8> = p.buf.iter().take(n).copied().collect();
+        } else if p.len() > 0 {
+            let n = want.min(p.len());
+            let data = p.peek(n);
             match iov.scatter(cx, &data) {
                 Ok(()) => {
-                    p.buf.drain(..n);
+                    p.buf.consume(n);
                     p.settle(&mut done);
+                    p.persist();
+                    kstore::partial(cx.page(), cx.id, n as i64);
                     p.publish(false, true);
                     (n as i64, 0)
                 }
@@ -325,6 +420,8 @@ fn write(cx: &Cx, slot: u32) -> (i64, u64) {
     };
     let total = iov.total();
     let mut done = Done::new();
+    // wave9 GX3: safe to send again until its bytes are in
+    kstore::resend_safe(cx.page(), cx.id, true);
     let r = {
         let mut ps = PIPES.lock();
         let id = match ps.ends.get(&slot) {
@@ -351,9 +448,13 @@ fn write(cx: &Cx, slot: u32) -> (i64, u64) {
         if now > 0 {
             match iov.gather(cx, 0, now) {
                 Ok(data) => {
-                    p.buf.extend(data);
+                    if !p.put(&data) {
+                        return (ENOMEM, 0);
+                    }
                     wrote = now;
                     p.settle(&mut done);
+                    p.persist();
+                    kstore::partial(cx.page(), cx.id, wrote as i64);
                     p.publish(true, false);
                 }
                 Err(e) => return (e, 0),
@@ -364,6 +465,10 @@ fn write(cx: &Cx, slot: u32) -> (i64, u64) {
         } else if cx.nonblock() || kbuf(cx) {
             (if wrote > 0 { wrote as i64 } else { EAGAIN }, 0)
         } else {
+            if wrote > 0 {
+                // wave9 GX3: waiting with bytes in: they are its answer if lx-ipc dies
+                kstore::partial(core::ptr::null_mut(), cx.id, wrote as i64);
+            }
             p.wwait.push_back(WWait { id: cx.id, tgid: cx.c.tgid, tid: cx.c.tid, iov, total, done: wrote });
             (0, LX_REPLY_PENDING)
         }
@@ -379,7 +484,7 @@ fn ioctl(cx: &Cx, slot: u32) -> i64 {
             let n = {
                 let ps = PIPES.lock();
                 match ps.ends.get(&slot) {
-                    Some(&(id, _)) => ps.pipes[&id].buf.len(),
+                    Some(&(id, _)) => ps.pipes[&id].len(),
                     None => return EBADF,
                 }
             };
@@ -406,21 +511,24 @@ fn tee(cx: &Cx, slot: u32) -> i64 {
             return EINVAL;
         }
         let s = &ps.pipes[&src];
-        if s.buf.is_empty() {
+        if s.len() == 0 {
             return if s.wslots.is_empty() { 0 } else { EAGAIN };
         }
         let d = &ps.pipes[&dst];
         if d.rslots.is_empty() {
             return EPIPE;
         }
-        let n = s.buf.len().min(d.room()).min(cx.args[2] as usize);
+        let n = s.len().min(d.room()).min(cx.args[2] as usize);
         if n == 0 {
             return EAGAIN;
         }
-        let data: Vec<u8> = s.buf.iter().take(n).copied().collect();
+        let data = s.peek(n);
         let d = ps.pipes.get_mut(&dst).unwrap();
-        d.buf.extend(data);
+        if !d.put(&data) {
+            return ENOMEM;
+        }
         d.settle(&mut done);
+        d.persist();
         d.publish(true, false);
         n as i64
     };
@@ -446,12 +554,13 @@ fn fcntl(cx: &Cx, slot: u32) -> i64 {
             if size > 1 << 28 {
                 return EINVAL;
             }
-            if size < p.buf.len() {
+            if size < p.len() {
                 return EBUSY;
             }
             p.cap = size;
             let mut done = Done::new();
             p.settle(&mut done);
+            p.persist();
             p.publish(false, true);
             drop(ps);
             finish(done);
@@ -489,10 +598,11 @@ fn reopen(cx: &Cx, slot: u32) -> (i64, u64) {
             p.rslots.push(new);
         }
         p.publish(false, false);
-        p.ino
+        (p.ino, kstore::key(id))
     };
+    let (ino, key) = ino;
     let name = alloc::format!("pipe:[{}]", ino);
-    match crate::obj::install_tag(cx, new, kind, (flags & (O_NONBLOCK | O_CLOEXEC)) as u32, 0o10600, cx.c.euid, cx.c.egid, name.as_bytes(), ino) {
+    match crate::obj::install_keyed(cx, new, kind, (flags & (O_NONBLOCK | O_CLOEXEC)) as u32, 0o10600, cx.c.euid, cx.c.egid, name.as_bytes(), ino, key) {
         Ok(fd) => (fd, 0),
         Err(e) => {
             forget(new);
@@ -541,7 +651,9 @@ pub fn closed(slot: u32) {
                 let ino = p.ino;
                 ps.fifos.remove(&ino);
             }
-            ps.pipes.remove(&id);
+            if let Some(mut p) = ps.pipes.remove(&id) {
+                p.dispose();
+            }
         } else {
             p.publish(false, false);
         }
@@ -656,9 +768,10 @@ fn fifo_open_node(cx: &Cx, ino: u64, flags: u64) -> (i64, u64) {
         let id = match ps.fifos.get(&ino) {
             Some(&id) => id,
             None => {
-                let id = ps.next;
-                ps.next += 1;
-                ps.pipes.insert(id, Pipe { buf: VecDeque::new(), cap: DEFAULT_CAP, rslots: Vec::new(), wslots: Vec::new(), rwait: VecDeque::new(), wwait: VecDeque::new(), ino, fifo: true });
+                let id = kstore::id();
+                let mut p = Pipe::new(id, ino, true);
+                p.persist();
+                ps.pipes.insert(id, p);
                 ps.fifos.insert(ino, id);
                 id
             }
@@ -673,7 +786,9 @@ fn fifo_open_node(cx: &Cx, ino: u64, flags: u64) -> (i64, u64) {
             // (a pipe made for nothing goes again)
             let mut ps = PIPES.lock();
             if ps.pipes.get(&id).is_some_and(|p| p.rslots.is_empty() && p.wslots.is_empty()) {
-                ps.pipes.remove(&id);
+                if let Some(mut p) = ps.pipes.remove(&id) {
+                    p.dispose();
+                }
                 ps.fifos.remove(&ino);
             }
             return (ENXIO, 0);
@@ -705,23 +820,24 @@ fn fifo_open_node(cx: &Cx, ino: u64, flags: u64) -> (i64, u64) {
         if must_wait {
             ps.owait.push(OWait { c: cx.c, slot, kind, pipe: id, flags });
         }
-        must_wait
+        (must_wait, id)
     };
+    let (wait, id) = wait;
     for w in ready {
         let wcx = Cx::from_call(&w.c, core::ptr::null_mut());
-        let r = install_end(&wcx, w.slot, w.kind, w.flags, ino);
+        let r = install_end(&wcx, w.slot, w.kind, w.flags, ino, kstore::key(w.pipe));
         let _ = sys::lx_complete(w.c.id, r);
     }
     if wait {
         return (0, LX_REPLY_PENDING);
     }
-    (install_end(cx, slot, kind, flags, ino), 0)
+    (install_end(cx, slot, kind, flags, ino, kstore::key(id)), 0)
 }
 
 /// Gives FIFO end `slot` its descriptor in the caller's table (`forget` on failure).
-fn install_end(cx: &Cx, slot: u32, kind: u32, flags: u64, ino: u64) -> i64 {
+fn install_end(cx: &Cx, slot: u32, kind: u32, flags: u64, ino: u64, key: u64) -> i64 {
     let name = alloc::format!("pipe:[{}]", ino);
-    match crate::obj::install_tag(cx, slot, kind, (flags & (O_NONBLOCK | O_CLOEXEC)) as u32, 0o10600, cx.c.euid, cx.c.egid, name.as_bytes(), ino) {
+    match crate::obj::install_keyed(cx, slot, kind, (flags & (O_NONBLOCK | O_CLOEXEC)) as u32, 0o10600, cx.c.euid, cx.c.egid, name.as_bytes(), ino, key) {
         Ok(fd) => fd,
         Err(e) => {
             forget(slot);
@@ -729,3 +845,65 @@ fn install_end(cx: &Cx, slot: u32, kind: u32, flags: u64, ino: u64) -> i64 {
         }
     }
 }
+
+// wave9 GX3 begin: a Transparent restart takes the pipes back
+/// A restarted lx-ipc: pipe `id` from its record `rec`, with the ends `(slot, kind)` the
+/// kernel still has. Returns whether the pipe lives, and the ends that could not be taken
+/// back (they go dead). Nobody waits yet: waiting calls are sent again by the kernel.
+#[allow(dead_code)] // (linux-server never restores)
+pub fn restore(id: u64, rec: &[u8], ends: &[(u32, u32)]) -> (bool, Vec<u32>) {
+    let all: Vec<u32> = ends.iter().map(|e| e.0).collect();
+    let parsed = (|| {
+        let mut r = kstore::R::new(rec);
+        if r.u8()? != kstore::K_PIPE {
+            return None;
+        }
+        let (cap, ino, fifo) = (r.u32()? as usize, r.u64()?, r.u8()? != 0);
+        let img = r.raw(arena::IMG)?;
+        if !(4096..=1 << 28).contains(&cap) {
+            return None;
+        }
+        let chain = Chain::restore(arena::get(), img)?;
+        Some((cap, ino, fifo, chain))
+    })();
+    let Some((cap, ino, fifo, chain)) = parsed else { return (false, all) };
+    let mut p = Pipe::new(id, ino, fifo);
+    p.buf = chain;
+    p.cap = cap.max(p.buf.bytes.next_power_of_two().min(1 << 28));
+    let mut dead = Vec::new();
+    let mut ps = PIPES.lock();
+    for &(slot, kind) in ends {
+        if !crate::obj::reserve(slot, kind) {
+            dead.push(slot);
+            continue;
+        }
+        if kind != LX_OBJ_KIND_PIPE_W {
+            p.rslots.push(slot);
+        }
+        if kind != LX_OBJ_KIND_PIPE_R {
+            p.wslots.push(slot);
+        }
+        ps.ends.insert(slot, (id, kind == LX_OBJ_KIND_PIPE_W));
+        if kind == LX_OBJ_KIND_PIPE_RW {
+            ps.rw.insert(slot);
+        }
+    }
+    if p.rslots.is_empty() && p.wslots.is_empty() {
+        p.dispose();
+        return (false, dead);
+    }
+    if fifo {
+        ps.fifos.insert(ino, id);
+    }
+    p.publish(true, true);
+    ps.pipes.insert(id, p);
+    (true, dead)
+}
+
+/// Pipes and bytes in them (the restart's log line).
+#[allow(dead_code)] // (linux-server never restores)
+pub fn count() -> (usize, usize) {
+    let ps = PIPES.lock();
+    (ps.pipes.len(), ps.pipes.values().map(|p| p.len()).sum())
+}
+// wave9 GX3 end

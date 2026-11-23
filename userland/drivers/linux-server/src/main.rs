@@ -90,6 +90,14 @@ mod sysv;
 mod timerfd;
 #[path = "../../lx-ipc/src/unix.rs"]
 mod unix;
+// wave9 GX3 begin: lx-ipc's data arena and records (here: an anonymous arena, nothing kept)
+#[path = "../../lx-ipc/src/arena.rs"]
+#[allow(dead_code)]
+mod arena;
+#[path = "../../lx-ipc/src/kstore.rs"]
+#[allow(dead_code)]
+mod kstore;
+// wave9 GX3 end
 
 /// This program's name (log lines of the shared files).
 pub const NAME: &str = "linux-server";

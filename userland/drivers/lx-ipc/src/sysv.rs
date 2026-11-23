@@ -23,7 +23,9 @@ use alloc::vec::Vec;
 use hydra_rt::protocol::LX_REPLY_PENDING;
 use hydra_rt::sys;
 
+use crate::arena::{self, Chain};
 use crate::client::Cx;
+use crate::kstore;
 use crate::lock::YLock;
 use crate::timeout;
 
@@ -914,7 +916,7 @@ fn msgctl(cx: &Cx) -> i64 {
 /// Handles `semget` (64), `semop` (65), `semctl` (66), `semtimedop` (220), `msgget` (68),
 /// `msgsnd` (69), `msgrcv` (70), `msgctl` (71): `(result, reply flags)`.
 pub fn dispatch(cx: &Cx) -> (i64, u64) {
-    match cx.nr {
+    let r = match cx.nr {
         64 => (semget(cx), 0),
         65 => semop(cx, false),
         66 => (semctl(cx), 0),
@@ -924,8 +926,154 @@ pub fn dispatch(cx: &Cx) -> (i64, u64) {
         70 => msgrcv(cx),
         71 => (msgctl(cx), 0),
         _ => (-38, 0),
+    };
+    // wave9 GX3: the tables are written before the answer leaves
+    persist(&IPC.lock());
+    r
+}
+
+// wave9 GX3 begin: System V's tables in kept state (they are small and rarely used: the
+// whole of them is written again after each call, as one record and an arena chain)
+
+/// The kept image of the tables: `(record id, arena chain)`.
+static KEPT: YLock<(u64, Chain)> = YLock::new((0, Chain::new()));
+
+fn perm_rec(w: &mut kstore::W, p: &Perm) {
+    w.u32(p.key as u32).u32(p.uid).u32(p.gid).u32(p.cuid).u32(p.cgid).u32(p.mode).u32(p.seq as u32);
+}
+
+fn perm_parse(r: &mut kstore::R) -> Option<Perm> {
+    Some(Perm { key: r.u32()? as i32, uid: r.u32()?, gid: r.u32()?, cuid: r.u32()?, cgid: r.u32()?, mode: r.u32()?, seq: r.u32()? as u16 })
+}
+
+/// Writes the tables' image (see the block comment).
+fn persist(ipc: &Ipc) {
+    if !kstore::active() {
+        return;
+    }
+    let mut k = KEPT.lock();
+    if k.0 == 0 {
+        if ipc.sem.is_empty() && ipc.msg.is_empty() {
+            return;
+        }
+        k.0 = kstore::id();
+    }
+    let mut w = kstore::W::new(0);
+    w.u32(ipc.next_seq as u32).u32(ipc.sem.len() as u32);
+    for (&id, (ns, s)) in &ipc.sem {
+        w.u32(id as u32).u64(*ns);
+        perm_rec(&mut w, &s.perm);
+        w.u64(s.otime as u64).u64(s.ctime as u64).u32(s.sems.len() as u32);
+        for m in &s.sems {
+            w.u32(m.val as u32).u32(m.pid);
+        }
+    }
+    w.u32(ipc.msg.len() as u32);
+    for (&id, (ns, q)) in &ipc.msg {
+        w.u32(id as u32).u64(*ns);
+        perm_rec(&mut w, &q.perm);
+        w.u64(q.qbytes).u64(q.stime as u64).u64(q.rtime as u64).u64(q.ctime as u64).u32(q.lspid).u32(q.lrpid).u32(q.msgs.len() as u32);
+        for (t, d) in &q.msgs {
+            w.u64(*t as u64).u32(d.len() as u32).raw(d);
+        }
+    }
+    w.u32(ipc.undo.len() as u32);
+    for (&(p, id), v) in &ipc.undo {
+        w.u64(p).u32(id as u32).u32(v.len() as u32);
+        for &a in v {
+            w.u32(a as u32);
+        }
+    }
+    let a = arena::get();
+    let mut c = Chain::new();
+    for part in w.0[1..].chunks(65536) {
+        if !c.push(a, &[], part, 0) {
+            c.clear();
+            c.release(a);
+            return;
+        }
+    }
+    let mut rec = kstore::W::new(kstore::K_SYSV);
+    rec.raw(&c.image());
+    if kstore::put(k.0, &rec.0) {
+        let mut old = core::mem::replace(&mut k.1, c);
+        old.clear();
+        old.release(a);
+    } else {
+        c.clear();
+        c.release(a);
     }
 }
+
+/// A restarted lx-ipc: the tables from record `id` (`rec`). Whether they were taken back.
+#[allow(dead_code)] // (linux-server never restores)
+pub fn restore(id: u64, rec: &[u8]) -> bool {
+    let a = arena::get();
+    let mut r = kstore::R::new(rec);
+    if r.u8() != Some(kstore::K_SYSV) {
+        return false;
+    }
+    let Some(c) = r.raw(arena::IMG).and_then(|img| Chain::restore(a, img)) else { return false };
+    let mut b = Vec::with_capacity(c.bytes);
+    c.copy(a, 0, c.bytes, &mut b);
+    let parsed = (|| {
+        let mut r = kstore::R::new(&b);
+        let mut ipc = Ipc { sem: BTreeMap::new(), msg: BTreeMap::new(), next_seq: r.u32()? as u16, undo: BTreeMap::new() };
+        for _ in 0..r.u32()? {
+            let (id, ns) = (r.u32()? as i32, r.u64()?);
+            let perm = perm_parse(&mut r)?;
+            let (otime, ctime, n) = (r.u64()? as i64, r.u64()? as i64, r.u32()? as u64);
+            if n == 0 || n > SEMMSL {
+                return None;
+            }
+            let mut sems = Vec::with_capacity(n as usize);
+            for _ in 0..n {
+                sems.push(Sem { val: (r.u32()? as i32).clamp(0, SEMVMX), pid: r.u32()?, ncnt: 0, zcnt: 0 });
+            }
+            ipc.sem.insert(id, (ns, SemSet { perm, sems, otime, ctime, waiters: Vec::new() }));
+        }
+        for _ in 0..r.u32()? {
+            let (id, ns) = (r.u32()? as i32, r.u64()?);
+            let perm = perm_parse(&mut r)?;
+            let (qbytes, stime, rtime, ctime, lspid, lrpid, n) = (r.u64()?, r.u64()? as i64, r.u64()? as i64, r.u64()? as i64, r.u32()?, r.u32()?, r.u32()?);
+            let mut msgs = VecDeque::new();
+            let mut bytes = 0;
+            for _ in 0..n {
+                let t = r.u64()? as i64;
+                let len = r.u32()? as usize;
+                msgs.push_back((t, r.raw(len)?.to_vec()));
+                bytes += len as u64;
+            }
+            ipc.msg.insert(id, (ns, MsgQueue { perm, msgs, bytes, qbytes, stime, rtime, ctime, lspid, lrpid, senders: Vec::new(), receivers: Vec::new() }));
+        }
+        for _ in 0..r.u32()? {
+            let (p, id, n) = (r.u64()?, r.u32()? as i32, r.u32()?);
+            let mut v = Vec::new();
+            for _ in 0..n {
+                v.push(r.u32()? as i32);
+            }
+            ipc.undo.insert((p, id), v);
+        }
+        Some(ipc)
+    })();
+    let Some(ipc) = parsed else {
+        let mut c = c;
+        c.clear();
+        c.release(a);
+        return false;
+    };
+    *IPC.lock() = ipc;
+    *KEPT.lock() = (id, c);
+    true
+}
+
+/// System V objects (the restart's log line).
+#[allow(dead_code)]
+pub fn objects() -> usize {
+    let ipc = IPC.lock();
+    ipc.sem.len() + ipc.msg.len()
+}
+// wave9 GX3 end
 
 /// Removes the waiters `keep` refuses from every set and queue, collecting `(id, result)`.
 fn drop_waiters(ipc: &mut Ipc, keep: impl Fn(u64, u64) -> bool, result: i64, done: &mut Done) {
@@ -988,6 +1136,7 @@ pub fn on_exit(tgid: u64) {
                 retry_sem(ipc, k.1, &mut done);
             }
         }
+        persist(ipc);
     }
     finish(done);
 }

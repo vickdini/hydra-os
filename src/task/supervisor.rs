@@ -828,7 +828,10 @@ pub fn supervisor_init() {
         sup.services.push(
             ServiceDescriptor::new("lx_ipc", crate::ipc::protocol::ENDPOINT_LX_IPC, LX_IPC_ELF, lx_ipc_args, no_grants).linux_service(
                 crate::ipc::protocol::LXS_IPC,
-                crate::lx::restart::RestartClass::FailObjects,
+                // wave9 GX3 begin: pipe and socket buffers and the tables are kept objects:
+                // a restart takes them back (a second crash within 30 s: FailObjects)
+                crate::lx::restart::RestartClass::Transparent,
+                // wave9 GX3 end
                 "ipc",
             ),
         );

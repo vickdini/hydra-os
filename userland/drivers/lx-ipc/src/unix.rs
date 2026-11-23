@@ -31,8 +31,10 @@ use alloc::vec::Vec;
 use hydra_rt::protocol::*;
 use hydra_rt::sys;
 
+use crate::arena::{self, Chain};
 use crate::client::Cx;
 use crate::fdio::{kbuf, sigpipe, Iov};
+use crate::kstore;
 use crate::lock::YLock;
 
 const ENOENT: i64 = -2;
@@ -43,6 +45,7 @@ const EINVAL: i64 = -22;
 const ENOTTY: i64 = -25;
 const EPIPE: i64 = -32;
 const EMSGSIZE: i64 = -90;
+const ENOBUFS: i64 = -105;
 const EPROTOTYPE: i64 = -91;
 const ENOPROTOOPT: i64 = -92;
 const EPROTONOSUPPORT: i64 = -93;
@@ -76,6 +79,9 @@ const MSG_CMSG_CLOEXEC: u64 = 0x4000_0000;
 const BUFFER_LIMIT: usize = 212_992;
 /// Most descriptors one message may carry (`SCM_MAX_FD`).
 const MAX_FDS: usize = 253;
+/// wave9 GX3: most messages waiting in one direction (each takes at least one arena unit:
+/// counts like Linux's per-message overhead, so tiny sends cannot fill the arena).
+const QSEGS_MAX: usize = 2048;
 
 const POLLIN: u32 = 0x1;
 const POLLOUT: u32 = 0x4;
@@ -144,10 +150,9 @@ impl Addr {
     }
 }
 
-/// One send: its bytes, the descriptors (kernel tokens) and credentials with them.
+/// One send: the descriptors (kernel tokens) and credentials with its bytes (wave9 GX3:
+/// the bytes are in the queue's arena chain, segment for segment).
 struct Segment {
-    data: Vec<u8>,
-    pos: usize,
     fds: Vec<u64>,
     /// The slots of the Unix sockets among `fds` (for the cycle rule).
     unix_in: Vec<u32>,
@@ -158,7 +163,9 @@ struct Segment {
 #[derive(Default)]
 struct Queue {
     segs: VecDeque<Segment>,
-    bytes: usize,
+    /// wave9 GX3: the bytes, one arena segment per [`Segment`] (with its descriptors and
+    /// credentials as the segment's metadata, for a restarted lx-ipc).
+    chain: Chain,
     /// The writing side shut down or closed: readers see end-of-file once drained.
     write_closed: bool,
     /// The reading side closed: writers get `EPIPE`.
@@ -169,6 +176,105 @@ struct Queue {
 struct Pair {
     q: [Queue; 2],
     socks: [u64; 2],
+}
+
+impl Queue {
+    /// Data bytes of segment `i` not taken yet.
+    fn seg_data(&self, a: &arena::Arena, i: usize) -> &'static [u8] {
+        let d = self.chain.data(a, i);
+        let p = if i == 0 { self.chain.head_pos as usize } else { 0 };
+        // SAFETY: the arena lives for the process ('static); the segment is ours under the
+        // owner's lock while the slice is used
+        unsafe { core::slice::from_raw_parts(d.as_ptr().add(p.min(d.len())), d.len() - p.min(d.len())) }
+    }
+
+    /// Takes `n` bytes from the front: segments emptied go (a segment whose descriptors
+    /// were not taken stays).
+    fn consume(&mut self, n: usize) {
+        let mut left = n.min(self.chain.bytes);
+        while let Some(h) = self.chain.segs.front() {
+            let avail = (h.len - self.chain.head_pos) as usize;
+            if left < avail {
+                self.chain.head_pos += left as u32;
+                self.chain.bytes -= left;
+                return;
+            }
+            if !self.segs.front().is_some_and(|s| s.fds.is_empty()) {
+                // (descriptors not taken: only its bytes go)
+                self.chain.head_pos += avail as u32;
+                self.chain.bytes -= avail;
+                return;
+            }
+            if left == 0 && avail > 0 {
+                return;
+            }
+            left -= avail;
+            self.chain.pop_front();
+            self.segs.pop_front();
+        }
+    }
+
+    /// Takes the head segment out.
+    fn pop(&mut self) -> Option<Segment> {
+        let s = self.segs.pop_front()?;
+        self.chain.pop_front();
+        Some(s)
+    }
+
+    /// Empties the queue: the descriptors still in it.
+    fn drain(&mut self) -> Vec<u64> {
+        let mut fds = Vec::new();
+        for mut s in self.segs.drain(..) {
+            fds.append(&mut s.fds);
+        }
+        self.chain.clear();
+        fds
+    }
+
+    /// wave9 GX3: a segment's metadata: credentials, the descriptors' tokens, the slots of
+    /// the Unix sockets among them.
+    fn meta(seg: &Segment) -> Vec<u8> {
+        let mut m = Vec::with_capacity(16 + seg.fds.len() * 8 + seg.unix_in.len() * 4);
+        m.extend_from_slice(&seg.cred.bytes());
+        m.extend_from_slice(&(seg.fds.len() as u16).to_le_bytes());
+        m.extend_from_slice(&(seg.unix_in.len() as u16).to_le_bytes());
+        for t in &seg.fds {
+            m.extend_from_slice(&t.to_le_bytes());
+        }
+        for s in &seg.unix_in {
+            m.extend_from_slice(&s.to_le_bytes());
+        }
+        m
+    }
+
+    /// The segment a restored metadata describes (`None`: damaged).
+    #[allow(dead_code)] // (linux-server never restores)
+    fn seg_of(m: &[u8]) -> Option<Segment> {
+        let mut r = kstore::R::new(m);
+        let cred = Ucred { pid: r.u32()?, uid: r.u32()?, gid: r.u32()? };
+        let (nf, nu) = (r.u16()? as usize, r.u16()? as usize);
+        if nf > MAX_FDS || nu > nf {
+            return None;
+        }
+        let mut fds = Vec::with_capacity(nf);
+        for _ in 0..nf {
+            fds.push(r.u64()?);
+        }
+        let mut unix_in = Vec::with_capacity(nu);
+        for _ in 0..nu {
+            unix_in.push(r.u32()?);
+        }
+        Some(Segment { fds, unix_in, cred })
+    }
+
+    /// Data bytes waiting.
+    fn bytes(&self) -> usize {
+        self.chain.bytes
+    }
+
+    fn flags(&self) -> u8 {
+        self.write_closed as u8 | (self.read_closed as u8) << 1
+    }
 }
 
 enum State {
@@ -191,7 +297,8 @@ enum RecvKind {
 /// A call waiting on a socket (its call is pending; `c` is the call as the kernel gave it).
 enum Wait {
     Recv { c: LxCall, iov: Iov, kind: RecvKind, flags: u64 },
-    Send { c: LxCall, iov: Iov, total: usize, done: usize, flags: u64, fds: Vec<u64>, unix_in: Vec<u32>, mmsg: Option<u64> },
+    /// (`tokrec`: the record of its descriptors' tokens, 0 none)
+    Send { c: LxCall, iov: Iov, total: usize, done: usize, flags: u64, fds: Vec<u64>, unix_in: Vec<u32>, mmsg: Option<u64>, tokrec: u64 },
     Accept { c: LxCall, addr: u64, len: u64, flags: u64 },
 }
 
@@ -213,6 +320,9 @@ struct Sock {
     slot: Option<u32>,
     ino: u64,
     waits: VecDeque<Wait>,
+    /// wave9 GX3: the listener whose queue it waits in (0: none), and its place there.
+    listener: u64,
+    seq: u64,
 }
 
 struct Unix {
@@ -220,10 +330,11 @@ struct Unix {
     by_slot: BTreeMap<u32, u64>,
     pairs: BTreeMap<u64, Pair>,
     names: BTreeMap<Vec<u8>, u64>,
-    next: u64,
+    /// wave9 GX3: the next place in a listener's queue (restarts keep the order).
+    seq: u64,
 }
 
-static U: YLock<Unix> = YLock::new(Unix { socks: BTreeMap::new(), by_slot: BTreeMap::new(), pairs: BTreeMap::new(), names: BTreeMap::new(), next: 1 });
+static U: YLock<Unix> = YLock::new(Unix { socks: BTreeMap::new(), by_slot: BTreeMap::new(), pairs: BTreeMap::new(), names: BTreeMap::new(), seq: 1 });
 
 /// Work for after the lock: answers, tokens to let go, `SIGPIPE`s.
 #[derive(Default)]
@@ -231,12 +342,17 @@ struct After {
     done: Vec<(u64, i64)>,
     drop: Vec<u64>,
     pipe: Vec<u64>,
+    /// wave9 GX3: token records to clear once the tokens are queued (written) or let go.
+    rel: Vec<u64>,
 }
 
 impl After {
     fn run(self) {
         if !self.drop.is_empty() {
             drop_tokens(&self.drop);
+        }
+        for id in self.rel {
+            kstore::release(id);
         }
         for tgid in self.pipe {
             sigpipe(tgid, 0);
@@ -255,10 +371,67 @@ fn drop_tokens(t: &[u64]) {
 
 impl Unix {
     fn new_sock(&mut self, ty: u32) -> u64 {
-        let sid = self.next;
-        self.next += 1;
-        self.socks.insert(sid, Sock { ty, state: State::Unconnected, local: None, passcred: false, shut_rd: false, slot: None, ino: 0x5000_0000 + sid, waits: VecDeque::new() });
+        let sid = kstore::id();
+        self.socks.insert(sid, Sock { ty, state: State::Unconnected, local: None, passcred: false, shut_rd: false, slot: None, ino: 0x5000_0000 + sid, waits: VecDeque::new(), listener: 0, seq: 0 });
+        self.persist_sock(sid);
         sid
+    }
+
+    /// A new connection between sockets `x` (side 0) and `y` (side 1): its id.
+    fn new_pair(&mut self, x: u64, y: u64) -> u64 {
+        let pid = kstore::id();
+        self.pairs.insert(pid, Pair { q: [Queue::default(), Queue::default()], socks: [x, y] });
+        pid
+    }
+
+    /// wave9 GX3: writes socket `sid`'s record (what it is, its state and names).
+    fn persist_sock(&self, sid: u64) {
+        if !kstore::kept(sid) {
+            return;
+        }
+        let Some(s) = self.socks.get(&sid) else { return };
+        let mut w = kstore::W::new(kstore::K_USOCK);
+        let (st, pair, side, cred, peer) = match &s.state {
+            State::Unconnected => (0u8, 0u64, 0u8, Ucred { pid: 0, uid: 0, gid: 0 }, None),
+            State::Listening { cred, .. } => (1, 0, 0, *cred, None),
+            State::Connected { pair, side, peer_cred, peer_addr } => (2, *pair, *side as u8, *peer_cred, peer_addr.as_ref()),
+        };
+        w.u8(s.ty as u8).u8(st).u8(s.passcred as u8 | (s.shut_rd as u8) << 1).u64(s.ino).u64(pair).u8(side).u64(s.listener).u64(s.seq).raw(&cred.bytes());
+        addr_rec(&mut w, s.local.as_ref());
+        addr_rec(&mut w, peer);
+        kstore::put_logged(sid, &w.0);
+    }
+
+    /// wave9 GX3: writes connection `pid`'s record (its two queues: where their bytes are in
+    /// the arena), then lets go of the arena space its changes freed.
+    fn persist_pair(&mut self, pid: u64) {
+        let Some(p) = self.pairs.get_mut(&pid) else { return };
+        if kstore::kept(pid) {
+            let mut w = kstore::W::new(kstore::K_UPAIR);
+            w.u64(p.socks[0]).u64(p.socks[1]);
+            for q in &p.q {
+                w.u8(q.flags()).raw(&q.chain.image());
+            }
+            if !kstore::put_logged(pid, &w.0) {
+                // (the old record still names the space freed: it stays taken)
+                return;
+            }
+        }
+        let a = arena::get();
+        p.q[0].chain.release(a);
+        p.q[1].chain.release(a);
+    }
+
+    /// Connection `pid` is gone: its queues' descriptors (to let go), bytes and record.
+    fn dispose_pair(&mut self, pid: u64) -> Vec<u64> {
+        let Some(mut p) = self.pairs.remove(&pid) else { return Vec::new() };
+        let mut fds = p.q[0].drain();
+        fds.append(&mut p.q[1].drain());
+        let a = arena::get();
+        p.q[0].chain.release(a);
+        p.q[1].chain.release(a);
+        kstore::release(pid);
+        fds
     }
 
     fn pair_of(&self, sid: u64) -> Option<(u64, usize)> {
@@ -282,7 +455,7 @@ impl Unix {
             State::Connected { pair, side, .. } => {
                 let p = &self.pairs[pair];
                 let (readable, eof) = (!p.q[*side].segs.is_empty(), p.q[*side].write_closed);
-                let (room, peer_gone) = (p.q[1 - side].bytes < BUFFER_LIMIT, p.q[1 - side].read_closed);
+                let (room, peer_gone) = (p.q[1 - side].bytes() < BUFFER_LIMIT && p.q[1 - side].segs.len() < QSEGS_MAX, p.q[1 - side].read_closed);
                 let mut ev = 0;
                 if readable || eof || s.shut_rd {
                     ev |= POLLIN;
@@ -304,7 +477,7 @@ impl Unix {
 
     fn publish(&self, sid: u64, event: bool) {
         if let Some(slot) = self.socks.get(&sid).and_then(|s| s.slot) {
-            let size = self.pair_of(sid).map_or(0, |(p, side)| self.pairs[&p].q[side].bytes);
+            let size = self.pair_of(sid).map_or(0, |(p, side)| self.pairs[&p].q[side].bytes());
             crate::obj::set_ready_ev(slot, self.events(sid), size as u64, event);
         }
     }
@@ -336,22 +509,23 @@ struct Got {
 /// Stream read: as many bytes as fit, never past a segment carrying descriptors once data
 /// has been taken, and never beyond the first segment that carries some.
 fn take_stream(q: &mut Queue, max: usize, peek: bool) -> Got {
+    let a = arena::get();
     let mut data = Vec::new();
     let mut fds = Vec::new();
     let cred = q.segs.front().map(|s| s.cred);
     let mut i = 0;
     while data.len() < max && i < q.segs.len() {
-        let seg = &mut q.segs[i];
-        if !data.is_empty() && !seg.fds.is_empty() {
+        if !data.is_empty() && !q.segs[i].fds.is_empty() {
             break;
         }
-        let take = (seg.data.len() - seg.pos).min(max - data.len());
-        data.extend_from_slice(&seg.data[seg.pos..seg.pos + take]);
+        let d = q.seg_data(a, i);
+        let take = d.len().min(max - data.len());
+        data.extend_from_slice(&d[..take]);
+        let seg = &mut q.segs[i];
         let had_fds = !seg.fds.is_empty();
         if !peek {
             fds.append(&mut seg.fds);
             seg.unix_in.clear();
-            seg.pos += take;
         }
         i += 1;
         if had_fds {
@@ -359,26 +533,22 @@ fn take_stream(q: &mut Queue, max: usize, peek: bool) -> Got {
         }
     }
     if !peek {
-        q.bytes -= data.len();
-        while q.segs.front().is_some_and(|s| s.pos >= s.data.len()) {
-            q.segs.pop_front();
-        }
+        q.consume(data.len());
     }
     Got { data, fds, cred, truncated: false }
 }
 
 /// Record read: one whole message (the rest of it is discarded if the buffer is short).
 fn take_record(q: &mut Queue, max: usize, peek: bool) -> Got {
-    let seg = q.segs.front().unwrap();
-    let n = seg.data.len().min(max);
-    let data = seg.data[..n].to_vec();
-    let truncated = seg.data.len() > n;
-    let cred = Some(seg.cred);
+    let d = q.seg_data(arena::get(), 0);
+    let n = d.len().min(max);
+    let data = d[..n].to_vec();
+    let truncated = d.len() > n;
+    let cred = Some(q.segs.front().unwrap().cred);
     if peek {
         return Got { data, fds: Vec::new(), cred, truncated };
     }
-    let seg = q.segs.pop_front().unwrap();
-    q.bytes -= seg.data.len();
+    let seg = q.pop().unwrap();
     Got { data, fds: seg.fds, cred, truncated }
 }
 
@@ -582,17 +752,23 @@ fn put(u: &mut Unix, sid: u64, data: &[u8], fds: &mut Vec<u64>, unix_in: &mut Ve
         return Err(EPIPE);
     }
     let record = ty != SOCK_STREAM;
-    let room = BUFFER_LIMIT.saturating_sub(q.bytes);
+    let room = BUFFER_LIMIT.saturating_sub(q.bytes());
     let fits = if record { room >= data.len() || q.segs.is_empty() } else { room > 0 || data.is_empty() };
-    if !fits {
+    if !fits || q.segs.len() >= QSEGS_MAX {
         return Ok(0);
     }
     let n = if record { data.len() } else { room.min(data.len()) };
     if n == 0 && fds.is_empty() && !record {
         return Ok(0);
     }
-    q.segs.push_back(Segment { data: data[..n].to_vec(), pos: 0, fds: core::mem::take(fds), unix_in: core::mem::take(unix_in), cred });
-    q.bytes += n;
+    let seg = Segment { fds: core::mem::take(fds), unix_in: core::mem::take(unix_in), cred };
+    // wave9 GX3: the bytes and the segment's metadata into the arena
+    if !q.chain.push(arena::get(), &Queue::meta(&seg), &data[..n], 0) {
+        *fds = seg.fds;
+        *unix_in = seg.unix_in;
+        return Err(ENOBUFS);
+    }
+    q.segs.push_back(seg);
     Ok(n)
 }
 
@@ -600,6 +776,7 @@ fn put(u: &mut Unix, sid: u64, data: &[u8], fds: &mut Vec<u64>, unix_in: &mut Ve
 /// waiting senders on its peer put what fits, until nothing moves.
 fn settle(u: &mut Unix, sid: u64, after: &mut After) {
     let Some((pair, side)) = u.pair_of(sid) else { return };
+    let mut pend = kstore::Pend::new();
     let socks = u.pairs[&pair].socks;
     for _ in 0..64 {
         let mut moved = false;
@@ -619,12 +796,22 @@ fn settle(u: &mut Unix, sid: u64, after: &mut After) {
                     let passcred = u.socks[&rsid].passcred;
                     let res = match r {
                         Ok(Some(g)) => {
+                            if !g.fds.is_empty() && !peek {
+                                // wave9 GX3: the removal is written before the descriptors
+                                // are installed (and earlier answers with it)
+                                u.persist_pair(pair);
+                                kstore::flush(&mut pend);
+                            }
                             let cx = Cx::from_call(&c, core::ptr::null_mut());
                             deliver(&cx, &iov, kind, flags, passcred, g, after)
                         }
                         Err(e) => e,
                         Ok(None) => unreachable!(),
                     };
+                    if res > 0 && !peek {
+                        // wave9 GX3: its answer if lx-ipc dies before it is given
+                        pend.push((c.id, res));
+                    }
                     after.done.push((c.id, res));
                     moved = true;
                     if peek {
@@ -637,7 +824,7 @@ fn settle(u: &mut Unix, sid: u64, after: &mut After) {
         let wsid = socks[1 - side];
         loop {
             let Some(pos) = u.socks.get(&wsid).and_then(|s| s.waits.iter().position(|w| matches!(w, Wait::Send { .. }))) else { break };
-            let Some(Wait::Send { c, iov, total, mut done, flags, mut fds, mut unix_in, mmsg }) = u.socks.get_mut(&wsid).unwrap().waits.remove(pos) else { unreachable!() };
+            let Some(Wait::Send { c, iov, total, mut done, flags, mut fds, mut unix_in, mmsg, tokrec }) = u.socks.get_mut(&wsid).unwrap().waits.remove(pos) else { unreachable!() };
             let ty = u.socks[&wsid].ty;
             let want = if ty == SOCK_STREAM { (total - done).min(BUFFER_LIMIT) } else { total };
             let data = match iov.gather_later(c.id, done, want) {
@@ -651,7 +838,7 @@ fn settle(u: &mut Unix, sid: u64, after: &mut After) {
             match put(u, wsid, &data, &mut fds, &mut unix_in, Ucred::of(&c)) {
                 Ok(0) if !(data.is_empty() && total == 0) => {
                     // Still no room: back in its place
-                    u.socks.get_mut(&wsid).unwrap().waits.insert(pos, Wait::Send { c, iov, total, done, flags, fds, unix_in, mmsg });
+                    u.socks.get_mut(&wsid).unwrap().waits.insert(pos, Wait::Send { c, iov, total, done, flags, fds, unix_in, mmsg, tokrec });
                     break;
                 }
                 Ok(n) => {
@@ -659,9 +846,14 @@ fn settle(u: &mut Unix, sid: u64, after: &mut After) {
                     moved = true;
                     if done >= total || ty != SOCK_STREAM {
                         let r = finish_send(&c, done as i64, mmsg);
+                        pend.push((c.id, r));
+                        after.rel.push(tokrec);
                         after.done.push((c.id, r));
                     } else {
-                        u.socks.get_mut(&wsid).unwrap().waits.insert(pos, Wait::Send { c, iov, total, done, flags, fds, unix_in, mmsg });
+                        if mmsg.is_none() {
+                            pend.push((c.id, done as i64));
+                        }
+                        u.socks.get_mut(&wsid).unwrap().waits.insert(pos, Wait::Send { c, iov, total, done, flags, fds, unix_in, mmsg, tokrec });
                     }
                 }
                 Err(e) => {
@@ -677,6 +869,9 @@ fn settle(u: &mut Unix, sid: u64, after: &mut After) {
             break;
         }
     }
+    // wave9 GX3: the queues' change is written, then the waiting calls' answers
+    u.persist_pair(pair);
+    kstore::flush(&mut pend);
     u.publish(socks[0], true);
     u.publish(socks[1], true);
 }
@@ -700,9 +895,18 @@ fn recv(cx: &Cx, sid: u64, iov: Iov, kind: RecvKind, flags: u64) -> (i64, u64) {
             Err(e) => (e, 0),
             Ok(Some(g)) => {
                 let passcred = u.socks[&sid].passcred;
+                if !g.fds.is_empty() && !peek {
+                    // wave9 GX3: descriptors installed cannot be installed again: the
+                    // message's removal is written first (a crash then loses it: EIO)
+                    kstore::partial(cx.page(), cx.id, 0);
+                    if let Some((pair, _)) = u.pair_of(sid) {
+                        u.persist_pair(pair);
+                    }
+                }
                 let r = deliver(cx, &iov, kind, flags, passcred, g, &mut after);
                 if !peek {
                     settle(&mut u, sid, &mut after);
+                    kstore::partial(cx.page(), cx.id, r);
                 }
                 (r, 0)
             }
@@ -727,10 +931,16 @@ fn send(cx: &Cx, sid: u64, iov: Iov, control: (u64, u64), flags: u64, mmsg: Opti
     if ty != SOCK_STREAM && total > BUFFER_LIMIT {
         return (EMSGSIZE, 0);
     }
+    if control.0 != 0 && control.1 >= 16 {
+        // wave9 GX3: descriptors taken cannot be taken again
+        kstore::partial(cx.page(), cx.id, 0);
+    }
     let (mut fds, socks) = match parse_control(cx, control.0, control.1) {
         Ok(f) => f,
         Err(e) => return (e, 0),
     };
+    // wave9 GX3: the tokens taken are written down until they are queued or let go
+    let tokrec = token_record(&fds);
     let mut after = After::default();
     let r = 'r: {
         let mut u = U.lock();
@@ -771,9 +981,11 @@ fn send(cx: &Cx, sid: u64, iov: Iov, control: (u64, u64), flags: u64, mmsg: Opti
             }
             Ok(n) => {
                 if n > 0 || (total == 0 && ty != SOCK_STREAM) {
+                    // wave9 GX3: what went in is its answer if lx-ipc dies now
                     let (pair, side) = u.pair_of(sid).unwrap();
                     let peer = u.pairs[&pair].socks[1 - side];
                     settle(&mut u, peer, &mut after);
+                    kstore::partial(cx.page(), cx.id, if mmsg.is_none() { n as i64 } else { 0 });
                 }
                 if n >= total && (n > 0 || fds.is_empty()) {
                     (finish_now(cx, n as i64, mmsg), 0)
@@ -781,14 +993,38 @@ fn send(cx: &Cx, sid: u64, iov: Iov, control: (u64, u64), flags: u64, mmsg: Opti
                     after.drop.append(&mut fds);
                     (if n > 0 { finish_now(cx, n as i64, mmsg) } else { EAGAIN }, 0)
                 } else {
-                    u.socks.get_mut(&sid).unwrap().waits.push_back(Wait::Send { c: cx.c, iov, total, done: n, flags, fds, unix_in, mmsg });
+                    if n > 0 && mmsg.is_none() {
+                        kstore::partial(core::ptr::null_mut(), cx.id, n as i64);
+                    }
+                    u.socks.get_mut(&sid).unwrap().waits.push_back(Wait::Send { c: cx.c, iov, total, done: n, flags, fds, unix_in, mmsg, tokrec });
                     (0, LX_REPLY_PENDING)
                 }
             }
         }
     };
+    if r.1 & LX_REPLY_PENDING == 0 {
+        after.rel.push(tokrec);
+    }
     after.run();
     r
+}
+
+/// wave9 GX3: a record of tokens taken for a send (0: none, or too many to record).
+fn token_record(fds: &[u64]) -> u64 {
+    if fds.is_empty() || fds.len() > kstore::TOKENS_MAX || !kstore::active() {
+        return 0;
+    }
+    let id = kstore::id();
+    let mut w = kstore::W::new(kstore::K_TOKENS);
+    w.u8(fds.len() as u8);
+    for &t in fds {
+        w.u64(t);
+    }
+    if !kstore::put_logged(id, &w.0) {
+        kstore::release(id);
+        return 0;
+    }
+    id
 }
 
 fn finish_now(cx: &Cx, n: i64, mmsg: Option<u64>) -> i64 {
@@ -819,7 +1055,7 @@ fn install(u: &mut Unix, cx: &Cx, sid: u64, flags: u64) -> Result<i64, i64> {
     u.publish(sid, false);
     let name = alloc::format!("socket:[{}]", ino);
     let f = (flags & (SOCK_NONBLOCK | SOCK_CLOEXEC)) as u32;
-    match crate::obj::install_tag(cx, slot, LX_OBJ_KIND_UNIX, f, 0o140777, cx.c.euid, cx.c.egid, name.as_bytes(), ino) {
+    match crate::obj::install_keyed(cx, slot, LX_OBJ_KIND_UNIX, f, 0o140777, cx.c.euid, cx.c.egid, name.as_bytes(), ino, kstore::key(sid)) {
         Ok(fd) => Ok(fd),
         Err(e) => {
             u.by_slot.remove(&slot);
@@ -858,23 +1094,27 @@ pub fn create(cx: &Cx) -> (i64, u64) {
             Ok(fd) => (fd, 0),
             Err(e) => {
                 u.socks.remove(&sid);
+                kstore::release(sid);
                 (e, 0)
             }
         };
     }
     let me = Ucred::of(&cx.c);
     let (x, y) = (u.new_sock(ty), u.new_sock(ty));
-    let pid = u.next;
-    u.next += 1;
-    u.pairs.insert(pid, Pair { q: [Queue::default(), Queue::default()], socks: [x, y] });
+    let pid = u.new_pair(x, y);
     u.socks.get_mut(&x).unwrap().state = State::Connected { pair: pid, side: 0, peer_cred: me, peer_addr: None };
     u.socks.get_mut(&y).unwrap().state = State::Connected { pair: pid, side: 1, peer_cred: me, peer_addr: None };
+    u.persist_pair(pid);
+    u.persist_sock(x);
+    u.persist_sock(y);
     let fx = match install(&mut u, cx, x, a[1]) {
         Ok(fd) => fd,
         Err(e) => {
             u.socks.remove(&x);
             u.socks.remove(&y);
-            u.pairs.remove(&pid);
+            u.dispose_pair(pid);
+            kstore::release(x);
+            kstore::release(y);
             return (e, 0);
         }
     };
@@ -1037,6 +1277,7 @@ fn bind_addr(sid: u64, addr: Addr) -> i64 {
     }
     u.names.insert(key, sid);
     u.socks.get_mut(&sid).unwrap().local = Some(addr);
+    u.persist_sock(sid);
     0
 }
 
@@ -1054,6 +1295,7 @@ fn listen(cx: &Cx, sid: u64) -> i64 {
             }
             s.state = State::Listening { pending: VecDeque::new(), cred: Ucred::of(&cx.c) };
             u.publish(sid, false);
+            u.persist_sock(sid);
             0
         }
         State::Connected { .. } => EINVAL,
@@ -1091,19 +1333,25 @@ fn connect_addr(cx: &Cx, sid: u64, addr: Addr) -> i64 {
         let l_local = l.local.clone();
         let me = Ucred::of(&cx.c);
         let server = u.new_sock(ty);
-        let pid = u.next;
-        u.next += 1;
-        u.pairs.insert(pid, Pair { q: [Queue::default(), Queue::default()], socks: [sid, server] });
+        let pid = u.new_pair(sid, server);
         let my_local = u.socks[&sid].local.clone();
+        let seq = u.seq;
+        u.seq += 1;
         {
             let s = u.socks.get_mut(&server).unwrap();
             s.local = l_local.clone();
             s.state = State::Connected { pair: pid, side: 1, peer_cred: me, peer_addr: my_local };
+            s.listener = lsid;
+            s.seq = seq;
         }
         u.socks.get_mut(&sid).unwrap().state = State::Connected { pair: pid, side: 0, peer_cred: listen_cred, peer_addr: l_local };
         if let State::Listening { pending, .. } = &mut u.socks.get_mut(&lsid).unwrap().state {
             pending.push_back(server);
         }
+        // wave9 GX3: the connection, then the sockets that name it
+        u.persist_pair(pid);
+        u.persist_sock(server);
+        u.persist_sock(sid);
         u.publish(sid, false);
         u.publish(lsid, true);
         accept_waiting(&mut u, lsid, &mut after);
@@ -1125,6 +1373,9 @@ fn take_conn(u: &mut Unix, cx: &Cx, lsid: u64, addr: u64, len: u64, flags: u64) 
     };
     let r = match install(u, cx, conn, flags) {
         Ok(fd) => {
+            // wave9 GX3: out of the listener's queue
+            u.socks.get_mut(&conn).unwrap().listener = 0;
+            u.persist_sock(conn);
             let _ = put_sockaddr(cx, addr, len, &Addr::sockaddr(peer.as_ref()));
             fd
         }
@@ -1236,7 +1487,11 @@ fn sockopt_set(cx: &Cx, sid: u64) -> i64 {
             return EINVAL;
         }
         match cx.copy_in(val, 4) {
-            Ok(v) => U.lock().socks.get_mut(&sid).unwrap().passcred = u32::from_le_bytes(v[..4].try_into().unwrap()) != 0,
+            Ok(v) => {
+                let mut u = U.lock();
+                u.socks.get_mut(&sid).unwrap().passcred = u32::from_le_bytes(v[..4].try_into().unwrap()) != 0;
+                u.persist_sock(sid);
+            }
             Err(e) => return e,
         }
     }
@@ -1253,6 +1508,7 @@ fn shutdown(sid: u64, how: u64) -> i64 {
         let Some((pair, side)) = u.pair_of(sid) else { return ENOTCONN };
         if how != 1 {
             u.socks.get_mut(&sid).unwrap().shut_rd = true;
+            u.persist_sock(sid);
         }
         if how != 0 {
             u.pairs.get_mut(&pair).unwrap().q[1 - side].write_closed = true;
@@ -1274,6 +1530,11 @@ pub fn call(cx: &Cx) -> (i64, u64) {
         Err(e) => return (e, 0),
     };
     let a = cx.args;
+    // wave9 GX3: the receive and send calls are safe to send again until their change is
+    // written
+    if matches!(cx.nr, 0 | 1 | 19 | 20 | 44 | 45 | 46 | 47 | 299 | 307) {
+        kstore::resend_safe(cx.page(), cx.id, true);
+    }
     match cx.nr {
         0 | 19 => match Iov::of_call(cx) {
             Ok(iov) => recv(cx, sid, iov, RecvKind::Read, 0),
@@ -1389,13 +1650,13 @@ fn ioctl(cx: &Cx, sid: u64) -> i64 {
             0x541B => u.pair_of(sid).map_or(0, |(p, side)| {
                 let q = &u.pairs[&p].q[side];
                 if s.ty == SOCK_STREAM {
-                    q.bytes
+                    q.bytes()
                 } else {
-                    q.segs.front().map_or(0, |s| s.data.len())
+                    q.chain.segs.front().map_or(0, |s| s.len as usize)
                 }
             }),
             // SIOCOUTQ: bytes the peer has not read yet
-            0x5411 => u.pair_of(sid).map_or(0, |(p, side)| u.pairs[&p].q[1 - side].bytes),
+            0x5411 => u.pair_of(sid).map_or(0, |(p, side)| u.pairs[&p].q[1 - side].bytes()),
             r if r & 0xFF00 == 0x5400 => return ENOTTY,
             _ => return EINVAL,
         }
@@ -1413,30 +1674,29 @@ fn ioctl(cx: &Cx, sid: u64) -> i64 {
 /// Socket `sid` goes away (its last descriptor closed, or it was never received).
 fn close_sock(u: &mut Unix, sid: u64, after: &mut After) {
     let Some(s) = u.socks.remove(&sid) else { return };
+    kstore::release(sid);
     if let Some(slot) = s.slot {
         u.by_slot.remove(&slot);
     }
     for w in s.waits {
         // (a descriptor's last close while its call waits cannot happen: the kernel holds
         // the descriptor during the call; these are calls of a process that ended)
-        if let Wait::Send { mut fds, .. } = w {
+        if let Wait::Send { mut fds, tokrec, .. } = w {
             after.drop.append(&mut fds);
+            after.rel.push(tokrec);
         }
     }
     match s.state {
         State::Connected { pair, side, .. } => {
-            let gone = {
+            let mut gone = {
                 let p = u.pairs.get_mut(&pair).unwrap();
                 let mine = &mut p.q[side];
                 mine.read_closed = true;
-                mine.bytes = 0;
-                let segs = core::mem::take(&mut mine.segs);
+                let fds = mine.drain();
                 p.q[1 - side].write_closed = true;
-                segs
+                fds
             };
-            for mut seg in gone {
-                after.drop.append(&mut seg.fds);
-            }
+            after.drop.append(&mut gone);
             let other = u.pairs[&pair].socks[1 - side];
             if u.socks.contains_key(&other) {
                 // The peer's waiting receivers see end of file, its senders EPIPE
@@ -1444,7 +1704,8 @@ fn close_sock(u: &mut Unix, sid: u64, after: &mut After) {
                 fail_senders(u, other, after);
                 u.publish(other, true);
             } else {
-                u.pairs.remove(&pair);
+                let mut fds = u.dispose_pair(pair);
+                after.drop.append(&mut fds);
             }
         }
         State::Listening { pending, .. } => {
@@ -1469,8 +1730,9 @@ fn fail_senders(u: &mut Unix, sid: u64, after: &mut After) {
     let mut keep = VecDeque::new();
     for w in s.waits.drain(..) {
         match w {
-            Wait::Send { c, done, flags, mut fds, mmsg, .. } => {
+            Wait::Send { c, done, flags, mut fds, mmsg, tokrec, .. } => {
                 after.drop.append(&mut fds);
+                after.rel.push(tokrec);
                 if done > 0 {
                     after.done.push((c.id, finish_send(&c, done as i64, mmsg)));
                 } else {
@@ -1507,8 +1769,9 @@ pub fn interrupted(id: u64) -> bool {
         for s in u.socks.values_mut() {
             if let Some(pos) = s.waits.iter().position(|w| w.call().id == id) {
                 found = Some(match s.waits.remove(pos).unwrap() {
-                    Wait::Send { done, mut fds, c, mmsg, .. } => {
+                    Wait::Send { done, mut fds, c, mmsg, tokrec, .. } => {
                         after.drop.append(&mut fds);
+                        after.rel.push(tokrec);
                         if done > 0 {
                             finish_send(&c, done as i64, mmsg)
                         } else {
@@ -1541,8 +1804,9 @@ pub fn on_exit(tgid: u64) {
             let mut keep = VecDeque::new();
             for w in s.waits.drain(..) {
                 if w.call().tgid == tgid {
-                    if let Wait::Send { mut fds, .. } = w {
+                    if let Wait::Send { mut fds, tokrec, .. } = w {
                         after.drop.append(&mut fds);
+                        after.rel.push(tokrec);
                     }
                 } else {
                     keep.push_back(w);
@@ -1656,10 +1920,9 @@ pub fn gc() {
             let Some(&sid) = u.by_slot.get(s) else { continue };
             for (pair, side) in queues_of(&u, sid) {
                 let q = &mut u.pairs.get_mut(&pair).unwrap().q[side];
-                q.bytes = 0;
-                for mut seg in core::mem::take(&mut q.segs) {
-                    after.drop.append(&mut seg.fds);
-                }
+                let mut fds = q.drain();
+                after.drop.append(&mut fds);
+                u.persist_pair(pair);
             }
         }
     }
@@ -1673,3 +1936,259 @@ pub fn gc_tick() {
         gc();
     }
 }
+
+// ----------------------------------------------------------------------
+// wave9 GX3 begin: kept records, and a Transparent restart taking the sockets back
+// ----------------------------------------------------------------------
+
+/// A socket name in a record: 0 none, 1 path (node, shown name), 2 abstract.
+fn addr_rec(w: &mut kstore::W, a: Option<&Addr>) {
+    match a {
+        None => {
+            w.u8(0);
+        }
+        Some(Addr::Path { shown, ino }) => {
+            w.u8(1).u64(*ino).bytes(shown);
+        }
+        Some(Addr::Abstract(n)) => {
+            w.u8(2).bytes(n);
+        }
+    }
+}
+
+#[allow(dead_code)] // (linux-server never restores)
+fn addr_parse(r: &mut kstore::R) -> Option<Option<Addr>> {
+    Some(match r.u8()? {
+        0 => None,
+        1 => {
+            let ino = r.u64()?;
+            Some(Addr::Path { ino, shown: r.bytes()?.to_vec() })
+        }
+        2 => Some(Addr::Abstract(r.bytes()?.to_vec())),
+        _ => return None,
+    })
+}
+
+/// What a socket's record says.
+#[allow(dead_code)] // (linux-server never restores)
+struct SockRec {
+    ty: u32,
+    st: u8,
+    passcred: bool,
+    shut_rd: bool,
+    ino: u64,
+    pair: u64,
+    side: usize,
+    listener: u64,
+    seq: u64,
+    cred: Ucred,
+    local: Option<Addr>,
+    peer: Option<Addr>,
+}
+
+#[allow(dead_code)] // (linux-server never restores)
+fn parse_sock(d: &[u8]) -> Option<SockRec> {
+    let mut r = kstore::R::new(d);
+    if r.u8()? != kstore::K_USOCK {
+        return None;
+    }
+    let ty = r.u8()? as u32;
+    let st = r.u8()?;
+    let fl = r.u8()?;
+    let (ino, pair, side, listener, seq) = (r.u64()?, r.u64()?, r.u8()? as usize, r.u64()?, r.u64()?);
+    let cred = Ucred { pid: r.u32()?, uid: r.u32()?, gid: r.u32()? };
+    let local = addr_parse(&mut r)?;
+    let peer = addr_parse(&mut r)?;
+    if !matches!(ty, SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET) || st > 2 || side > 1 {
+        return None;
+    }
+    Some(SockRec { ty, st, passcred: fl & 1 != 0, shut_rd: fl & 2 != 0, ino, pair, side, listener, seq, cred, local, peer })
+}
+
+/// A connection's record: its sockets and its two queues (chains restored in the arena,
+/// segments' metadata read back), `None` if any part fails its checks (nothing kept).
+#[allow(dead_code)] // (linux-server never restores)
+fn parse_pair(d: &[u8], drop: &mut Vec<u64>) -> Option<Pair> {
+    let a = arena::get();
+    let mut r = kstore::R::new(d);
+    if r.u8()? != kstore::K_UPAIR {
+        return None;
+    }
+    let socks = [r.u64()?, r.u64()?];
+    let mut q: [Queue; 2] = [Queue::default(), Queue::default()];
+    let mut ok = true;
+    for qi in q.iter_mut() {
+        let (Some(fl), Some(img)) = (r.u8(), r.raw(arena::IMG)) else {
+            ok = false;
+            break;
+        };
+        qi.write_closed = fl & 1 != 0;
+        qi.read_closed = fl & 2 != 0;
+        let Some(chain) = Chain::restore(a, img) else {
+            ok = false;
+            break;
+        };
+        qi.chain = chain;
+        for i in 0..qi.chain.segs.len() {
+            match Queue::seg_of(qi.chain.meta(a, i)) {
+                Some(mut s) => {
+                    // (the head's descriptors went with its first bytes taken)
+                    if i == 0 && qi.chain.head_pos > 0 {
+                        s.fds.clear();
+                        s.unix_in.clear();
+                    }
+                    qi.segs.push_back(s)
+                }
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            break;
+        }
+    }
+    if !ok {
+        for qi in q.iter_mut() {
+            for s in qi.segs.iter_mut() {
+                drop.append(&mut s.fds);
+            }
+            qi.segs.clear();
+            qi.chain.clear();
+            qi.chain.release(a);
+        }
+        return None;
+    }
+    Some(Pair { q, socks })
+}
+
+/// A restarted lx-ipc: the Unix sockets and connections from their records (`(id, data)`),
+/// and the kernel's live socket objects `(slot, key)`. Returns the ids that live on and the
+/// slots that could not be taken back (they go dead). Sockets whose last descriptor went
+/// while lx-ipc was away are closed now (their peers see end of file); nobody waits yet:
+/// waiting calls are sent again by the kernel.
+#[allow(dead_code)] // (linux-server never restores)
+pub fn restore(socks: &[(u64, &[u8])], pairs: &[(u64, &[u8])], objs: &[(u32, u64)], tokens: &[(u64, &[u8])]) -> (Vec<u64>, Vec<u32>) {
+    let mut dead = Vec::new();
+    let mut after = After::default();
+    let live = {
+        let mut u = U.lock();
+        let mut recs: BTreeMap<u64, SockRec> = socks.iter().filter_map(|&(id, d)| parse_sock(d).map(|s| (id, s))).collect();
+        // Connections: each socket that names one must be named back at its side
+        for &(pid, d) in pairs {
+            let Some(mut p) = parse_pair(d, &mut after.drop) else { continue };
+            let named = (0..2).any(|s| recs.get(&p.socks[s]).is_some_and(|r| r.st == 2 && r.pair == pid && r.side == s));
+            if named {
+                u.pairs.insert(pid, p);
+            } else {
+                for q in p.q.iter_mut() {
+                    after.drop.append(&mut q.drain());
+                    q.chain.release(arena::get());
+                }
+            }
+        }
+        // Sockets (a connected one without its connection fails)
+        let mut max_seq = 0;
+        for (&sid, r) in recs.iter_mut() {
+            let state = match r.st {
+                0 => State::Unconnected,
+                1 => State::Listening { pending: VecDeque::new(), cred: r.cred },
+                _ => {
+                    if !u.pairs.get(&r.pair).is_some_and(|p| p.socks[r.side] == sid) {
+                        continue;
+                    }
+                    State::Connected { pair: r.pair, side: r.side, peer_cred: r.cred, peer_addr: r.peer.take() }
+                }
+            };
+            max_seq = max_seq.max(r.seq);
+            u.socks.insert(sid, Sock { ty: r.ty, state, local: r.local.take(), passcred: r.passcred, shut_rd: r.shut_rd, slot: None, ino: r.ino, waits: VecDeque::new(), listener: r.listener, seq: r.seq });
+        }
+        u.seq = max_seq + 1;
+        for &(slot, sid) in objs {
+            let ok = u.socks.get(&sid).is_some_and(|s| s.slot.is_none()) && crate::obj::reserve(slot, LX_OBJ_KIND_UNIX);
+            if !ok {
+                dead.push(slot);
+                continue;
+            }
+            u.socks.get_mut(&sid).unwrap().slot = Some(slot);
+            u.by_slot.insert(slot, sid);
+        }
+        // Connections waiting in listeners (in their order); a socket with a slot was
+        // accepted already
+        let mut waiting: Vec<(u64, u64, u64)> = Vec::new();
+        for (&sid, s) in u.socks.iter() {
+            if s.listener != 0 && s.slot.is_none() {
+                waiting.push((s.listener, s.seq, sid));
+            }
+        }
+        waiting.sort();
+        let mut gone: Vec<u64> = Vec::new();
+        for (l, _, sid) in waiting {
+            match u.socks.get_mut(&l).map(|ls| &mut ls.state) {
+                Some(State::Listening { pending, .. }) => pending.push_back(sid),
+                _ => gone.push(sid),
+            }
+        }
+        let accepted: Vec<u64> = u.socks.iter().filter(|(_, s)| s.listener != 0 && s.slot.is_some()).map(|(&k, _)| k).collect();
+        for sid in accepted {
+            u.socks.get_mut(&sid).unwrap().listener = 0;
+            u.persist_sock(sid);
+        }
+        // Names
+        let named: Vec<(Vec<u8>, u64, bool)> = u.socks.iter().filter_map(|(&sid, s)| s.local.as_ref().map(|a| (a.key(), sid, matches!(s.state, State::Listening { .. })))).collect();
+        for (k, sid, listening) in named {
+            if listening || !u.names.contains_key(&k) {
+                u.names.insert(k, sid);
+            }
+        }
+        // Sockets closed while lx-ipc was away (no slot, not waiting in a listener)
+        for (&sid, s) in u.socks.iter() {
+            if s.slot.is_none() && s.listener == 0 {
+                gone.push(sid);
+            }
+        }
+        for sid in gone {
+            close_sock(&mut u, sid, &mut after);
+        }
+        // Connections no socket names any more
+        let orphans: Vec<u64> = u.pairs.iter().filter(|(_, p)| !p.socks.iter().any(|s| u.socks.contains_key(s))).map(|(&k, _)| k).collect();
+        for pid in orphans {
+            let mut fds = u.dispose_pair(pid);
+            after.drop.append(&mut fds);
+        }
+        // Tokens a send took but had not queued when lx-ipc died: let go (those a queue
+        // names were queued after all)
+        let queued: alloc::collections::BTreeSet<u64> = u.pairs.values().flat_map(|p| p.q.iter()).flat_map(|q| q.segs.iter()).flat_map(|s| s.fds.iter().copied()).collect();
+        for &(_, d) in tokens {
+            let mut r = kstore::R::new(d);
+            if r.u8() != Some(kstore::K_TOKENS) {
+                continue;
+            }
+            let n = r.u8().unwrap_or(0) as usize;
+            for _ in 0..n {
+                match r.u64() {
+                    Some(t) if !queued.contains(&t) => after.drop.push(t),
+                    _ => {}
+                }
+            }
+        }
+        let ids: Vec<u64> = u.socks.keys().copied().collect();
+        for &sid in &ids {
+            u.publish(sid, true);
+        }
+        let mut live = ids;
+        live.extend(u.pairs.keys().copied());
+        live
+    };
+    after.run();
+    (live, dead)
+}
+
+/// Unix sockets and connections (the restart's log line).
+#[allow(dead_code)] // (linux-server never restores)
+pub fn count() -> (usize, usize) {
+    let u = U.lock();
+    (u.socks.len(), u.pairs.len())
+}
+// wave9 GX3 end
