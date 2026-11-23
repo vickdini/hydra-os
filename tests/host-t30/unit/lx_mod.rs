@@ -558,14 +558,15 @@ fn the_vfs_walk_call_routes_to_vfs_server_with_its_context() {
     });
     vfs_ctx(&mut c);
     assert_eq!((c.root, c.cwd), (u64::MAX, 0));
-    // wave9 G9-C: `lx.vfs=kernel` is ignored and `lx=kernel` leaves the file service forwarded
+    // wave9 G9-C: `lx.vfs=kernel` is ignored; `lx=kernel` still takes this test call away (the
+    // walk's redirects need the other services forwarded)
     svc::init(b"lx.vfs=kernel");
     set_forwarding(true);
     assert_eq!(entry_svc(entry(LX_VFS_WALK_NR)), LXS_VFS);
     svc::tests::reset();
     svc::init(b"");
     set_forwarding(false);
-    assert_eq!(entry_svc(entry(LX_VFS_WALK_NR)), LXS_VFS);
+    assert_eq!(entry(LX_VFS_WALK_NR), 0);
     set_forwarding(true);
     assert_eq!(entry_svc(entry(LX_VFS_WALK_NR)), LXS_VFS);
 }

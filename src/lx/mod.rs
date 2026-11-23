@@ -417,8 +417,7 @@ pub fn init() {
 /// Routes the moved calls to their services (`true`; a service switched back with
 /// `lx.<name>=kernel` stays in the kernel) or all to the in-kernel code.
 pub fn set_forwarding(on: bool) {
-    // (wave9 G9-C: the file service's entries also with `lx=kernel`)
-    let ent = |bits: u32, s: SvcId| if (on || s == crate::ipc::protocol::LXS_VFS) && svc::mode(s) == svc::SvcMode::Forward { T_SERVER | bits | (s as u32) << T_SVC_SHIFT } else { 0 };
+    let ent = |bits: u32, s: SvcId| if on && svc::mode(s) == svc::SvcMode::Forward { T_SERVER | bits | (s as u32) << T_SVC_SHIFT } else { 0 };
     for &(nr, bits, s) in MOVED.iter().chain(MOVED_STEP2).chain(MOVED_STEP4) {
         TABLE[nr as usize].store(ent(bits, s), Ordering::Release);
     }
