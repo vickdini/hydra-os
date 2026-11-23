@@ -291,3 +291,21 @@ fn records_ids_and_restart() {
     kstore::partial(pp, 9, 3);
     assert_eq!((page[0x1E8 / 8], page[0x1F0 / 8], page[0x1F8 / 8]), (9, 3, 0));
 }
+
+#[test]
+fn crc32c_hardware_matches_table() {
+    use hydra_rt::kept::{crc32c, crc32c_table};
+    // the standard check value of CRC-32C
+    assert_eq!(crc32c(b"123456789"), 0xE306_9283);
+    assert_eq!(crc32c_table(b"123456789"), 0xE306_9283);
+    let mut s = 1u32;
+    for len in 0..300usize {
+        let v: Vec<u8> = (0..len)
+            .map(|_| {
+                s = s.wrapping_mul(1103515245).wrapping_add(12345);
+                (s >> 16) as u8
+            })
+            .collect();
+        assert_eq!(crc32c(&v), crc32c_table(&v), "len {}", len);
+    }
+}
