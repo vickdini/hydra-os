@@ -451,6 +451,10 @@ pub mod memory {
             pub fn phys_base(&self) -> Option<u64> {
                 self.base
             }
+            /// *stub* `LX_MEM_TRUNC` (wave9 GM): no pages here; the size checks only.
+            pub fn truncate(&self, size: u64) -> Result<(), i64> {
+                if self.base.is_some() || size > self.pages * 4096 { Err(-22) } else { Ok(()) }
+            }
             pub fn resident(&self) -> u64 {
                 self.resident.load(core::sync::atomic::Ordering::Relaxed)
             }
@@ -472,6 +476,10 @@ pub mod memory {
 }
 
 pub mod fs {
+    /// wave9 GM: *stub* of `src/fs/tmem.rs`
+    pub mod tmem {
+        include!("../../tmem_stub.rs");
+    }
     use alloc::string::String;
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};

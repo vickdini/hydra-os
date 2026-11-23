@@ -179,6 +179,10 @@ pub mod memory {
 }
 
 pub mod fs {
+    /// wave9 GM: *stub* of `src/fs/tmem.rs`
+    pub mod tmem {
+        include!("../../tmem_stub.rs");
+    }
     #[path = "../../../../src/fs/gpt.rs"]
     pub mod gpt;
 

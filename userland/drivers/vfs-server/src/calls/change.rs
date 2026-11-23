@@ -63,6 +63,10 @@ fn target(cx: &Cx, who: &Ctx, ptr: u64, follow: bool, empty_ok: bool) -> Result<
 /// Applies `set` to `n` (attributes `a` before) through zfs-server (the caller checked that
 /// `n`'s mount is writable: [`attrs`]).
 fn setattr(who: &Ctx, n: Node, a: &Attr, mut set: SetAttr) -> Result<i64, i64> {
+    // wave9 GM: an in-memory tmpfs file's size and data times are the kernel's
+    if (set.size.is_some() || set.mtime.is_some()) && crate::tmem::candidate(a) && crate::tmem::is_tmem(n.ino) {
+        return Err(KERNEL);
+    }
     // A truncation by a caller without CAP_FSETID drops the set-ID bits, as a write does
     if let (Some(_), None) = (set.size, set.mode) {
         if !who.has_cap(CAP_FSETID) && a.mode & 0o170000 != 0o040000 {
@@ -347,6 +351,10 @@ pub fn unlink(cx: &Cx) -> Result<i64, i64> {
         policy::check_dir(&d, p.dir, if rmdir { ll::REMOVE_DIR } else { ll::REMOVE_FILE })?;
     }
     let victim = p.child;
+    // wave9 GM: an in-memory tmpfs file's last name: the kernel frees its data
+    if !rmdir && victim.is_some_and(crate::tmem::node_is_tmem) {
+        return Err(KERNEL);
+    }
     if let Some(v) = victim {
         if sticky_denied(&p.dir_attr, v, c.euid)? {
             return Err(EPERM);
@@ -406,6 +414,10 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
         return Err(KERNEL);
     }
     ctxt::writable(c, src.dir)?;
+    // wave9 GM: moving or replacing an in-memory tmpfs file: the kernel's
+    if [src.child, dst.child].into_iter().flatten().any(crate::tmem::node_is_tmem) {
+        return Err(KERNEL);
+    }
     for ch in [src.child, dst.child].into_iter().flatten() {
         ctxt::not_mountpoint(c, ch)?;
     }

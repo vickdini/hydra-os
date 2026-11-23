@@ -131,7 +131,7 @@ fn exec(cx: &Cx, a: &DcallArgs) -> Result<i64, i64> {
     let who = ctxt::caller(&c)?;
     let start = if e.flags & LX_VFS_EXEC_FROM_ROOT != 0 { Start::Root } else { ctxt::start(&c, path)? };
     let flags = if e.flags & LX_VFS_EXEC_NOFOLLOW != 0 { walk::NOFOLLOW } else { 0 };
-    let (node, attr) = match walk::walk(&ctxt::walker(&c)?, &who, start, path, flags)? {
+    let (node, mut attr) = match walk::walk(&ctxt::walker(&c)?, &who, start, path, flags)? {
         Walked::Found { node, attr } => (node, attr),
         Walked::Redirect(_) => return Err(KERNEL),
     };
@@ -141,6 +141,7 @@ fn exec(cx: &Cx, a: &DcallArgs) -> Result<i64, i64> {
     if node.mnt != 0 && ctxt::mount_flags(&c, node)? & crate::kmounts::MS_NOEXEC != 0 {
         return Err(EACCES);
     }
+    crate::tmem::overlay(&mut attr); // wave9 GM: an in-memory tmpfs file's size
     // (the kernel loads pool objects only)
     if node.mnt != 0 {
         return Err(KERNEL);

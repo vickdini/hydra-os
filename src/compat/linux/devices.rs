@@ -1076,6 +1076,29 @@ u! malcontent-webd - \"Parental controls web filter daemon\"
     // Ensure /dev/shm (POSIX shared memory) exists with mode 1777 (world-writable + sticky)
     let shm = t.dir(s, "/dev/shm")?;
     let _ = s.setattr(shm, crate::fs::zfs::zpl::SetAttr { mode: Some(0o1777), ..Default::default() });
+    // wave9 GM begin: /dev/shm is a memory directory (`fs::tmem`): empty at boot as Linux's
+    // tmpfs (the first time this root is prepared; later preparations must keep the files of
+    // running programs), and its new files keep their data in memory
+    if !crate::fs::tmem::shm_dir(shm) {
+        crate::fs::tmem::add_shm_dir(shm);
+        // (the names first, then the unlinks: a cookie need not survive a change)
+        let mut names = Vec::new();
+        let mut cookie = 0;
+        while let Ok(batch) = s.readdir(shm, cookie, 64) {
+            let Some(last) = batch.last() else { break };
+            if last.next_cookie == cookie {
+                break;
+            }
+            cookie = last.next_cookie;
+            names.extend(batch.into_iter().filter(|e| e.name != b"." && e.name != b".." && e.dtype != 4).map(|e| e.name));
+        }
+        for n in names {
+            if s.unlink(shm, &n).is_ok() {
+                t.changed = true;
+            }
+        }
+    }
+    // wave9 GM end
     let _ = t.link(s, "/run/shm", "/dev/shm");
     // The links systemd creates in /dev for a process's own descriptors
     let _ = t.link(s, "/dev/fd", "/proc/self/fd");

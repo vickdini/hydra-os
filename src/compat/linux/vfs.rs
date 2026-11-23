@@ -1553,6 +1553,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
                 let (cbase, cpath) = creation_target(base, path, follow_last)?;
                 let (parent, name) = resolve_parent(cbase, &cpath)?;
                 let ro = super::mount::check_write();
+                let tmpfs = super::mount::last_tmpfs(); // wave9 GM: the note of this lookup
                 if ro != 0 {
                     return Err(ro);
                 }
@@ -1564,6 +1565,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
                 let (perm, plan) = super::acl::create_mode(parent, mode & 0o7777, umask(), false);
                 created = true;
                 let ino = crate::fs::zfs::with_server(|s| s.create(parent, &name, perm, c.euid, c.egid))?;
+                crate::fs::tmem::created(parent, ino, tmpfs); // wave9 GM
                 super::acl::inherit(ino, plan);
                 ino
             }
@@ -2881,6 +2883,24 @@ fn fs_magic(abs: &str) -> i64 {
 ///
 /// # Returns
 /// `0` on success, or a negative Linux error code on failure.
+// wave9 GM begin
+/// `statfs` of a tmpfs mount whose files keep their data in memory: blocks = its `size=`.
+fn tmpfs_statfs_out(ptr: u64, limit: u64, used: u64, files: u64) -> i64 {
+    let mut b = [0u8; 120];
+    let (total, free) = (limit / 4096, limit.saturating_sub(used) / 4096);
+    let vals: [i64; 7] = [0x0102_1994, 4096, total as i64, free as i64, free as i64, (files + 1_000_000) as i64, 1_000_000];
+    for (i, v) in vals.iter().enumerate() {
+        b[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+    }
+    b[64..72].copy_from_slice(&255i64.to_le_bytes()); // f_namelen
+    b[72..80].copy_from_slice(&4096i64.to_le_bytes()); // f_frsize
+    match copy_out(ptr, &b) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+// wave9 GM end
+
 fn statfs_out(ptr: u64, magic: i64) -> i64 {
     let (total, free, objs) = match zfs(|s| Ok(s.statfs())) {
         Ok(v) => v,
@@ -3814,6 +3834,7 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             let (dirfd, p, mode, dev) = if num == NR_MKNOD { (AT_FDCWD, a[0], a[1], a[2]) } else { (a[0] as i64, a[1], a[2], a[3]) };
             let mask = umask();
             with_parent(dirfd, p, true, |dir, name, c| {
+                let tmpfs = super::mount::last_tmpfs(); // wave9 GM: the note of this lookup
                 let (perm, plan) = super::acl::create_mode(dir, mode as u32 & 0o7777, mask, false);
                 let mode = (mode as u32 & S_IFMT) | perm;
                 let devnode = matches!(dtype_from_mode(mode), 2 | 6); // DT_CHR, DT_BLK
@@ -3826,6 +3847,10 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 }
                 super::landlock::check_dir(dir, super::landlock::make_right(mode & S_IFMT))?;
                 let ino = zfs(|s| s.mknod(dir, name, mode, dev, c.euid, c.egid))?;
+                // wave9 GM: a regular file made by mknod is a file like any other
+                if mode & S_IFMT == S_IFREG || mode & S_IFMT == 0 {
+                    crate::fs::tmem::created(dir, ino, tmpfs);
+                }
                 super::acl::inherit(ino, plan);
                 Ok(0)
             })
@@ -4012,6 +4037,10 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 // A tmpfs mount (mount namespaces)
                 if magic == ZFS_SUPER_MAGIC && resolve(b, &p, true).is_ok() && super::mount::last_is_tmpfs() {
                     magic = 0x0102_1994;
+                    // wave9 GM: its size= and what its in-memory files hold
+                    if let Some((limit, used, files)) = super::mount::last_tmpfs().filter(|_| crate::fs::tmem::ENABLED.load(core::sync::atomic::Ordering::Relaxed)).and_then(crate::fs::tmem::usage) {
+                        return Some(tmpfs_statfs_out(a[1], limit, used, files));
+                    }
                 }
                 statfs_out(a[1], magic)
             }

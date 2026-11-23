@@ -64,6 +64,8 @@ mod xpath;
 mod zfs;
 // wave9 G6b-2: FUSE served here
 mod fuse;
+// wave9 GM: in-memory tmpfs files (sizes and times from the kernel)
+mod tmem;
 
 /// The kernel's protocol (message codes, `LxCall`, service ids).
 pub use hydra_rt::protocol as proto;

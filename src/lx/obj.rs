@@ -690,6 +690,11 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
     if op == crate::ipc::protocol::LX_FH_LANDLOCK || op == crate::ipc::protocol::LX_FH_ABAC {
         return super::fileh::ctl(h, op, a, b, c);
     }
+    // wave9 GM begin: the in-memory tmpfs files (78)
+    if op == crate::ipc::protocol::LX_FH_TMEM {
+        return super::fileh::ctl(h, op, a, b, c);
+    }
+    // wave9 GM end
     // wave8 GS begin: the sound service's operations (`ipc::sound`, op 64)
     if op == crate::ipc::protocol::LX_OBJ_SND {
         return crate::ipc::sound::ctl(h, a, b, c);

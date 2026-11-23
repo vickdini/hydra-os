@@ -20,7 +20,7 @@ pub fn stat(cx: &Cx) -> Result<i64, i64> {
     let a = cx.args;
     let (path_ptr, flags, out, x) = super::rules::stat_args(cx.nr, &a);
     let path = cx.user_cstr(path_ptr)?;
-    let attr = if path.is_empty() {
+    let mut attr = if path.is_empty() {
         if flags & AT_EMPTY_PATH == 0 {
             return Err(ctxt::ENOENT);
         }
@@ -32,6 +32,7 @@ pub fn stat(cx: &Cx) -> Result<i64, i64> {
         let who = ctxt::caller(c)?;
         ctxt::find(c, &who, &path, flags & AT_SYMLINK_NOFOLLOW == 0)?.1
     };
+    crate::tmem::overlay(&mut attr); // wave9 GM: an in-memory tmpfs file's size and times
     if x {
         let mut b = enc::statx(&attr);
         crate::fuse::fix_stat(&attr, &mut b, true); // wave9 G6b-2

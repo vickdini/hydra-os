@@ -1,0 +1,17 @@
+[package]
+name = "hydra_hosttests_w9_m"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group M's host unit tests: in-memory tmpfs files (src/fs/tmem.rs) and vfs-server's size= parser"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"
+x86_64 = { package = "x86_64_shim", path = "../host-t30/shim/x86_64" }

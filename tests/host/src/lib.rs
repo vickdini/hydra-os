@@ -585,6 +585,11 @@ pub mod compat {
 }
 
 pub mod fs {
+    /// wave9 GM: *stub* of `src/fs/tmem.rs`
+    pub mod tmem {
+        include!("../../tmem_stub.rs");
+        include!("../../tmem_stub_map.rs");
+    }
     /// *stub*: boot-volume files (`src/fs/bootfs.rs`)
     pub mod bootfs {
         pub use crate::fake::read_boot_file;

@@ -1022,6 +1022,17 @@ fn changed(ino: u64, what: u64, arg: u64) -> i64 {
     0
 }
 
+// wave9 GM begin
+/// [`LX_FH_TMEM`](crate::ipc::protocol::LX_FH_TMEM): sub-op `sub` of the in-memory tmpfs
+/// files (`fs::tmem::ctl`); answers go to the caller's buffer `b`.
+fn tmem(sub: u64, a: u64, b: u64) -> i64 {
+    crate::fs::tmem::ctl(sub, a, b, &|v: &[u8]| match crate::compat::linux::vfs::copy_out(b, v) {
+        Ok(()) => 0,
+        Err(e) => e,
+    })
+}
+// wave9 GM end
+
 /// `SYS_LX_OBJ` operations 32.. of service host `h` (called by `obj::obj_ctl`).
 pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
     // Only the file service's host
@@ -1047,6 +1058,7 @@ pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
         crate::ipc::protocol::LX_FH_MNTPUT => mntput(a, b, c),
         crate::ipc::protocol::LX_FH_TMPFSID => tmpfsid(a),
         // wave8 GF end
+        crate::ipc::protocol::LX_FH_TMEM => tmem(a, b, c), // wave9 GM
         LX_FH_INSTALL | LX_FH_CHDIR | LX_FH_CHROOT => {
             if !own(a) {
                 return ESRCH;
