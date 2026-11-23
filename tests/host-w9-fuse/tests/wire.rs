@@ -162,3 +162,35 @@ fn inode_numbers_and_connections() {
     assert!(setattr_size(&le(&[8], &[4])));
     assert!(!setattr_size(&le(&[1], &[4])));
 }
+
+#[test]
+fn nodes_with_a_base_refuse_older_numbers() {
+    let mut old = Nodes::new();
+    let a = old.intern(100, 1, b"a");
+    let mut n = Nodes::with_base(2 << 32);
+    assert_eq!(n.nodeid(a), None, "a number of the earlier instance");
+    assert_eq!(n.nodeid(1), Some(1), "the root stays");
+    let b = n.intern(100, 1, b"a");
+    assert_eq!(b, (2 << 32) + 2);
+    assert_eq!(n.nodeid(b), Some(100));
+    assert_eq!(n.name_of(b), Some((1, &b"a"[..])));
+    let c = n.intern(300, b, b"c");
+    assert_eq!(n.name_of(c), Some((b, &b"c"[..])));
+    n.cache(c, &attr(3, S_IFREG, 1), 10, 0);
+    assert!(n.cached(c, 5).is_some());
+    assert_eq!(n.nodeid((2 << 32) + 1), None);
+    assert_eq!(n.nodeid((2 << 32) + 99), None, "past the table");
+}
+
+#[test]
+fn conn_records_round_trip() {
+    let r = ConnRec { conn: 0x8005, slot: 17, mounted: true, initialized: true, owner: (1000, 1001, true), max_write: 65536, next_unique: 1234 };
+    assert_eq!(ConnRec::decode(&r.encode()), Some(r));
+    let r2 = ConnRec { mounted: false, initialized: false, owner: (0, 0, false), ..r };
+    assert_eq!(ConnRec::decode(&r2.encode()), Some(r2));
+    assert_eq!(ConnRec::decode(&[0u8; CONN_REC]), None, "an empty record");
+    assert_eq!(ConnRec::decode(&r.encode()[..10]), None);
+    let mut small = r;
+    small.max_write = 1;
+    assert_eq!(ConnRec::decode(&small.encode()).unwrap().max_write, 4096);
+}

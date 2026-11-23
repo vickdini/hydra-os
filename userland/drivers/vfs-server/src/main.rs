@@ -129,6 +129,11 @@ fn main(args: &[&str]) {
     RING.store(win as u64 + LX_NOTES_OFF as u64, Ordering::Release);
     svcrt::notes::init(win, on_note);
     svcrt::objs::init(svc.area, ENDPOINT_VFS_SERVER);
+    // wave9 G6b-2: the FUSE connections of the previous instance (its /dev/fuse objects)
+    match fuse::restart_init() {
+        (0, 0) => {}
+        (n, d) => println!("[vfs-server] FUSE: {} connections taken back, {} objects dropped", n, d),
+    }
     // The first request of this instance has no parameters (`FS_ROOT`), and it is made before
     // any call can come: a request of a previous instance that zfs-server may still be
     // serving finishes first (it writes its reply into our part of the window), so no later

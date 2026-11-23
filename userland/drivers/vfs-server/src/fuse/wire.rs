@@ -226,10 +226,13 @@ pub struct Node {
 }
 
 /// The node table of one connection: local numbers (1 = the root) for the daemon's node IDs.
+/// Entry `i >= 2` has local number `base + i`: each instance of vfs-server numbers from its
+/// own base, so a number an earlier instance gave (a handle that outlived it) finds nothing.
 #[derive(Clone, Debug)]
 pub struct Nodes {
     pub nodes: Vec<Node>,
     pub by_nodeid: BTreeMap<u64, u64>,
+    pub base: u64,
 }
 
 impl Default for Nodes {
@@ -240,26 +243,44 @@ impl Default for Nodes {
 
 impl Nodes {
     pub fn new() -> Self {
+        Self::with_base(0)
+    }
+
+    /// A table whose local numbers (but the root's) start at `base + 2`.
+    pub fn with_base(base: u64) -> Self {
         let n = |id| Node { nodeid: id, parent: 1, name: Vec::new(), cached: None };
-        Nodes { nodes: alloc::vec![n(0), n(1)], by_nodeid: BTreeMap::from([(1, 1)]) }
+        Nodes { nodes: alloc::vec![n(0), n(1)], by_nodeid: BTreeMap::from([(1, 1)]), base }
+    }
+
+    /// The entry of local number `l`.
+    fn idx(&self, l: u64) -> Option<usize> {
+        let i = if l <= 1 { l } else { l.checked_sub(self.base).filter(|&i| i >= 2)? };
+        (i < self.nodes.len() as u64).then_some(i as usize)
+    }
+
+    /// The local number of entry `i`.
+    fn local(&self, i: usize) -> u64 {
+        if i <= 1 { i as u64 } else { self.base + i as u64 }
     }
 
     /// The daemon's node ID of local node `l`.
     pub fn nodeid(&self, l: u64) -> Option<u64> {
-        self.nodes.get(l as usize).map(|n| n.nodeid).filter(|&n| n != 0)
+        self.nodes.get(self.idx(l)?).map(|n| n.nodeid).filter(|&n| n != 0)
     }
 
     /// The local node of the daemon's `nodeid` (new if unknown), found as `name` in `parent`.
     pub fn intern(&mut self, nodeid: u64, parent: u64, name: &[u8]) -> u64 {
         if let Some(&l) = self.by_nodeid.get(&nodeid) {
             if l != 1 {
-                let n = &mut self.nodes[l as usize];
-                n.parent = parent;
-                n.name = name.to_vec();
+                if let Some(i) = self.idx(l) {
+                    let n = &mut self.nodes[i];
+                    n.parent = parent;
+                    n.name = name.to_vec();
+                }
             }
             return l;
         }
-        let l = self.nodes.len() as u64;
+        let l = self.local(self.nodes.len());
         self.nodes.push(Node { nodeid, parent, name: name.to_vec(), cached: None });
         self.by_nodeid.insert(nodeid, l);
         l
@@ -267,7 +288,8 @@ impl Nodes {
 
     /// Keeps `attr` of `l` for `ms` (0: not at all), from `now`.
     pub fn cache(&mut self, l: u64, attr: &[u8], ms: u64, now: u64) {
-        let Some(n) = self.nodes.get_mut(l as usize) else { return };
+        let Some(i) = self.idx(l) else { return };
+        let n = &mut self.nodes[i];
         if ms == 0 || attr.len() < ATTR {
             n.cached = None;
             return;
@@ -279,7 +301,7 @@ impl Nodes {
 
     /// `l`'s kept attributes if still valid at `now`.
     pub fn cached(&self, l: u64, now: u64) -> Option<[u8; ATTR]> {
-        let (a, until) = self.nodes.get(l as usize)?.cached?;
+        let (a, until) = self.nodes.get(self.idx(l)?)?.cached?;
         (now < until).then_some(a)
     }
 
@@ -287,8 +309,8 @@ impl Nodes {
     pub fn uncache(&mut self, l: Option<u64>) {
         match l {
             Some(l) => {
-                if let Some(n) = self.nodes.get_mut(l as usize) {
-                    n.cached = None;
+                if let Some(i) = self.idx(l) {
+                    self.nodes[i].cached = None;
                 }
             }
             None => self.nodes.iter_mut().for_each(|n| n.cached = None),
@@ -300,7 +322,7 @@ impl Nodes {
         if l == 1 {
             return None;
         }
-        let n = self.nodes.get(l as usize).filter(|n| n.nodeid != 0)?;
+        let n = self.nodes.get(self.idx(l)?).filter(|n| n.nodeid != 0)?;
         Some((n.parent, &n.name))
     }
 }
@@ -355,4 +377,55 @@ pub fn split(ino: u64) -> Option<(u16, u64)> {
     }
     let conn = ((ino >> 40) & 0xFFFF) as u16;
     (conn & 0x8000 != 0).then_some((conn, ino & ((1 << 40) - 1)))
+}
+
+/// A connection's fixed part as vfs-server keeps it across its restarts (a kept record of
+/// [`CONN_REC`] bytes): what the next instance needs to go on serving the mount.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConnRec {
+    pub conn: u16,
+    pub slot: u32,
+    pub mounted: bool,
+    pub initialized: bool,
+    pub owner: (u32, u32, bool),
+    pub max_write: u32,
+    pub next_unique: u64,
+}
+
+/// Bytes of a [`ConnRec`].
+pub const CONN_REC: usize = 32;
+
+impl ConnRec {
+    pub fn encode(&self) -> [u8; CONN_REC] {
+        let mut b = [0u8; CONN_REC];
+        b[0..2].copy_from_slice(&self.conn.to_le_bytes());
+        b[2] = self.mounted as u8 | (self.initialized as u8) << 1 | (self.owner.2 as u8) << 2;
+        b[4..8].copy_from_slice(&self.slot.to_le_bytes());
+        b[8..12].copy_from_slice(&self.owner.0.to_le_bytes());
+        b[12..16].copy_from_slice(&self.owner.1.to_le_bytes());
+        b[16..20].copy_from_slice(&self.max_write.to_le_bytes());
+        b[24..32].copy_from_slice(&self.next_unique.to_le_bytes());
+        b
+    }
+
+    /// A record read back; `None` when it is not one (too short, not a connection of
+    /// vfs-server's).
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        if b.len() < CONN_REC {
+            return None;
+        }
+        let conn = u16::from_le_bytes([b[0], b[1]]);
+        if conn & 0x8000 == 0 {
+            return None;
+        }
+        Some(ConnRec {
+            conn,
+            slot: u32_at(b, 4),
+            mounted: b[2] & 1 != 0,
+            initialized: b[2] & 2 != 0,
+            owner: (u32_at(b, 8), u32_at(b, 12), b[2] & 4 != 0),
+            max_write: u32_at(b, 16).clamp(4096, 128 * 1024),
+            next_unique: u64_at(b, 24),
+        })
+    }
 }

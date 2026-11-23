@@ -69,6 +69,12 @@ fn remember(ino: u64, user: u64) {
 fn op(op: u64, a: [u64; 5], kin: &[u8], kout: &mut [u8]) -> Result<i64, i64> {
     CALLS.fetch_add(1, Ordering::Relaxed);
     let r = crate::lx::call_vfs_fuse([op, a[0], a[1], a[2], a[3], a[4]], kin, kout);
+    if r == EIO {
+        static SHOWN: AtomicU64 = AtomicU64::new(0);
+        if SHOWN.fetch_add(1, Ordering::Relaxed) < 5 {
+            crate::kprintln!("[fuse] vfs-server answered EIO to operation {} on {:#x}", op, a[0]);
+        }
+    }
     if r < 0 { Err(r) } else { Ok(r) }
 }
 

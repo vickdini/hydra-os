@@ -128,7 +128,7 @@ impl Conn {
             readers: VecDeque::new(),
             waits: BTreeMap::new(),
             next_unique: 2,
-            nodes: Nodes::new(),
+            nodes: Nodes::with_base(EPOCH.load(Ordering::Relaxed) << 32),
             handles: BTreeMap::new(),
             before_init: Vec::new(),
             names: BTreeMap::new(),
@@ -640,6 +640,7 @@ fn kcall_locked(cx: &Cx, fin: &mut Vec<Finish>) -> Answer {
             c.mounted = true;
             let init = init_args();
             send(c, INIT, 0, who, &[&init], Wait::Init, fin);
+            save_conn(c);
             return (conn as i64, 0);
         }
         FUSE_OP_ABORT => {
@@ -803,6 +804,7 @@ pub fn dev_open(cx: &Cx, flags: u64) -> Answer {
         let id = next_conn(&mut st.next, |c| conns.contains_key(&c));
         let mut c = Conn::new(id);
         c.devs.push(slot);
+        save_conn(&c);
         st.conns.insert(id, c);
         st.devs.insert(slot, id);
         id
@@ -943,6 +945,7 @@ fn write_reply(c: &mut Conn, data: &[u8], fin: &mut Vec<Finish>) -> i64 {
                 Some(mw) => {
                     c.max_write = mw;
                     c.initialized = true;
+                    save_conn(c);
                     for op in core::mem::take(&mut c.before_init) {
                         let step = begin(c, op);
                         if let Some((id, r, out)) = drive(c, step, fin) {
@@ -995,6 +998,7 @@ pub fn on_close(slot: u32) {
         };
         if gone {
             st.conns.remove(&conn);
+            clear_conn(conn);
         }
     }
     objs::set(slot, 0, 0);
@@ -1340,4 +1344,128 @@ fn release_node(c: &mut Conn, l: u64, who: Who, fin: &mut Vec<Finish>) {
             }
         }
     }
+}
+
+// ----------------------------------------------------------------------
+// Restart: the connections survive a crash of vfs-server
+// ----------------------------------------------------------------------
+
+/// The instance number (1 = the first since boot): the base of its local node numbers.
+static EPOCH: AtomicU64 = AtomicU64::new(0);
+/// The kept-state area (`LX_SVC_KEPT`): record 0 holds the instance number, records
+/// 1.. a [`ConnRec`] each.
+static KEPT: YLock<Option<hydra_rt::kept::Kept>> = YLock::new(None);
+const KEPT_LAYOUT: u32 = 0x6B02_0001;
+const KEPT_RECS: usize = 65;
+
+/// Writes connection `c`'s record (a free one, or its own).
+fn save_conn(c: &Conn) {
+    let Some(&slot) = c.devs.first() else { return };
+    let r = ConnRec { conn: c.id, slot, mounted: c.mounted, initialized: c.initialized, owner: c.owner, max_write: c.max_write, next_unique: c.next_unique };
+    let mut g = KEPT.lock();
+    let Some(k) = g.as_mut() else { return };
+    let mut free = None;
+    for i in 1..KEPT_RECS {
+        match k.get(i).and_then(ConnRec::decode) {
+            Some(o) if o.conn == c.id => {
+                k.put(i, &r.encode());
+                return;
+            }
+            None if free.is_none() => free = Some(i),
+            _ => {}
+        }
+    }
+    // (more live connections than records: the newest are not kept)
+    if let Some(i) = free {
+        k.put(i, &r.encode());
+    }
+}
+
+/// Forgets connection `conn`'s record.
+fn clear_conn(conn: u16) {
+    let mut g = KEPT.lock();
+    let Some(k) = g.as_mut() else { return };
+    for i in 1..KEPT_RECS {
+        if k.get(i).and_then(ConnRec::decode).is_some_and(|o| o.conn == conn) {
+            k.clear(i);
+        }
+    }
+}
+
+/// Before going online: the kept connection records of the previous instance and its
+/// `/dev/fuse` objects are taken back (a Transparent restart), so the daemons' descriptors
+/// and the mounts go on; the node tables are not kept (files the old instance had looked up
+/// answer `ESTALE`). Returns `(connections taken back, objects dropped)`.
+pub fn restart_init() -> (usize, usize) {
+    use hydra_rt::kept::Kept;
+    let size = Kept::size_for(KEPT_RECS, CONN_REC);
+    let p = match sys::lx_svc_kept(size) {
+        Ok(p) => p,
+        Err(e) => {
+            hydra_rt::println!("[vfs-server] FUSE: no kept state ({}): mounts end with a restart", e);
+            EPOCH.store(1, Ordering::Relaxed);
+            return (0, 0);
+        }
+    };
+    // SAFETY: the kernel mapped `size` bytes at `p` for this process alone
+    let (mut k, _) = unsafe { Kept::open(p, size, KEPT_LAYOUT, CONN_REC) };
+    let epoch = (k.get(0).map_or(0, |b| u64_at(b, 0)) + 1) & 0xFF;
+    let epoch = epoch.max(1);
+    k.put(0, &epoch.to_le_bytes());
+    EPOCH.store(epoch, Ordering::Relaxed);
+    let recs: Vec<ConnRec> = (1..KEPT_RECS).filter_map(|i| k.get(i).and_then(ConnRec::decode)).collect();
+    let mut found: Vec<LxSvcObj> = Vec::new();
+    let mut buf = [LxSvcObj::default(); 64];
+    let mut start = 0u32;
+    while let Ok(n) = sys::lx_svc_list(&mut buf, start) {
+        if n == 0 {
+            break;
+        }
+        found.extend_from_slice(&buf[..n]);
+        start = buf[n - 1].slot + 1;
+    }
+    let mut dropped = 0;
+    let mut keep: Vec<ConnRec> = Vec::new();
+    for o in &found {
+        match recs.iter().find(|r| r.slot == o.slot && o.kind == LX_OBJ_KIND_FUSE) {
+            Some(r) => keep.push(*r),
+            None => {
+                let _ = sys::lx_svc_dead(o.slot);
+                dropped += 1;
+            }
+        }
+    }
+    let adopted = !found.is_empty() && sys::lx_svc_adopt().is_ok();
+    for i in 1..KEPT_RECS {
+        k.clear(i);
+    }
+    *KEPT.lock() = Some(k);
+    if !adopted {
+        return (0, dropped);
+    }
+    let mut st = ST.lock();
+    let mut n = 0;
+    for r in keep {
+        if !objs::reserve(r.slot) {
+            let _ = sys::lx_svc_dead(r.slot);
+            continue;
+        }
+        let mut c = Conn::new(r.conn);
+        c.devs.push(r.slot);
+        c.mounted = r.mounted;
+        c.initialized = r.initialized;
+        c.owner = r.owner;
+        c.max_write = r.max_write;
+        // (replies to the old instance's requests find nothing)
+        c.next_unique = (r.next_unique + (1 << 33)) & !1;
+        c.set_ready();
+        save_conn(&c);
+        st.devs.insert(r.slot, r.conn);
+        st.conns.insert(r.conn, c);
+        st.next = st.next.max(r.conn & 0x3FFF);
+        n += 1;
+    }
+    drop(st);
+    objs::flush();
+    (n, dropped)
 }
