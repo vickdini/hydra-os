@@ -56,6 +56,28 @@ pub mod lx;
 /// (`#[cfg(not(target_os = "uefi"))]` branches): the yield and direct-switch vectors and the
 /// user-copy routines.
 pub mod host {
+    // wave9 G7a begin
+    /// *stub* `crate::lx::proc` (the kernel's process-identity primitives, `src/lx/proc.rs`,
+    /// tested in host-t29): the call context from the fake process table.
+    pub mod lx_proc {
+        pub use crate::compat::linux::proc::PROCS;
+        /// *mirror* of the kernel's call context.
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+        pub struct CallCtx {
+            pub pgid: u64,
+            pub sid: u64,
+            pub mnt: u64,
+            pub net: u64,
+            pub pid: u64,
+            pub user: bool,
+        }
+        /// As the kernel's: `Err(())` busy (and not waiting), `Ok(None)` no such process.
+        pub fn call_ctx(tgid: u64, wait: bool) -> Result<Option<CallCtx>, ()> {
+            let procs = if wait { PROCS.lock() } else { PROCS.try_lock().ok_or(())? };
+            Ok(procs.get(&tgid).map(|p| CallCtx { pgid: p.pgid, sid: p.sid, mnt: p.ns.mnt, net: p.ns.net, pid: p.ns.pid, user: p.ns.user.is_some() }))
+        }
+    }
+    // wave9 G7a end
     /// `int 0x81`.
     pub fn yield_vector() {
         crate::world::yield_cpu();

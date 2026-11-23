@@ -776,7 +776,7 @@ pub fn getppid() -> i64 {
 pub fn getpgid(target: u64) -> i64 {
     let (_, pid) = current_ids();
     let target = if target == 0 { pid } else { target };
-    PROCS.lock().get(&target).map_or(ESRCH, |p| p.pgid as i64)
+    crate::lx::proc::task_pgrp(target).map_or(ESRCH, |p| p.pgid as i64)
 }
 
 /// Returns the session ID of `target` (or the caller when `target == 0`).
@@ -789,7 +789,7 @@ pub fn getpgid(target: u64) -> i64 {
 pub fn getsid(target: u64) -> i64 {
     let (_, pid) = current_ids();
     let target = if target == 0 { pid } else { target };
-    PROCS.lock().get(&target).map_or(ESRCH, |p| p.sid as i64)
+    crate::lx::proc::task_pgrp(target).map_or(ESRCH, |p| p.sid as i64)
 }
 
 /// Sets the process group ID of `target` to `pgid`.
@@ -801,24 +801,15 @@ pub fn getsid(target: u64) -> i64 {
 /// # Returns
 /// `0` on success, or a negative Linux error code on failure.
 pub fn setpgid(target: u64, pgid: u64) -> i64 {
-    // Linux: a negative group id is EINVAL
-    if (pgid as i32) < 0 {
-        return EINVAL;
-    }
+    // wave9 G7a: the rule (`lx::proc::rules`), then the primitive
+    use crate::lx::proc as mech;
     let (_, pid) = current_ids();
     let target = if target == 0 { pid } else { target };
-    let pgid = if pgid == 0 { target } else { pgid };
-    let mut procs = PROCS.lock();
-    let allowed = procs.get(&target).map_or(false, |p| p.pid == pid || p.ppid == pid);
-    if !allowed {
-        return ESRCH;
+    match mech::rules::setpgid(pid, mech::task_pgrp(target), pgid) {
+        Ok(g) if mech::task_pgrp_set(target, g, false) => 0,
+        Ok(_) => ESRCH,
+        Err(e) => e,
     }
-    let p = procs.get_mut(&target).unwrap();
-    if p.sid == p.pid {
-        return EPERM; // a session leader cannot change its group
-    }
-    p.pgid = pgid;
-    0
 }
 
 /// Creates a new session if the calling process is not a process group leader.
@@ -826,19 +817,13 @@ pub fn setpgid(target: u64, pgid: u64) -> i64 {
 /// # Returns
 /// The new session ID on success, or a negative Linux error code on failure.
 pub fn setsid() -> i64 {
+    // wave9 G7a: the rule (`lx::proc::rules`), then the primitive
+    use crate::lx::proc as mech;
     let (_, pid) = current_ids();
-    let mut procs = PROCS.lock();
-    if procs.values().any(|p| p.pgid == pid && p.pid != pid) {
-        return EPERM;
-    }
-    match procs.get_mut(&pid) {
-        Some(p) if p.pgid != pid => {
-            p.pgid = pid;
-            p.sid = pid;
-            pid as i64
-        }
-        Some(_) => EPERM,
-        None => ESRCH,
+    match mech::rules::setsid(mech::task_pgrp(pid), mech::pgrp_used(pid, pid)) {
+        Ok(sid) if mech::task_pgrp_set(pid, sid, true) => sid as i64,
+        Ok(_) => ESRCH,
+        Err(e) => e,
     }
 }
 
@@ -900,7 +885,7 @@ pub fn has_exited_locked(pid: u64) -> bool {
 /// # Returns
 /// `Some((sid, pgid))` if found, or `None`.
 pub fn session_of(pid: u64) -> Option<(u64, u64)> {
-    PROCS.lock().get(&pid).map(|p| (p.sid, p.pgid))
+    crate::lx::proc::task_pgrp(pid).map(|p| (p.sid, p.pgid))
 }
 
 /// Resets handled signals of `pid` to their default action (ignored ones stay ignored).
@@ -1243,7 +1228,7 @@ fn is_system_service(pid: u64) -> bool {
 
 /// The live processes of process group `pgid`.
 pub fn group_members(pgid: u64) -> Vec<u64> {
-    PROCS.lock().values().filter(|p| p.pgid == pgid && !p.zombie).map(|p| p.pid).collect()
+    crate::lx::proc::pgrp_members(pgid, None)
 }
 
 /// Posts `sig` to every process in process group `pgid`.
@@ -1255,11 +1240,7 @@ pub fn group_members(pgid: u64) -> Vec<u64> {
 /// # Returns
 /// Number of processes to which the signal was delivered.
 pub fn post_group(pgid: u64, sig: u32) -> usize {
-    let members: Vec<u64> = PROCS.lock().values().filter(|p| p.pgid == pgid && !p.zombie).map(|p| p.pid).collect();
-    for &pid in &members {
-        post_process(pid, sig);
-    }
-    members.len()
+    crate::lx::proc::pgrp_signal(pgid, None, sig)
 }
 
 /// Sends signal `sig` to a process or process group selected by `pid`.

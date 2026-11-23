@@ -431,10 +431,9 @@ Seccomp:	{}
         "stat" => {
             // The 52 fields of proc(5); those Hydra does not keep (fault counts, memory
             // addresses) are 0
-            let (ppid, pgid, sid, threads, start, zombie) = super::proc::PROCS
-                .lock()
-                .get(&pid)
-                .map_or((0, pid, pid, 1, 0, false), |p| (p.ppid, p.pgid, p.sid, p.threads_alive().max(1), p.start_time, p.zombie));
+            // wave9 G7a: the tree through the process-identity primitive
+            let (ppid, pgid, sid, threads, start, zombie) =
+                crate::lx::proc::task_tree(pid).map_or((0, pid, pid, 1, 0, false), |t| (t.ppid, t.pgid, t.sid, t.threads as usize, t.start, t.zombie));
             let comm: alloc::string::String = exe.rsplit('/').next().unwrap_or("").chars().take(15).collect();
             // CPU time (user, system, waited-for children's), in clock ticks
             let cpu = super::proc::cpu_times(pid);

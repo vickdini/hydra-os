@@ -26,6 +26,8 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
+use crate::lx::proc::{self as mech, NsChange, NsKind};
+
 /// New mount namespace.
 pub const CLONE_NEWNS: u64 = 0x0002_0000;
 /// New cgroup namespace.
@@ -85,7 +87,7 @@ static PID_NS_INIT: Mutex<alloc::collections::BTreeMap<u64, alloc::vec::Vec<u64>
 /// Next namespace inode number handed out.
 static NEXT_ID: AtomicU64 = AtomicU64::new(4026532200);
 
-fn new_id() -> u64 {
+pub(crate) fn new_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -101,7 +103,7 @@ pub struct IdMap {
 /// A user namespace.
 pub struct UserNs {
     /// Namespace inode number (`/proc/<pid>/ns/user`).
-    id: u64,
+    pub(crate) id: u64,
     /// Effective user ID of the process that created it (in the system).
     owner_uid: u32,
     /// Effective group ID of the process that created it (in the system).
@@ -293,13 +295,16 @@ pub fn after_clone(child: u64, flags: u64) {
     } else {
         None
     };
-    let parent_mnt = current_ns().mnt;
+    let parent = current_ns();
+    let parent_mnt = parent.mnt;
     let mut child_mnt = 0;
+    // (the child starts with the parent's namespaces: the plan is made from those)
+    let mut plan = plan_new(&parent, flags, false);
+    if let Some(u) = user.clone() {
+        plan.insert(0, NsChange::User(Some(u)));
+    }
     if let Some(p) = super::proc::PROCS.lock().get_mut(&child) {
-        if let Some(u) = user.clone() {
-            p.ns.user = Some(u);
-        }
-        apply_new(&mut p.ns, flags, false);
+        mech::ns_apply(&mut p.ns, &plan);
         if flags & CLONE_NEWPID != 0 {
             p.ns.pid_inits.push(child);
             PID_NS_INIT.lock().insert(p.ns.pid, p.ns.pid_inits.clone());
@@ -326,30 +331,30 @@ pub fn after_clone(child: u64, flags: u64) {
 
 /// Gives `ns` fresh namespaces of the non-user types in `flags`. With `unshare`, a new
 /// PID namespace is for the caller's children only.
-fn apply_new(ns: &mut Ns, flags: u64, unshare: bool) {
+///
+/// wave9 G7a: as changes for `lx::proc::ns_apply` (fresh ids from `lx::proc::ns_new_id`).
+fn plan_new(ns: &Ns, flags: u64, unshare: bool) -> alloc::vec::Vec<NsChange> {
+    let mut out = alloc::vec::Vec::new();
     if flags & CLONE_NEWPID != 0 {
-        if unshare {
-            ns.pid_for_children = Some(new_id());
-        } else {
-            ns.pid = new_id();
-        }
+        out.push(NsChange::Id(if unshare { NsKind::PidForChildren } else { NsKind::Pid }, mech::ns_new_id()));
     }
-    for (flag, slot) in [
-        (CLONE_NEWNET, &mut ns.net),
-        (CLONE_NEWNS, &mut ns.mnt),
-        (CLONE_NEWIPC, &mut ns.ipc),
-        (CLONE_NEWUTS, &mut ns.uts),
-        (CLONE_NEWCGROUP, &mut ns.cgroup),
+    for (flag, kind, old) in [
+        (CLONE_NEWNET, NsKind::Net, ns.net),
+        (CLONE_NEWNS, NsKind::Mnt, ns.mnt),
+        (CLONE_NEWIPC, NsKind::Ipc, ns.ipc),
+        (CLONE_NEWUTS, NsKind::Uts, ns.uts),
+        (CLONE_NEWCGROUP, NsKind::Cgroup, ns.cgroup),
     ] {
         if flags & flag != 0 {
-            let old = *slot;
-            *slot = new_id();
+            let id = mech::ns_new_id();
             if flag == CLONE_NEWUTS {
                 // A new UTS namespace starts with the old one's names
-                super::extra::uts_copy(old, *slot);
+                super::extra::uts_copy(old, id);
             }
+            out.push(NsChange::Id(kind, id));
         }
     }
+    out
 }
 
 /// `unshare(2)`.
@@ -386,15 +391,13 @@ pub fn sys_unshare(flags: u64) -> i64 {
     } else {
         None
     };
-    let old_mnt = current_ns().mnt;
-    let mut new_mnt = 0;
-    if let Some(p) = super::proc::PROCS.lock().get_mut(&pid) {
-        if let Some(u) = user.clone() {
-            p.ns.user = Some(u);
-        }
-        apply_new(&mut p.ns, ns_flags, true);
-        new_mnt = p.ns.mnt;
+    let mine = current_ns();
+    let old_mnt = mine.mnt;
+    let mut plan = plan_new(&mine, ns_flags, true);
+    if let Some(u) = user.clone() {
+        plan.insert(0, NsChange::User(Some(u)));
     }
+    let new_mnt = mech::ns_set(pid, &plan).map_or(0, |ids| ids.mnt);
     // wave7 G7-3: vfs-server copies the table; the old namespace may be empty now (both
     // posted with the process table held: ordered with every other namespace note)
     if ns_flags & CLONE_NEWNS != 0 {
@@ -416,8 +419,7 @@ pub fn sys_unshare(flags: u64) -> i64 {
 
 /// System PID of the init process of the caller's PID namespace (`None`: the initial one).
 fn caller_pid_init() -> Option<u64> {
-    let (_, pid) = super::proc::current_ids();
-    super::proc::PROCS.lock().get(&pid).and_then(|p| p.ns.pid_inits.last().copied())
+    mech::pid_ns_init(super::proc::current_ids().1)
 }
 
 /// A system-wide process or thread ID as the caller's PID namespace shows it.
@@ -428,10 +430,7 @@ fn caller_pid_init() -> Option<u64> {
 /// # Returns
 /// 1 for the init of the caller's namespace, otherwise `id`.
 pub fn pid_to_caller(id: u64) -> u64 {
-    match caller_pid_init() {
-        Some(init) if init == id => 1,
-        _ => id,
-    }
+    mech::pid_to_view(id, caller_pid_init())
 }
 
 /// A process or thread ID given by the caller, as a system-wide ID.
@@ -442,10 +441,7 @@ pub fn pid_to_caller(id: u64) -> u64 {
 /// # Returns
 /// The init's system PID for 1 inside a namespace, otherwise `id`.
 pub fn pid_from_caller(id: u64) -> u64 {
-    match caller_pid_init() {
-        Some(init) if id == 1 => init,
-        _ => id,
-    }
+    mech::pid_from_view(id, caller_pid_init())
 }
 
 /// Maps a system ID into user namespace `ns` (through every namespace above it).
@@ -749,25 +745,25 @@ pub fn sys_setns(fd: u64, nstype: u64) -> i64 {
     let user_changed = kinds & CLONE_NEWUSER != 0
         && !matches!((&theirs.user, &mine.user), (Some(a), Some(b)) if Arc::ptr_eq(a, b))
         && !(theirs.user.is_none() && mine.user.is_none());
-    if let Some(p) = super::proc::PROCS.lock().get_mut(&me) {
-        if user_changed {
-            p.ns.user = theirs.user.clone();
-        }
-        if let Some(target) = pid_for_children {
-            p.ns.pid_for_children = target;
-        }
-        for (flag, slot, value) in [
-            (CLONE_NEWNET, &mut p.ns.net, theirs.net),
-            (CLONE_NEWNS, &mut p.ns.mnt, theirs.mnt),
-            (CLONE_NEWIPC, &mut p.ns.ipc, theirs.ipc),
-            (CLONE_NEWUTS, &mut p.ns.uts, theirs.uts),
-            (CLONE_NEWCGROUP, &mut p.ns.cgroup, theirs.cgroup),
-        ] {
-            if kinds & flag != 0 {
-                *slot = value;
-            }
+    let mut plan = alloc::vec::Vec::new();
+    if user_changed {
+        plan.push(NsChange::User(theirs.user.clone()));
+    }
+    if let Some(target) = pid_for_children {
+        plan.push(NsChange::Id(NsKind::PidForChildren, target.unwrap_or(0)));
+    }
+    for (flag, kind, value) in [
+        (CLONE_NEWNET, NsKind::Net, theirs.net),
+        (CLONE_NEWNS, NsKind::Mnt, theirs.mnt),
+        (CLONE_NEWIPC, NsKind::Ipc, theirs.ipc),
+        (CLONE_NEWUTS, NsKind::Uts, theirs.uts),
+        (CLONE_NEWCGROUP, NsKind::Cgroup, theirs.cgroup),
+    ] {
+        if kinds & flag != 0 {
+            plan.push(NsChange::Id(kind, value));
         }
     }
+    mech::ns_set(me, &plan);
     // wave7 G7-3: the namespace left may be empty now
     if kinds & CLONE_NEWNS != 0 && theirs.mnt != mine.mnt {
         mntns_left(mine.mnt);

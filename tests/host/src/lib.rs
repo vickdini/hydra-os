@@ -696,6 +696,52 @@ pub mod personality {
 /// *stub* The forwarding to the ring-3 Linux server (wave 3, `src/lx`): the process
 /// events it is told about go nowhere on the host.
 pub mod lx {
+    // wave9 G7a begin: *stub* the process-identity primitives (`src/lx/proc.rs`, tested in
+    // host-t29) over the real process table; the real rules
+    pub mod proc {
+        use crate::compat::linux::proc_real::PROCS;
+        use alloc::vec::Vec;
+        #[path = "../../../../../src/lx/proc_rules.rs"]
+        pub mod rules;
+        /// *mirror* of the kernel's.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub struct Pgrp {
+            pub pid: u64,
+            pub ppid: u64,
+            pub pgid: u64,
+            pub sid: u64,
+            pub zombie: bool,
+        }
+        pub fn task_pgrp(pid: u64) -> Option<Pgrp> {
+            PROCS.lock().get(&pid).map(|p| Pgrp { pid: p.pid, ppid: p.ppid, pgid: p.pgid, sid: p.sid, zombie: p.zombie })
+        }
+        pub fn task_pgrp_set(pid: u64, pgid: u64, new_session: bool) -> bool {
+            match PROCS.lock().get_mut(&pid) {
+                Some(p) => {
+                    p.pgid = pgid;
+                    if new_session {
+                        p.sid = pid;
+                    }
+                    true
+                }
+                None => false,
+            }
+        }
+        pub fn pgrp_members(pgid: u64, sid: Option<u64>) -> Vec<u64> {
+            PROCS.lock().values().filter(|p| p.pgid == pgid && !p.zombie && sid.map_or(true, |s| p.sid == s)).map(|p| p.pid).collect()
+        }
+        pub fn pgrp_used(pgid: u64, except: u64) -> bool {
+            PROCS.lock().values().any(|p| p.pgid == pgid && p.pid != except)
+        }
+        pub fn pgrp_signal(pgid: u64, sid: Option<u64>, sig: u32) -> usize {
+            let m = pgrp_members(pgid, sid);
+            for &pid in &m {
+                crate::compat::linux::proc_real::post_process(pid, sig);
+            }
+            m.len()
+        }
+    }
+    // wave9 G7a end
     // wave8 GX2 begin: *stub* the desktop set (`src/lx/desktop.rs`)
     pub mod desktop {
         pub fn inherit(_parent: u64, _child: u64) {}
