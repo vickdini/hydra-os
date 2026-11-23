@@ -231,8 +231,10 @@ pub fn idempotent(nr: u64, args: &[u64; 6]) -> bool {
         17 | 295 | 327 => true,
         // open / openat without O_CREAT, O_TRUNC, O_TMPFILE (the descriptor of a lost answer
         // is closed before the call is sent again)
-        2 => args[1] & OPEN_CHANGES == 0,
-        257 => args[2] & OPEN_CHANGES == 0,
+        // wave10 GV1: and O_CREAT without O_EXCL / O_TRUNC (made by vfs-server now): sent
+        // again it opens the file the first try made, as Linux's create-if-missing
+        2 => open_resendable(args[1]),
+        257 => open_resendable(args[2]),
         // Process queries (lx-proc, wave 10): uname, getrlimit, getrusage, sysinfo,
         // getgroups, getresuid, getresgid, getpgid, getsid, capget, getpriority,
         // sched_getaffinity, prlimit64 without a new limit
@@ -276,6 +278,17 @@ pub fn add_key_resendable(ty: &[u8]) -> bool {
 /// `O_CREAT | O_TRUNC | O_TMPFILE` (`__O_TMPFILE` 0o20000000 plus `O_DIRECTORY`): the open
 /// flags that change the file system.
 const OPEN_CHANGES: u64 = 0o100 | 0o1000 | 0o20000000;
+
+// wave10 GV1 begin
+/// Whether an open with `flags` may be sent again after the file service died serving it:
+/// one that changes nothing, or a create-if-missing (`O_CREAT` without `O_EXCL`, `O_TRUNC`,
+/// `O_TMPFILE`: the second try opens what the first made).
+pub fn open_resendable(flags: u64) -> bool {
+    const O_CREAT: u64 = 0o100;
+    const O_EXCL: u64 = 0o200;
+    flags & OPEN_CHANGES == 0 || (flags & (OPEN_CHANGES | O_EXCL) == O_CREAT)
+}
+// wave10 GV1 end
 
 /// The results a dead Transparent service's calls get from the kernel (never seen by a
 /// program: the caller sends the call again or fails it). Next to Group 12's `LX_RETRY`

@@ -991,6 +991,10 @@ pub mod linux_stubs {
         pub fn cache_forget(ino: u64) {
             CACHE.with_borrow_mut(|v| v.push(("forget", ino, 0, 0)));
         }
+        /// *stub* wave10 GV1: a truncation unmaps the cut pages (recorded).
+        pub fn unmap_past(ino: u64, size: u64) {
+            let _ = CACHE.try_with(|v| v.borrow_mut().push(("unmap", ino, size, 0)));
+        }
         pub fn cache_flush() {
             CACHE.with_borrow_mut(|v| v.push(("flush", 0, 0, 0)));
         }

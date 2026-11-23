@@ -416,7 +416,32 @@ pub fn cache_truncated(ino: u64, size: u64) {
     }
     drop(pages);
     obj.dirty.lock().retain(|&p| p < first_gone);
+    // wave10 GV1: mappings of the cut pages go (the next touch faults)
+    if obj.maps.load(Ordering::Acquire) > 0 {
+        unmap_past(ino, size);
+    }
 }
+
+// wave10 GV1 begin
+/// A truncation of file `ino` to `size` (the page cache's or an in-memory tmpfs file's):
+/// every address space unmaps the file's pages past the end, so a mapping sees the cut
+/// (`SIGBUS` past the end, zeros where it grows again) as on Linux.
+pub fn unmap_past(ino: u64, size: u64) {
+    let first = size.div_ceil(PAGE_SIZE);
+    // (the address spaces are taken under the scheduler's lock and changed after it)
+    let mut spaces: Vec<Arc<Mutex<Mm>>> = Vec::new();
+    crate::task::SCHEDULER.lock().for_each_task_mut(|t| {
+        if let Some(m) = &t.mm {
+            if !spaces.iter().any(|s| Arc::ptr_eq(s, m)) {
+                spaces.push(m.clone());
+            }
+        }
+    });
+    for m in spaces {
+        m.lock().zap_file_from(ino, first);
+    }
+}
+// wave10 GV1 end
 
 /// The page cache's size for `/proc/meminfo`: `(pages it holds, pages of files only the
 /// cache keeps)`. The second are free memory in waiting ([`cache_shrink`] lets them go),
@@ -490,6 +515,10 @@ impl MapHandle {
 impl MappedObject for MapHandle {
     fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>> {
         self.0.get_page(pgoff)
+    }
+
+    fn inode(&self) -> Option<u64> {
+        Some(self.0.ino) // wave10 GV1
     }
 
     fn tracks_writes(&self) -> bool {

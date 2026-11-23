@@ -77,6 +77,22 @@ pub mod memory {
         pub const PAGE_SIZE: u64 = 4096;
         pub trait MappedObject: Send + Sync {
             fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>>;
+            /// wave10 GV1
+            fn inode(&self) -> Option<u64> {
+                None
+            }
+        }
+    }
+}
+
+/// *stub* wave10 GV1: the address spaces' unmapping of cut pages (recorded).
+pub mod compat {
+    pub mod linux {
+        pub mod mm {
+            pub static UNMAPS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
+            pub fn unmap_past(ino: u64, size: u64) {
+                UNMAPS.lock().unwrap().push((ino, size));
+            }
         }
     }
 }

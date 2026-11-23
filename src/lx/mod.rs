@@ -525,6 +525,7 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
     let nr = frame.rax;
     let e = entry(nr);
     if e == 0 {
+        fileh::count_unclaimed(nr); // wave10 GV1: a file call vfs-server did not claim
         return if nr == LX_NULL_NR {
             Some(0)
         } else if nr == crate::ipc::protocol::LX_ROUTE_NR {

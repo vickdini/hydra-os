@@ -180,6 +180,12 @@ pub trait MappedObject: Send + Sync {
     /// Writes the pages written through shared mappings back to where they came from
     /// (`msync`; files also do it when the last mapping goes).
     fn sync(&self) {}
+
+    /// wave10 GV1: the pool object (inode) whose pages these are, for a file's mapping (a
+    /// truncation unmaps the pages past the new end: [`Mm::zap_file_from`]).
+    fn inode(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// What a `Vma`'s pages are populated from.
@@ -447,6 +453,34 @@ fn flush(pml4: PhysAddr, addr: u64) {
 }
 
 impl Mm {
+    // wave10 GV1 begin
+    /// Unmaps every page of file `ino` from file page `first` on, in every area that maps
+    /// it (a truncation: the next touch faults, `SIGBUS` past the end, or a fresh page);
+    /// copied private pages of that range go too, as Linux's `unmap_mapping_range` with
+    /// `even_cows`. Returns how many areas mapped it.
+    pub fn zap_file_from(&mut self, ino: u64, first: u64) -> usize {
+        let ranges: Vec<(u64, u64)> = self
+            .vmas
+            .values()
+            .filter_map(|v| match &v.backing {
+                Backing::Object { obj, pgoff } if obj.inode() == Some(ino) => {
+                    let pages = (v.end - v.start) / PAGE_SIZE;
+                    if pgoff + pages <= first {
+                        return None;
+                    }
+                    let skip = first.saturating_sub(*pgoff);
+                    Some((v.start + skip * PAGE_SIZE, v.end))
+                }
+                _ => None,
+            })
+            .collect();
+        for &(s, e) in &ranges {
+            self.zap_range(s, e);
+        }
+        ranges.len()
+    }
+    // wave10 GV1 end
+
     /// Creates an empty address space sharing the kernel mappings.
     ///
     /// # Returns

@@ -640,6 +640,44 @@ fn splitting_a_file_mapping_keeps_offsets() {
     });
 }
 
+// wave10 GV1 begin
+/// A file's mapping (an object with an inode).
+struct FileObj(Arc<BufferObject>, u64);
+impl MappedObject for FileObj {
+    fn get_page(&self, pgoff: u64) -> Option<x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>> {
+        self.0.get_page(pgoff)
+    }
+    fn inode(&self) -> Option<u64> {
+        Some(self.1)
+    }
+}
+
+#[test]
+fn truncation_unmaps_only_that_files_pages_past_the_end() {
+    with_mm(|mm| {
+        let file = Arc::new(FileObj(object(4), 77));
+        let other = Arc::new(FileObj(object(2), 78));
+        // file pages 1..4 at A, the other file at A + 8P
+        mm.mmap(A, 3 * P, PROT_READ, true, true, false, Backing::Object { obj: file.clone(), pgoff: 1 }).unwrap();
+        mm.mmap(A + 8 * P, 2 * P, PROT_READ, true, true, false, Backing::Object { obj: other, pgoff: 0 }).unwrap();
+        for a in [A, A + P, A + 2 * P, A + 8 * P, A + 9 * P] {
+            mm.handle_fault(a, false, false).unwrap();
+        }
+        // truncated to 2 pages: file pages 2 and 3 (at A + P, A + 2P) go
+        assert_eq!(mm.zap_file_from(77, 2), 1);
+        assert!(mm.translate(A).is_some(), "page 1 stays");
+        assert!(mm.translate(A + P).is_none() && mm.translate(A + 2 * P).is_none(), "pages past the end unmapped");
+        assert!(mm.translate(A + 8 * P).is_some() && mm.translate(A + 9 * P).is_some(), "another file untouched");
+        // the next touch faults in again (the object still has the page here)
+        mm.handle_fault(A + P, false, false).unwrap();
+        assert!(mm.translate(A + P).is_some());
+        // an inode nothing maps, or a cut past every mapping: nothing
+        assert_eq!(mm.zap_file_from(79, 0), 0);
+        assert_eq!(mm.zap_file_from(77, 10), 0);
+    });
+}
+// wave10 GV1 end
+
 #[test]
 fn buffer_object_pages() {
     with_mm(|_| {

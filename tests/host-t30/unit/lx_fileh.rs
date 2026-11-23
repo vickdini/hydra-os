@@ -680,27 +680,84 @@ fn calls_the_service_would_send_back_stay_in_the_kernel() {
     assert_eq!(kernel_mask(87) & (LX_FS_LANDLOCK | LX_FS_ABAC), 0);
     assert_eq!(kernel_mask(165) & LX_FS_LANDLOCK, 0);
     assert_eq!(kernel_mask(21) & LX_FS_ABAC, 0);
-    assert_eq!(kernel_mask(133) & (LX_FS_LANDLOCK | LX_FS_ABAC), LX_FS_LANDLOCK | LX_FS_ABAC, "mknod is not served");
-    assert_ne!(kernel_mask(265) & LX_FS_LANDLOCK, 0, "linkat is not served");
-    assert_ne!(kernel_mask(188) & LX_FS_ABAC, 0, "setxattr is not served");
+    // wave10 GV1: mknod, linkat, the xattr calls and utime(s) are served (and checked) there too
+    assert_eq!(kernel_mask(133) & (LX_FS_LANDLOCK | LX_FS_ABAC), 0, "mknod is served");
+    assert_eq!(kernel_mask(265) & LX_FS_LANDLOCK, 0, "linkat is served");
+    assert_eq!(kernel_mask(188) & LX_FS_ABAC, 0, "setxattr is served");
+    assert_eq!(kernel_mask(235) & LX_FS_LANDLOCK, 0, "utimes is served");
+    assert_ne!(kernel_mask(87) & LX_FS_FOREIGN, 0, "a foreign root stays the kernel's");
 }
 
 #[test]
-fn creating_opens_of_policy_callers_stay_in_the_kernel() {
-    // wave9 G6b-3: vfs-server would send them back (the kernel makes files)
+fn creating_opens_of_policy_callers_go_to_the_service() {
+    // wave9 G6b-3 kept them here (vfs-server sent them back); wave10 GV1: vfs-server makes
+    // files, checking Landlock and ABAC itself
     let mut c = LxCall::EMPTY;
     c.nr = 257;
     c.fs_flags = LX_FS_LANDLOCK;
     assert!(!kernel_only(&c), "a plain open is checked by vfs-server");
     c.args[2] = 0o100 | 1;
-    assert!(kernel_only(&c));
+    assert!(!kernel_only(&c));
     c.nr = 2;
     c.args = [0, 0o100, 0, 0, 0, 0];
     c.fs_flags = LX_FS_ABAC;
-    assert!(kernel_only(&c));
+    assert!(!kernel_only(&c));
     c.fs_flags = 0;
     assert!(!kernel_only(&c), "a caller without rules: vfs-server walks first");
 }
+
+// wave10 GV1 begin
+#[test]
+fn path_calls_are_counted_unclaimed_but_not_data_calls() {
+    assert!(is_path_call(257) && is_path_call(133) && is_path_call(188) && is_path_call(80));
+    assert!(!is_path_call(74) && !is_path_call(285) && !is_path_call(217) && !is_path_call(78), "data and directory reads");
+    assert!(!is_path_call(0) && !is_path_call(202) && !is_path_call(600));
+    count_unclaimed(259);
+    count_unclaimed(202);
+    let s = kernel_by_nr(64);
+    assert!(s.starts_with("vfs to kernel by call (nr:sent/kept/unclaimed):"), "{}", s);
+    assert!(s.contains(" 259:0/0/1") || s.contains(" 259:0/0/"), "{}", s);
+    assert!(!s.contains(" 202:"), "{}", s);
+}
+
+#[test]
+fn label_changes_reach_the_kernels_abac_caches() {
+    crate::fake::reset();
+    assert_eq!(changed(42, crate::ipc::protocol::LX_FHC_LABELS | LX_FHC_ATTR, 0), 0);
+    crate::fake::rec(|r| {
+        assert!(r.fs_forgot.contains(&(0, 64)), "labels forgotten");
+        assert!(r.fs_forgot.contains(&(42, 3)), "the object's attributes forgotten");
+    });
+}
+
+#[test]
+fn the_tmem_sub_ops_vfs_server_uses() {
+    use crate::ipc::protocol::{LX_TMEM_MAY_MOVE, LX_TMEM_MNT, LX_TMEM_TIMES, LX_TMEM_TRUNC, LX_TMEM_UNLINKED};
+    crate::fake::reset();
+    // (no in-memory files here: the stub's tmem is off)
+    assert_eq!(tmem(LX_TMEM_MNT, 0, 0), -2, "the initial namespace has no tmpfs mounts");
+    assert_eq!(tmem(LX_TMEM_MNT, 5 << 32 | 8, 0), -2, "not a tmpfs");
+    assert_eq!(tmem(LX_TMEM_TRUNC, 99, 0), -2, "not an in-memory file");
+    assert_eq!(tmem(LX_TMEM_TIMES, 99, 0), 0);
+    assert_eq!(tmem(LX_TMEM_MAY_MOVE, 99, 1), 0);
+    assert_eq!(tmem(LX_TMEM_UNLINKED, 99, 0), 0);
+    crate::fake::rec(|r| assert!(r.fs_forgot.contains(&(99, 7))));
+}
+
+#[test]
+fn device_programs_mark_mknod_calls() {
+    let mut c = LxCall::EMPTY;
+    c.nr = 133;
+    crate::fake::FS_FLAGS.store(64, Ordering::Release);
+    let f = fs_flags_global(&mut c);
+    assert_ne!(f & crate::ipc::protocol::LX_FS_DEVCG, 0);
+    c.nr = 87;
+    assert_eq!(fs_flags_global(&mut c) & crate::ipc::protocol::LX_FS_DEVCG, 0, "only mknod");
+    crate::fake::FS_FLAGS.store(0, Ordering::Release);
+    c.nr = 259;
+    assert_eq!(fs_flags_global(&mut c) & crate::ipc::protocol::LX_FS_DEVCG, 0);
+}
+// wave10 GV1 end
 
 #[test]
 fn landlocks_truncate_refusal_goes_with_the_handle() {

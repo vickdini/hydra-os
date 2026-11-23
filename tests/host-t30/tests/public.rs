@@ -87,7 +87,12 @@ fn stale_errors_and_idempotent_calls() {
     assert!(idempotent(45, &a([0, 0, 0, 2, 0, 0])) && idempotent(47, &a([0, 0, 2, 0, 0, 0])));
     assert!(idempotent(16, &a([0, 0x5401, 0, 0, 0, 0])) && !idempotent(16, &a([0, 0x5402, 0, 0, 0, 0])));
     assert!(idempotent(4, &a([0; 6])) && idempotent(17, &a([0; 6])));
-    assert!(idempotent(2, &a([0, 0, 0, 0, 0, 0])) && !idempotent(2, &a([0, 0o100, 0, 0, 0, 0])));
+    assert!(idempotent(2, &a([0, 0, 0, 0, 0, 0])) && !idempotent(2, &a([0, 0o1000 | 1, 0, 0, 0, 0])));
+    // wave10 GV1: a create-if-missing is sent again (it opens what the first try made);
+    // O_EXCL, O_TRUNC and O_TMPFILE are not
+    assert!(idempotent(2, &a([0, 0o100, 0, 0, 0, 0])) && idempotent(257, &a([0, 0, 0o100 | 2, 0, 0, 0])));
+    assert!(!idempotent(257, &a([0, 0, 0o100 | 0o200 | 2, 0, 0, 0])) && !idempotent(257, &a([0, 0, 0o100 | 0o1000 | 1, 0, 0, 0])));
+    assert!(!idempotent(257, &a([0, 0, 0o20200000 | 2, 0, 0, 0])));
     assert!(idempotent(257, &a([0; 6])));
     assert!(idempotent(63, &a([0; 6])) && idempotent(302, &a([0; 6])) && !idempotent(302, &a([0, 0, 1, 0, 0, 0])));
     assert!(!idempotent(1, &a([0; 6])));

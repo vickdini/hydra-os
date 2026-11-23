@@ -1,9 +1,11 @@
-//! `open` and `openat` of existing regular files and directories (the kernel's
-//! `vfs::open_path`, its pool part): the walk, the type and permission checks
-//! ([`super::rules`]), and a handle made in the kernel (`LX_FH_INSTALL`). Everything else
-//! goes to the kernel before anything has changed: creating and truncating opens, `O_PATH`,
-//! `O_TMPFILE`, devices, FIFOs, sockets, and callers with fanotify marks. (wave9 G6b-3:
-//! Landlock and ABAC are checked here, `crate::policy`.)
+//! `open`, `openat` and (wave10 GV1) `creat` (the kernel's `vfs::open_path`, its pool part):
+//! the walk, the type and permission checks ([`super::rules`]), and a handle made in the
+//! kernel (`LX_FH_INSTALL`, or the answer itself). wave10 GV1: creating opens
+//! (`super::make::create`), truncating opens, `O_PATH` and `O_TMPFILE`
+//! (`super::make::tmpfile`) are served here too. Still the kernel's, before anything has
+//! changed: devices, sockets, `O_CREAT` through a dangling symbolic link or with
+//! `O_DIRECTORY`, and callers with fanotify marks. (wave9 G6b-3: Landlock and ABAC are
+//! checked here, `crate::policy`.)
 
 use hydra_rt::svcrt::Cx;
 use hydra_rt::sys;
@@ -61,7 +63,13 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     }
     let dom = policy::domain(c)?;
     let a = cx.args;
-    let (dirfd, path_ptr, flags) = if cx.nr == 2 { (-100i32, a[0], a[1] as u32) } else { (a[0] as i32, a[1], a[2] as u32) };
+    // (wave10 GV1: the mode of a new file; creat(path, mode) = open(path, O_CREAT | O_WRONLY |
+    // O_TRUNC, mode))
+    let (dirfd, path_ptr, flags, mode) = match cx.nr {
+        2 => (-100i32, a[0], a[1] as u32, a[2] as u32),
+        85 => (-100i32, a[0], O_CREAT | rules::O_WRONLY | rules::O_TRUNC, a[1] as u32),
+        _ => (a[0] as i32, a[1], a[2] as u32, a[3] as u32),
+    };
     if !rules::servable(flags) {
         return Err(KERNEL);
     }
@@ -69,13 +77,31 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     let k = ctxt::call(c)?; // wave9 GP2
     let who = &k.who;
     let follow = flags & O_NOFOLLOW == 0;
+    // wave10 GV1 begin: O_TMPFILE, O_PATH
+    if flags & rules::O_TMPFILE_MASK != 0 {
+        return super::make::tmpfile(cx, &k, &path, flags, mode, dirfd).map_err(plain);
+    }
+    if flags & rules::O_PATH != 0 {
+        let (n, attr) = k.find(c, &path, follow).map_err(plain)?;
+        return opath(cx, c, n, &attr, flags, &path, dirfd, fifo);
+    }
+    // A file this call makes opens with the access asked for, whatever its new mode says
+    // (creat(path, 0444) returns a writable descriptor); it is not truncated
+    let mut created = false;
+    // wave10 GV1 end
     let (n, attr) = if flags & O_CREAT != 0 {
         // O_EXCL never follows the last component: a symlink there (even dangling) exists
         match k.find(c, &path, follow && flags & O_EXCL == 0) {
             Ok(_) if flags & O_EXCL != 0 => return Err(EEXIST),
             Ok(f) => f,
-            // A new file: the kernel makes it (until the change calls move)
-            Err(rules::ENOENT) => return Err(KERNEL),
+            // wave10 GV1: a new file, made here
+            Err(rules::ENOENT) => match super::make::create(cx, &k, &path, flags, mode)? {
+                super::make::Made::New(n, a) => {
+                    created = true;
+                    (n, a)
+                }
+                super::make::Made::Exists => k.find(c, &path, follow)?,
+            },
             Err(e) => return Err(e),
         }
     } else {
@@ -102,15 +128,17 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
         return Err(FIFO);
     }
     // wave7 G7-5 end
-    // wave7 G7-7: writing into a read-only mount: the kernel answers (EROFS)
-    if flags & rules::O_ACCMODE != rules::O_RDONLY {
+    let want = rules::decide(attr.mode, flags)?;
+    // wave7 G7-7: writing into a read-only mount (wave10 GV1: EROFS here, after the type
+    // checks, as the kernel's)
+    if flags & rules::O_ACCMODE != rules::O_RDONLY || flags & rules::O_TRUNC != 0 {
         k.writable(n)?;
     }
-    let want = rules::decide(attr.mode, flags)?;
-
-    let acl = ctxt::acl_of(n, &attr)?;
-    if !ctxt::allowed(who, &attr, acl.as_deref(), c.euid, c.egid, want, &path)? {
-        return Err(EACCES);
+    if !created {
+        let acl = ctxt::acl_of(n, &attr)?;
+        if !ctxt::allowed(who, &attr, acl.as_deref(), c.euid, c.egid, want, &path)? {
+            return Err(EACCES);
+        }
     }
     // wave9 G6b-3 begin: Landlock, as the kernel's open: the open's rights, and TRUNCATE
     // for every file (a later ftruncate on the handle depends on it)
@@ -121,7 +149,8 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
             return Err(KERNEL);
         }
         let is_dir = attr.is_dir();
-        let want = ll::open_rights(flags, is_dir);
+        // (wave10 GV1: a file this call made is not truncated)
+        let want = ll::open_rights(if created { flags & !rules::O_TRUNC } else { flags }, is_dir);
         let extra = if is_dir { 0 } else { ll::TRUNCATE };
         let refused = policy::refused_on(d, c.id, n, is_dir, want | extra)?;
         if refused & want != 0 {
@@ -130,6 +159,12 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
         notrunc = refused & ll::TRUNCATE != 0;
     }
     // wave9 G6b-3 end
+    // wave10 GV1: a truncating open of a regular file for writing (an in-memory tmpfs file's
+    // pool size is 0 whatever its data: asked)
+    let trunc = flags & rules::O_TRUNC != 0 && attr.mode & rules::S_IFMT == rules::S_IFREG && flags & rules::O_ACCMODE != rules::O_RDONLY && !created;
+    if trunc && (attr.size != 0 || (crate::tmem::candidate(&attr) && crate::tmem::is_tmem(n.ino))) {
+        super::change::truncate_for_open(who, n, &attr)?;
+    }
     let mut d = rules::handle_desc(c, n.ino, n.mnt, attr.is_dir(), flags, &path, dirfd)?;
     if notrunc {
         d.flags |= LX_FH_NOTRUNC; // wave9 G6b-3
@@ -154,3 +189,40 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     };
     Ok(fd as i64)
 }
+
+// wave10 GV1 begin
+/// A walk's error as a plain answer: a redirect to another service or a FUSE wait is the
+/// kernel's for the opens that do not go there (`O_PATH`, `O_TMPFILE`).
+fn plain(e: i64) -> i64 {
+    if e < -4095 {
+        KERNEL
+    } else {
+        e
+    }
+}
+
+/// `open(path, O_PATH ...)` of `n` (the kernel's rules: no permission check, no Landlock,
+/// a symbolic link itself with `O_NOFOLLOW`, any file type; `O_DIRECTORY` and a directory
+/// opened for writing as for other opens).
+#[allow(clippy::too_many_arguments)]
+fn opath(cx: &Cx, c: &crate::proto::LxCall, n: crate::ctx::Node, attr: &crate::fs::fsproto::Attr, flags: u32, path: &[u8], dirfd: i32, fh: &mut u64) -> Result<i64, i64> {
+    let kind = attr.mode & rules::S_IFMT;
+    if flags & rules::O_DIRECTORY != 0 && kind != rules::S_IFDIR {
+        return Err(rules::ENOTDIR);
+    }
+    if kind == rules::S_IFDIR && flags & rules::O_ACCMODE != rules::O_RDONLY {
+        return Err(rules::EISDIR);
+    }
+    // (a FUSE object: the daemon's handles live while it is open; the kernel's)
+    if crate::fuse::wire::split(n.ino).is_some() {
+        return Err(KERNEL);
+    }
+    let d = rules::handle_desc(c, n.ino, n.mnt, attr.is_dir(), flags, path, dirfd)?;
+    if c.flags & crate::proto::LX_CALL_FHANSWER != 0 && !cx.page().is_null() && n.ino != 0 && n.ino < 1 << 45 && d.flags & !rules::FH_PLAIN == 0 {
+        *fh = n.ino | (n.mnt as u64) << 45 | (attr.is_dir() as u64) << 61;
+        return Err(FHANSWER);
+    }
+    let fd = sys::lx_obj(LX_FH_INSTALL, cx.id, &d as *const LxFhDesc as u64, 0)?;
+    Ok(fd as i64)
+}
+// wave10 GV1 end

@@ -11,6 +11,14 @@ impl TmemFile {
     pub fn read(&self, _offset: u64, _buf: &mut [u8]) -> usize {
         0
     }
+    // wave10 GV1: the sub-ops vfs-server's changes use
+    pub fn truncate(&self, _size: u64) -> Result<(), i64> {
+        Ok(())
+    }
+    pub fn times_set(&self) {}
+}
+pub fn may_move(_ino: u64, _dir: u64) -> bool {
+    true
 }
 pub fn get(_ino: u64) -> Option<Arc<TmemFile>> {
     None

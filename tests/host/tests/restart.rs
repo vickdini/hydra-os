@@ -210,11 +210,12 @@ fn idempotent_marks_sockets_and_io() {
 fn idempotent_marks_files() {
     assert!(idempotent(2, &[0, 0, 0, 0, 0, 0])); // open O_RDONLY
     assert!(idempotent(2, &[0, 2, 0, 0, 0, 0])); // O_RDWR without create
-    assert!(!idempotent(2, &[0, 0o100, 0, 0, 0, 0])); // O_CREAT
+    assert!(idempotent(2, &[0, 0o100, 0, 0, 0, 0])); // O_CREAT (wave10 GV1: create-if-missing is sent again)
+    assert!(!idempotent(2, &[0, 0o300, 0, 0, 0, 0])); // O_CREAT | O_EXCL
     assert!(!idempotent(2, &[0, 0o1001, 0, 0, 0, 0])); // O_TRUNC
     assert!(!idempotent(2, &[0, 0o20200000, 0, 0, 0, 0])); // O_TMPFILE
     assert!(idempotent(257, &[u64::MAX - 99, 0, 0o2000000, 0, 0, 0])); // openat O_CLOEXEC
-    assert!(!idempotent(257, &[u64::MAX - 99, 0, 0o101, 0, 0, 0]));
+    assert!(!idempotent(257, &[u64::MAX - 99, 0, 0o1101, 0, 0, 0]));
     for nr in [4, 5, 6, 21, 79, 89, 137, 138, 191, 196, 262, 267, 269, 332, 439, 17] {
         assert!(idempotent(nr, &[0; 6]), "call {} only reads", nr);
     }

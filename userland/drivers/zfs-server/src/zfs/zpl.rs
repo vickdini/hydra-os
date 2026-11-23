@@ -609,6 +609,11 @@ impl ZfsServer {
         }
         self.zap.insert(&mut self.dmu, dir, name, ino, dtype_from_mode(dn.mode)).map_err(io)?;
         remember_name(ino, dir, name);
+        // wave10 GV1: an open file without names (O_TMPFILE) linked again is no orphan: its
+        // last close must not free it
+        if dn.nlink == 0 {
+            self.orphans.remove(&ino);
+        }
         dn.nlink += 1;
         let t = now();
         dn.ctime = t.0;

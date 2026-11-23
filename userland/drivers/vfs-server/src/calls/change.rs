@@ -25,6 +25,7 @@ const EPERM: i64 = -1;
 const EEXIST: i64 = -17;
 const ENOTDIR: i64 = -20;
 const EINVAL: i64 = -22;
+const EXDEV: i64 = -18; // wave10 GV1
 const EACCES: i64 = -13;
 
 /// What only the kernel has for a change (wave9 G6b-3: Landlock and ABAC are checked here).
@@ -33,11 +34,9 @@ const NEED: u32 = LX_FS_INOTIFY | LX_FS_FANOTIFY;
 const CAP_FSETID: u32 = 4;
 const AT_REMOVEDIR: u64 = 0x200;
 const RENAME_NOREPLACE: u64 = 1;
-const UTIME_NOW: i64 = (1 << 30) - 1;
-const UTIME_OMIT: i64 = (1 << 30) - 2;
 
 /// Tells the kernel's caches about change `what` (`LX_FHC_*`) to `ino`.
-fn tell_kernel(ino: u64, what: u64, size: u64) {
+pub(super) fn tell_kernel(ino: u64, what: u64, size: u64) {
     let _ = sys::lx_obj(LX_FH_CHANGED, ino, what, &size as *const u64 as u64);
 }
 
@@ -62,11 +61,10 @@ fn target(cx: &Cx, who: &Ctx, ptr: u64, follow: bool, empty_ok: bool) -> Result<
 
 /// Applies `set` to `n` (attributes `a` before) through zfs-server (the caller checked that
 /// `n`'s mount is writable: [`attrs`]).
-fn setattr(who: &Ctx, n: Node, a: &Attr, mut set: SetAttr) -> Result<i64, i64> {
-    // wave9 GM: an in-memory tmpfs file's size and data times are the kernel's
-    if (set.size.is_some() || set.mtime.is_some()) && crate::tmem::candidate(a) && crate::tmem::is_tmem(n.ino) {
-        return Err(KERNEL);
-    }
+pub(super) fn setattr(who: &Ctx, n: Node, a: &Attr, mut set: SetAttr) -> Result<i64, i64> {
+    // wave9 GM: an in-memory tmpfs file's size and data times are the kernel's (wave10 GV1:
+    // changed there by `tmem`'s calls, the rest here)
+    let mem = (set.size.is_some() || set.mtime.is_some()) && crate::tmem::candidate(a) && crate::tmem::is_tmem(n.ino);
     // A truncation by a caller without CAP_FSETID drops the set-ID bits, as a write does
     if let (Some(_), None) = (set.size, set.mode) {
         if !who.has_cap(CAP_FSETID) && a.mode & 0o170000 != 0o040000 {
@@ -78,24 +76,68 @@ fn setattr(who: &Ctx, n: Node, a: &Attr, mut set: SetAttr) -> Result<i64, i64> {
             }
         }
     }
-    // wave9 G6b-1: a mode change of an object with extended attributes also rewrites its
-    // access ACL's owner, mask and other entries (the kernel's `acl::on_chmod`): the kernel
-    // makes it (found once the fanotify test no longer kept every later call in the kernel)
-    if a.has_xattr && set.mode.is_some() {
-        return Err(KERNEL);
+    // wave10 GV1 begin
+    let cut = if mem { set.size.take() } else { None };
+    if mem && set.mtime.is_some() {
+        crate::tmem::times_set(n.ino);
     }
-    let r = zfs::request(FS_SETATTR, |w| {
-        w.u64(n.ino);
-        w.setattr(&set);
-    });
+    let nothing = set.mode.is_none() && set.uid.is_none() && set.gid.is_none() && set.size.is_none() && set.atime.is_none() && set.mtime.is_none() && !set.kill_suid;
+    let zr = if mem && nothing {
+        None
+    } else {
+        Some(zfs::request(FS_SETATTR, |w| {
+            w.u64(n.ino);
+            w.setattr(&set);
+        }))
+    };
     // wave9 G6b-1: the events of the change for inotify/fanotify
-    crate::notify::changed(&r, who);
+    if let Some(z) = &zr {
+        crate::notify::changed(z, who);
+    }
+    let r: Result<(), i64> = match zr {
+        Some(Err(e)) => Err(e),
+        _ => Ok(()),
+    };
+    // wave10 GV1 end
+    // wave10 GV1: a mode change of an object with extended attributes also rewrites its
+    // access ACL's owner, mask and other entries (the kernel's `acl::on_chmod`)
+    if let (Ok(_), Some(mode), true) = (&r, set.mode, a.has_xattr) {
+        acl_follows_mode(n, mode);
+    }
+    // wave10 GV1: an in-memory file's size is the kernel's
+    let r = match (r, cut) {
+        (Ok(()), Some(size)) => crate::tmem::truncate(n.ino, size),
+        (r, _) => r,
+    };
     cache::forget_attr(n);
     // (the page cache is cut only when the file was)
     let size = set.size.unwrap_or(0);
     tell_kernel(n.ino, LX_FHC_ATTR | if set.size.is_some() && r.is_ok() { LX_FHC_TRUNC } else { 0 }, size);
     r.map(|_| 0)
 }
+
+// wave10 GV1 begin
+/// The truncation of a truncating `open` of regular file `n` (attributes `a`), as the
+/// kernel's: to size 0, the set-ID bits as for any truncation.
+pub(super) fn truncate_for_open(who: &Ctx, n: Node, a: &Attr) -> Result<(), i64> {
+    setattr(who, n, a, SetAttr { size: Some(0), ..SetAttr::default() }).map(|_| ())
+}
+
+/// After a chmod of `n` to `mode`: its access ACL, if it has one, takes the new owner, mask
+/// (or owning group) and other bits.
+fn acl_follows_mode(n: Node, mode: u32) {
+    if let Ok(old) = zfs::getxattr(n.ino, super::acl::ACCESS) {
+        if let Some(new) = super::acl::on_chmod(&old, mode) {
+            let _ = zfs::request(crate::fs::fsproto::FS_SETXATTR, |w| {
+                w.u64(n.ino);
+                w.bytes(super::acl::ACCESS);
+                w.bytes(&new);
+                w.u64(0);
+            });
+        }
+    }
+}
+// wave10 GV1 end
 
 /// `chown`'s rule ([`rules::chown_ok`]).
 fn chown_ok(who: &Ctx, a: &Attr, uid: u32, gid: u32) -> bool {
@@ -111,19 +153,22 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
     let who = ctxt::caller(c)?;
     let owner = |who: &Ctx, at: &Attr| who.uid == 0 || who.uid == at.uid;
     match cx.nr {
-        // chmod(path, mode), fchmodat(dirfd, path, mode), fchmod(fd, mode)
-        90 | 268 | 91 => {
-            let (ptr, mode, empty) = match cx.nr {
-                90 => (a[0], a[1], false),
-                268 => (a[1], a[2], false),
-                _ => (0, a[1], true),
+        // chmod(path, mode), fchmodat(dirfd, path, mode), fchmod(fd, mode), (wave10 GV1)
+        // fchmodat2(dirfd, path, mode, flags)
+        90 | 268 | 91 | 452 => {
+            let (ptr, mode, follow, empty) = match cx.nr {
+                90 => (a[0], a[1], true, false),
+                268 => (a[1], a[2], true, false),
+                452 => {
+                    if a[3] & !(ctxt::AT_SYMLINK_NOFOLLOW | ctxt::AT_EMPTY_PATH) != 0 {
+                        return Err(EINVAL);
+                    }
+                    (a[1], a[2], a[3] & ctxt::AT_SYMLINK_NOFOLLOW == 0, a[3] & ctxt::AT_EMPTY_PATH != 0)
+                }
+                _ => (0, a[1], true, true),
             };
-            let (n, at) = target(cx, &who, ptr, true, empty)?;
-            // wave9 G6b-3: an object with extended attributes may have an access ACL, which
-            // takes the new owner, mask and other bits (the kernel's `acl::on_chmod`)
-            if at.has_xattr {
-                return Err(KERNEL);
-            }
+            let (n, at) = target(cx, &who, ptr, follow, empty)?;
+            // (wave10 GV1: an access ACL takes the new bits in `setattr`)
             ctxt::writable(c, n)?; // wave7 G7-7
             if !owner(&who, &at) {
                 return Err(EPERM);
@@ -189,28 +234,48 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
             let at = ctxt::BE.getattr(n)?;
             setattr(&who, n, &at, SetAttr { size: Some(a[1]), ..SetAttr::default() })
         }
-        // utimensat(dirfd, path, times, flags): explicit times only (else the kernel's clock)
+        // wave10 GV1 begin: utimensat(dirfd, path, times, flags), utime(path, times),
+        // utimes(path, times), futimesat(dirfd, path, times); "now" from the wall clock
         _ => {
-            if a[2] == 0 {
-                return Err(KERNEL);
-            }
-            let raw = cx.copy_in(a[2], 32)?;
-            let ts = |off: usize| -> Result<Option<(i64, u32)>, i64> {
-                let s = i64::from_le_bytes(raw[off..off + 8].try_into().unwrap());
-                let ns = i64::from_le_bytes(raw[off + 8..off + 16].try_into().unwrap());
-                match ns {
-                    UTIME_NOW => Err(KERNEL),
-                    UTIME_OMIT => Ok(None),
-                    _ => Ok(Some((s, ns as u32))),
+            let (ptr, times, follow, empty) = match cx.nr {
+                280 => {
+                    if a[3] & !(ctxt::AT_SYMLINK_NOFOLLOW | ctxt::AT_EMPTY_PATH) != 0 {
+                        return Err(EINVAL);
+                    }
+                    (a[1], a[2], a[3] & ctxt::AT_SYMLINK_NOFOLLOW == 0, true)
                 }
+                261 => (a[1], a[2], true, false),
+                _ => (a[0], a[1], true, false),
             };
-            let (atime, mtime) = (ts(0)?, ts(16)?);
-            let (n, at) = target(cx, &who, a[1], a[3] & ctxt::AT_SYMLINK_NOFOLLOW == 0, true)?;
+            let raw = match (cx.nr, times) {
+                (_, 0) => None,
+                (132, p) => Some(cx.copy_in(p, 16)?),
+                (_, p) => Some(cx.copy_in(p, 32)?),
+            };
+            let now = {
+                let (s, ns) = sys::clock();
+                (s as i64, ns)
+            };
+            let (atime, mtime) = rules::utimes(cx.nr, raw.as_deref(), now)?;
+            let explicit = rules::times_explicit(cx.nr, raw.as_deref());
+            let (n, at) = target(cx, &who, ptr, follow, empty)?;
+            // (both omitted: nothing changes; Linux answers 0 after the walk)
+            if atime.is_none() && mtime.is_none() {
+                return Ok(0);
+            }
             ctxt::writable(c, n)?; // wave7 G7-7
             if !owner(&who, &at) {
-                return Err(EPERM);
+                // "now" needs write access, explicit times the owner (Linux's rule)
+                if explicit {
+                    return Err(EPERM);
+                }
+                let acl = ctxt::acl_of(n, &at)?;
+                if !ctxt::allowed(&who, &at, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE, b"")? {
+                    return Err(EACCES);
+                }
             }
             setattr(&who, n, &at, SetAttr { atime, mtime, ..SetAttr::default() })
+            // wave10 GV1 end
         }
     }
 }
@@ -222,12 +287,22 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
 /// The directory and last name of `path` for a change, with the kernel's checks
 /// (`with_parent`): `EEXIST`/`ENOENT` for the name first, then write and search permission
 /// on the directory. `create`: the call makes the name.
-fn parent(c: &LxCall, who: &Ctx, path: &[u8], create: bool) -> Result<walk::Parent, i64> {
+pub(super) fn parent(c: &LxCall, who: &Ctx, path: &[u8], create: bool) -> Result<walk::Parent, i64> {
     let start = ctxt::start(c, path)?;
     let p = match walk::walk_parent(&ctxt::walker(c)?, who, start, path)? {
         ParentWalked::Found(p) => p,
         ParentWalked::Redirect(_) => return Err(KERNEL),
     };
+    parent_checks(c, who, p, path, create)
+}
+
+/// [`parent`]'s checks on an already walked parent `p` (wave10 GV1: a creating open walks
+/// it itself).
+pub(super) fn parent_checks(c: &LxCall, who: &Ctx, p: walk::Parent, path: &[u8], create: bool) -> Result<walk::Parent, i64> {
+    // (wave10 GV1: a FUSE directory's changes are the kernel's, which asks the daemon)
+    if crate::fuse::wire::split(p.dir.ino).is_some() {
+        return Err(KERNEL);
+    }
     if !p.dir_attr.is_dir() {
         return Err(ENOTDIR);
     }
@@ -243,11 +318,7 @@ fn parent(c: &LxCall, who: &Ctx, path: &[u8], create: bool) -> Result<walk::Pare
             _ => {}
         }
     }
-    // wave9 G6b-3: a new object in a labelled folder under the access policies: the kernel's
-    // (it inherits the labels; deciding here too would audit twice)
-    if create && who.abac && p.dir_attr.has_xattr {
-        return Err(KERNEL);
-    }
+    // (wave10 GV1: a new object in a labelled folder inherits its labels here, `xattr::new_mode`)
     let acl = ctxt::acl_of(p.dir, &p.dir_attr)?;
     if !ctxt::allowed(who, &p.dir_attr, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE | rules::MAY_EXEC, path)? {
         return Err(EACCES);
@@ -256,7 +327,7 @@ fn parent(c: &LxCall, who: &Ctx, path: &[u8], create: bool) -> Result<walk::Pare
 }
 
 /// The kernel's sticky-directory rule ([`rules::sticky_denied`]).
-fn sticky_denied(dir: &Attr, entry: Node, euid: u32) -> Result<bool, i64> {
+pub(super) fn sticky_denied(dir: &Attr, entry: Node, euid: u32) -> Result<bool, i64> {
     if euid == 0 || dir.mode & 0o1000 == 0 || dir.uid == euid {
         return Ok(false);
     }
@@ -264,7 +335,7 @@ fn sticky_denied(dir: &Attr, entry: Node, euid: u32) -> Result<bool, i64> {
 }
 
 /// After a change of names in `dirs`: vfs-server's caches and the kernel's.
-fn names_changed(dirs: &[Node], gone: Option<u64>) {
+pub(super) fn names_changed(dirs: &[Node], gone: Option<u64>) {
     for d in dirs {
         cache::forget_dir(*d);
         cache::forget_attr(*d);
@@ -288,11 +359,8 @@ pub fn mkdir(cx: &Cx) -> Result<i64, i64> {
     if let Some(d) = policy::domain(c)? {
         policy::check_dir(&d, p.dir, ll::MAKE_DIR)?;
     }
-    // A default ACL (or ABAC labels) would be inherited: the kernel's
-    if p.dir_attr.has_xattr {
-        return Err(KERNEL);
-    }
-    let perm = mode as u32 & 0o7777 & !(c.umask as u32);
+    // wave10 GV1: a default ACL and the labels are inherited here
+    let (perm, plan) = super::xattr::new_mode(p.dir, &p.dir_attr, mode as u32 & 0o7777, c.umask as u32, true)?;
     let r = zfs::request(FS_MKDIR, |w| {
         w.u64(p.dir.ino);
         w.bytes(&p.name);
@@ -302,6 +370,11 @@ pub fn mkdir(cx: &Cx) -> Result<i64, i64> {
     });
     // wave9 G6b-1: the events of the change for inotify/fanotify
     crate::notify::changed(&r, &who);
+    if let Ok(made) = &r {
+        if !plan.is_empty() {
+            super::xattr::inherit(made.value, &plan); // wave10 GV1
+        }
+    }
     names_changed(&[p.dir], None);
     r.map(|_| 0)
 }
@@ -351,10 +424,9 @@ pub fn unlink(cx: &Cx) -> Result<i64, i64> {
         policy::check_dir(&d, p.dir, if rmdir { ll::REMOVE_DIR } else { ll::REMOVE_FILE })?;
     }
     let victim = p.child;
-    // wave9 GM: an in-memory tmpfs file's last name: the kernel frees its data
-    if !rmdir && victim.is_some_and(crate::tmem::node_is_tmem) {
-        return Err(KERNEL);
-    }
+    // wave9 GM: an in-memory tmpfs file's last name: the kernel frees its data (wave10 GV1:
+    // told after the unlink here)
+    let mem = !rmdir && victim.is_some_and(crate::tmem::node_is_tmem);
     if let Some(v) = victim {
         if sticky_denied(&p.dir_attr, v, c.euid)? {
             return Err(EPERM);
@@ -377,6 +449,9 @@ pub fn unlink(cx: &Cx) -> Result<i64, i64> {
         }
     }
     names_changed(&[p.dir], if r.is_ok() && !rmdir { victim.map(|v| v.ino) } else { None });
+    if let (Ok(_), true, Some(v)) = (&r, mem, victim) {
+        crate::tmem::unlinked(v.ino); // wave10 GV1
+    }
     r.map(|_| 0)
 }
 
@@ -409,14 +484,18 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
         ParentWalked::Found(p) => p,
         ParentWalked::Redirect(_) => return Err(KERNEL),
     };
-    // wave7 G7-7: across mounts (EXDEV), in a read-only one, or a mount point: the kernel's
+    // wave7 G7-7: a mount point: the kernel's (wave10 GV1: across mounts EXDEV, a read-only
+    // one EROFS, here)
     if src.dir.mnt != dst.dir.mnt {
-        return Err(KERNEL);
+        return Err(EXDEV);
     }
     ctxt::writable(c, src.dir)?;
-    // wave9 GM: moving or replacing an in-memory tmpfs file: the kernel's
-    if [src.child, dst.child].into_iter().flatten().any(crate::tmem::node_is_tmem) {
-        return Err(KERNEL);
+    // wave9 GM: moving or replacing an in-memory tmpfs file (wave10 GV1: the kernel says
+    // whether its data may follow the name, and frees a replaced one's)
+    let moved_mem = src.child.filter(|s| crate::tmem::node_is_tmem(*s));
+    let replaced_mem = dst.child.filter(|d| crate::tmem::node_is_tmem(*d));
+    if let Some(m) = moved_mem {
+        crate::tmem::may_move(m.ino, dst.dir.ino)?;
     }
     for ch in [src.child, dst.child].into_iter().flatten() {
         ctxt::not_mountpoint(c, ch)?;
@@ -486,5 +565,11 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
         policy::names_changed(d.ino);
     }
     names_changed(&[src.dir, dst.dir], replaced);
+    // wave10 GV1: a replaced in-memory file lost its name
+    if let (Some(rep), Some(d)) = (replaced, replaced_mem) {
+        if rep == d.ino {
+            crate::tmem::unlinked(d.ino);
+        }
+    }
     r.map(|_| 0)
 }

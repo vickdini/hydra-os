@@ -9,6 +9,7 @@ use hydra_rt::sys;
 
 use crate::fs::fsproto::Attr;
 use crate::proto::{LxTmemAttr, LX_FH_TMEM, LX_TMEM_ATTR, LX_TMEM_LIMIT};
+use crate::proto::{LX_TMEM_CREATED, LX_TMEM_MAY_MOVE, LX_TMEM_MNT, LX_TMEM_TIMES, LX_TMEM_TRUNC, LX_TMEM_UNLINKED}; // wave10 GV1
 
 /// What the kernel knows of `ino` if it is an in-memory file.
 fn query(ino: u64) -> Option<LxTmemAttr> {
@@ -73,3 +74,46 @@ pub fn parse_size(data: &str) -> Option<u64> {
     };
     num.parse::<u64>().ok()?.checked_mul(mul).filter(|&b| b >> 63 == 0)
 }
+
+// wave10 GV1 begin: the changes vfs-server makes to in-memory files go to the kernel's data
+/// Truncates in-memory file `ino` to `size` (the kernel cuts its pages and mappings).
+pub fn truncate(ino: u64, size: u64) -> Result<(), i64> {
+    sys::lx_obj(LX_FH_TMEM, LX_TMEM_TRUNC, ino, size).map(|_| ())
+}
+
+/// In-memory file `ino`'s data time was set: the pool's times are its own again.
+pub fn times_set(ino: u64) {
+    let _ = sys::lx_obj(LX_FH_TMEM, LX_TMEM_TIMES, ino, 0);
+}
+
+/// Regular file `ino` was made in directory `dir` of mount `mnt` of namespace `ns`: the
+/// kernel makes it an in-memory file if that mount is a tmpfs that keeps data in memory.
+pub fn created(ino: u64, dir: u64, ns: u32, mnt: u16) {
+    let a = [dir, (ns as u64) << 32 | mnt as u64];
+    let _ = sys::lx_obj(LX_FH_TMEM, LX_TMEM_CREATED, ino, a.as_ptr() as u64);
+}
+
+/// In-memory file `ino` lost a name.
+pub fn unlinked(ino: u64) {
+    let _ = sys::lx_obj(LX_FH_TMEM, LX_TMEM_UNLINKED, ino, 0);
+}
+
+/// `EXDEV` when file `ino` (an in-memory one) may not get a name in `dir`.
+pub fn may_move(ino: u64, dir: u64) -> Result<(), i64> {
+    sys::lx_obj(LX_FH_TMEM, LX_TMEM_MAY_MOVE, ino, dir).map(|_| ())
+}
+
+/// The tmpfs id of mount `mnt` of namespace `ns`, if its files keep data in memory.
+pub fn mount_id(ns: u32, mnt: u16) -> Option<u64> {
+    let mut id = 0u64;
+    sys::lx_obj(LX_FH_TMEM, LX_TMEM_MNT, (ns as u64) << 32 | mnt as u64, &mut id as *mut u64 as u64).ok()?;
+    Some(id)
+}
+
+/// `(limit, used, files)` of tmpfs `id`.
+pub fn usage(id: u64) -> Option<(u64, u64, u64)> {
+    let mut v = [0u64; 3];
+    sys::lx_obj(LX_FH_TMEM, crate::proto::LX_TMEM_USAGE, id, v.as_mut_ptr() as u64).ok()?;
+    Some((v[0], v[1], v[2]))
+}
+// wave10 GV1 end

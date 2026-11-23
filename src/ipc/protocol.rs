@@ -2837,3 +2837,30 @@ pub struct LxTmemAttr {
 /// the rest of the last one (tmpfs truncation).
 pub const LX_MEM_TRUNC: u64 = 10;
 // wave9 GM end
+
+// wave10 GV1 begin: the change calls served by vfs-server
+/// [`LX_FH_TMEM`] sub-op: `(ns << 32 | mount, *u64)`: the tmpfs id of mount `mount` of mount
+/// namespace `ns` (`-ENOENT`: not a tmpfs whose files keep their data in memory).
+pub const LX_TMEM_MNT: u64 = 4;
+/// [`LX_FH_TMEM`] sub-op: `(ino, *[dir, ns << 32 | mount])`: vfs-server made regular file
+/// `ino` in directory `dir` of that mount: it becomes an in-memory file if its tmpfs (or
+/// `/dev/shm`) keeps data in memory.
+pub const LX_TMEM_CREATED: u64 = 5;
+/// [`LX_FH_TMEM`] sub-op: `(ino, size)`: truncates in-memory file `ino` (`-ENOENT`: not one).
+pub const LX_TMEM_TRUNC: u64 = 6;
+/// [`LX_FH_TMEM`] sub-op: `(ino, 0)`: in-memory file `ino` lost a name (it goes when it has
+/// none left and is not open).
+pub const LX_TMEM_UNLINKED: u64 = 7;
+/// [`LX_FH_TMEM`] sub-op: `(ino, dir)`: may file `ino` get a name in `dir` (`-EXDEV`: an
+/// in-memory file's data cannot follow a name to another file system)?
+pub const LX_TMEM_MAY_MOVE: u64 = 8;
+/// [`LX_FH_TMEM`] sub-op: `(ino, 0)`: in-memory file `ino`'s data time was set
+/// (`utimensat`): the pool's times are its own again.
+pub const LX_TMEM_TIMES: u64 = 9;
+/// [`LX_FH_CHANGED`] `what`: an access-control label attribute (`security.hydra.labels`)
+/// changed: the kernel's ABAC caches forget their labels.
+pub const LX_FHC_LABELS: u64 = 64;
+/// [`LxCall::fs_flags`] of `mknod`/`mknodat`: device programs of the caller's control group
+/// decide device nodes (the kernel makes those).
+pub const LX_FS_DEVCG: u32 = 128;
+// wave10 GV1 end
