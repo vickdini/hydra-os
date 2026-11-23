@@ -327,8 +327,9 @@ pub fn start(win: *mut u8) {
         };
         if ours && kept_kind == o.kind {
             live.push(o.slot);
-        } else {
-            // (an object no module here takes back: its descriptor fails from now on)
+        } else if ours {
+            // (an instance or group whose records were lost: its descriptor fails from now
+            // on; objects of other kinds are their modules': FUSE's `restart_init`)
             let _ = sys::lx_svc_dead(o.slot);
         }
     }

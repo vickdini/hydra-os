@@ -73,6 +73,12 @@ fn setattr(who: &Ctx, n: Node, a: &Attr, mut set: SetAttr) -> Result<i64, i64> {
             }
         }
     }
+    // wave9 G6b-1: a mode change of an object with extended attributes also rewrites its
+    // access ACL's owner, mask and other entries (the kernel's `acl::on_chmod`): the kernel
+    // makes it (found once the fanotify test no longer kept every later call in the kernel)
+    if a.has_xattr && set.mode.is_some() {
+        return Err(KERNEL);
+    }
     let r = zfs::request(FS_SETATTR, |w| {
         w.u64(n.ino);
         w.setattr(&set);
