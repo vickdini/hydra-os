@@ -545,7 +545,8 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
     drop(held);
     // wave9 GP2: the handle in the answer (an unreadable path: the kernel opens)
     if let Some(h) = fh_decode(r) {
-        let fd = crate::task::with_current_fds_mut(|t| fh_install(t, nr, &args, h)).ok()?;
+        let d = fh_desc(nr, &args, h).ok()?;
+        let fd = crate::task::with_current_fds_mut(|t| install_in(t, &d)).ok()?;
         SERVED.fetch_add(1, Ordering::Relaxed);
         return Some(fd as i64);
     }
@@ -578,9 +579,10 @@ pub fn fh_decode(r: i64) -> Option<(u64, u32, bool)> {
     Some((v & (FH_INO_LIMIT - 1), ((v >> 45) & 0xFFFF) as u32, (v >> 61) & 1 != 0))
 }
 
-/// Puts the handle `(ino, mnt, dir)` of `open`/`openat` (`nr`, `args`) in table `t`, with
-/// the flags and shown path `LX_FH_INSTALL` would get from vfs-server (`handle_desc`).
-pub fn fh_install(t: &mut FdTable, nr: u64, args: &[u64; 6], (ino, mnt, dir): (u64, u32, bool)) -> Result<usize, i64> {
+/// The descriptor of handle `(ino, mnt, dir)` of `open`/`openat` (`nr`, `args`): the flags
+/// and shown path `LX_FH_INSTALL` would get from vfs-server (`handle_desc`). Reads the
+/// caller's memory: never with a descriptor table locked.
+pub fn fh_desc(nr: u64, args: &[u64; 6], (ino, mnt, dir): (u64, u32, bool)) -> Result<LxFhDesc, i64> {
     let (dirfd, path_ptr, flags) = if nr == 2 { (-100i32, args[0], args[1] as u32) } else { (args[0] as i32, args[1], args[2] as u32) };
     let mut d = LxFhDesc::EMPTY;
     let n = match super::copy::read_user_str(path_ptr, &mut d.path) {
@@ -600,7 +602,7 @@ pub fn fh_install(t: &mut FdTable, nr: u64, args: &[u64; 6], (ino, mnt, dir): (u
         d.at_fd = dirfd;
         LX_FHP_AT
     };
-    install_in(t, &d)
+    Ok(d)
 }
 // wave9 GP2 end
 
@@ -666,9 +668,12 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
     // wave9 GP2 begin: the handle in the answer goes into the caller's table here (a busy
     // table or an unreadable path: the ordinary path asks again)
     if let Some(h) = fh_decode(r) {
+        // (the path is read before the table is locked: reading may fault a page in, which
+        // takes the kernel lock, and a thread holding that may wait for this table)
+        let d = fh_desc(nr, &c.args, h).ok()?;
         let (fds, _) = super::cached_fds(id)?;
         let fd = match fds.try_lock() {
-            Some(mut t) => fh_install(&mut t, nr, &c.args, h).ok(),
+            Some(mut t) => install_in(&mut t, &d).ok(),
             None => None,
         };
         super::drop_last(fds);
