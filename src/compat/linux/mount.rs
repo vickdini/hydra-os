@@ -426,7 +426,7 @@ fn initial_table(root: u64) -> MountNs {
             id: new_id(),
             parent: 1,
             mountpoint: m.mountpoint,
-            root: m.conn.root(),
+            root: m.root,
             kind: Kind::Tree { tmpfs: None },
             flags: MS_NOSUID | MS_NODEV | MS_RELATIME,
             propagation: MS_SHARED,

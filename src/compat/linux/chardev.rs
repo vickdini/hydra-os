@@ -273,6 +273,11 @@ pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
         return Some(crate::ipc::input::open(rdev, flags));
     }
     // wave8 GI end
+    // wave9 G6b-2 begin: /dev/fuse is vfs-server's while the file service is forwarded
+    if major == 10 && minor == 229 && super::fuse_svc::forwarded() {
+        return Some(crate::lx::dev_open_to(crate::ipc::protocol::LXS_VFS, rdev, flags));
+    }
+    // wave9 G6b-2 end
     // wave6 G19: a major a Linux service claimed: its `open` goes to that service
     if let Some(r) = crate::lx::dev_open(rdev, flags) {
         return Some(r);

@@ -2596,3 +2596,78 @@ pub const LX_TTY_BGREAD: i64 = -4110;
 pub const LX_TTY_NOTMINE: i64 = -4111;
 // wave8 GT end
 
+
+// wave9 G6b-2 begin: FUSE served by vfs-server
+/// Kernel call to vfs-server (Group 6b-2): an operation on a FUSE inode of vfs-server's
+/// (connection numbers [`FUSE_SVC_CONN`]..), or a mount/abort of one of its connections.
+/// `args[0]` = `FUSE_OP_*`, `args[1]` = the inode (or slot / connection), `args[2..6]` per
+/// op. Data the kernel lends: in at [`FUSE_KBUF_IN`] (`args[5]` bytes where the op has
+/// input), out at [`FUSE_KBUF_OUT`] (the kernel's buffer, [`FUSE_KBUF_MAX`] bytes at most);
+/// the service reaches both with `SYS_LX_READ`/`SYS_LX_WRITE`. Result: `>= 0` per op, or
+/// `-errno`.
+pub const LX_KCALL_FUSE: u64 = 0x6791;
+/// Where vfs-server writes a FUSE kernel call's output (see [`LX_KCALL_FUSE`]).
+pub const FUSE_KBUF_OUT: u64 = LX_KBUF_ADDR + 0x10_0000;
+/// Where vfs-server reads a FUSE kernel call's input.
+pub const FUSE_KBUF_IN: u64 = LX_KBUF_ADDR + 0x20_0000;
+/// Largest kernel buffer of a FUSE kernel call, each way.
+pub const FUSE_KBUF_MAX: usize = 128 * 1024 + 4096;
+/// The first connection number vfs-server gives (the kernel's own client: 1..0x3FFF).
+pub const FUSE_SVC_CONN: u16 = 0x8000;
+/// Object kind of an open `/dev/fuse` of vfs-server's.
+pub const LX_OBJ_KIND_FUSE: u32 = 72;
+/// `VfsMount::kind` / `LX_MNT_*` of a mount of a vfs-server FUSE connection: vfs-server
+/// walks into it itself.
+pub const LX_MNT_FUSE: u32 = 4;
+/// `(dir; name in)` -> out `[ino u64][fuse_attr 88]`, 0.
+pub const FUSE_OP_LOOKUP: u64 = 1;
+/// `(ino)` -> out `fuse_attr` (88), 0.
+pub const FUSE_OP_GETATTR: u64 = 2;
+/// `(ino; fuse_setattr_in in)` -> out `fuse_attr`, 0.
+pub const FUSE_OP_SETATTR: u64 = 3;
+/// `(ino)` -> out the target, its length.
+pub const FUSE_OP_READLINK: u64 = 4;
+/// `(ino, offset, len)` -> out the bytes, how many.
+pub const FUSE_OP_READ: u64 = 5;
+/// `(ino, offset; data in)` -> bytes written.
+pub const FUSE_OP_WRITE: u64 = 6;
+/// `(dir, cookie)` -> out the daemon's `fuse_dirent` records, their length.
+pub const FUSE_OP_READDIR: u64 = 7;
+/// `(dir, perm; name in)` -> out the new inode (u64), 0.
+pub const FUSE_OP_CREATE: u64 = 8;
+/// `(dir, mode, rdev; name in)` -> out the new inode, 0.
+pub const FUSE_OP_MKNOD: u64 = 9;
+/// `(dir, perm; name in)` -> out the new inode, 0.
+pub const FUSE_OP_MKDIR: u64 = 10;
+/// `(dir; "name\0target" in)` -> out the new inode, 0.
+pub const FUSE_OP_SYMLINK: u64 = 11;
+/// `(ino, dir; name in)` -> 0.
+pub const FUSE_OP_LINK: u64 = 12;
+/// `(dir; name in)` -> 0.
+pub const FUSE_OP_UNLINK: u64 = 13;
+/// `(dir; name in)` -> 0.
+pub const FUSE_OP_RMDIR: u64 = 14;
+/// `(sdir, ddir; "sname\0dname" in)` -> 0.
+pub const FUSE_OP_RENAME: u64 = 15;
+/// `(ino; name in)` -> out the value, its length.
+pub const FUSE_OP_GETXATTR: u64 = 16;
+/// `(ino)` -> out the names, their length.
+pub const FUSE_OP_LISTXATTR: u64 = 17;
+/// `(ino, flags, name length; name + value in)` -> 0.
+pub const FUSE_OP_SETXATTR: u64 = 18;
+/// `(ino; name in)` -> 0.
+pub const FUSE_OP_REMOVEXATTR: u64 = 19;
+/// `(ino)` -> out the daemon's `fuse_statfs_out` (or nothing: none), its length.
+pub const FUSE_OP_STATFS: u64 = 20;
+/// `(ino)`: a descriptor opened it -> 0.
+pub const FUSE_OP_OPEN_REF: u64 = 21;
+/// `(ino)`: a descriptor of it closed -> 0.
+pub const FUSE_OP_RELEASE: u64 = 22;
+/// `(ino)` -> out `[parent u64][name]` (nothing for a root), the length.
+pub const FUSE_OP_NAME_OF: u64 = 23;
+/// `(slot of the caller's /dev/fuse object, uid | gid << 32, allow_other)` -> the
+/// connection number (the mount's root is its local node 1).
+pub const FUSE_OP_MOUNT: u64 = 24;
+/// `(connection)`: unmounted -> 0 (the daemon reads ENODEV).
+pub const FUSE_OP_ABORT: u64 = 25;
+// wave9 G6b-2 end
