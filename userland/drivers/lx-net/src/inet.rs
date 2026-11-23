@@ -285,21 +285,20 @@ impl Sock {
         if self.dead() {
             return;
         }
-        // wave9 GP2: queued for the main thread (`netc::close_later`), in this order
         if let Some(id) = self.icmp.take() {
-            stack::close_later(MSG_NETS_ICMP_CLOSE, id);
+            stack::icmp_close(id);
         }
         if let Some(id) = self.listener.take() {
-            stack::close_later(MSG_NETS_TCP_UNLISTEN, id);
+            stack::tcp_unlisten(id);
         }
         if let Some(id) = self.bind_id.take() {
-            stack::close_later(MSG_NETS_TCP_UNBIND, id);
+            stack::tcp_unbind(id);
         }
         if let Some(id) = self.tcp.take() {
-            stack::close_later(MSG_NETS_TCP_CLOSE, id);
+            stack::tcp_close(id);
         }
         if let Some(id) = self.udp.take() {
-            stack::close_later(MSG_NETS_UDP_CLOSE, id);
+            stack::udp_close(id);
         }
     }
 }

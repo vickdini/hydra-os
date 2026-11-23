@@ -179,57 +179,12 @@ impl Drop for Region {
 /// straight back (the direct path of `SYS_SVC_CALL`), without stopping the other CPUs.
 fn request(label: u32, args: [u64; 4]) -> Result<[u64; 4], i64> {
     base().ok_or(ENETDOWN)?;
-    // wave9 GP2: the closes queued before this request go first (but for a connect from
-    // an ephemeral port and an accept, which no earlier close can change)
-    if PENDING.load(Ordering::Acquire) != 0 && !(label == MSG_NETS_TCP_CONNECT && args[2] == 0) && label != MSG_NETS_TCP_ACCEPT {
-        flush_closes();
-    }
-    send(label, args)
-}
-
-/// [`request`] as is (wave9 GP2: the closes' own requests).
-fn send(label: u32, args: [u64; 4]) -> Result<[u64; 4], i64> {
     match sys::svc_call(ENDPOINT_NET_SERVER, Message::new(label as u64, args), 0) {
         Ok(r) if (r.args[0] as i64) < 0 => Err(r.args[0] as i64),
         Ok(r) => Ok(r.args),
         Err(_) => Err(ENETDOWN),
     }
 }
-
-// wave9 GP2 begin: closes off the next call's path
-/// The handles whose last descriptor went: `(request, handle)`, sent by the main thread
-/// ([`flush_closes`]) instead of inside the next call's `drain_to` (a close of a loopback
-/// connection runs its FIN exchange in net-server); any later request but an ephemeral
-/// connect or an accept sends them first, so a port is free again for a `bind` right after
-/// the `close`, and a peer's `recv` sees the end, as before.
-static CLOSING: crate::lock::YLock<Vec<(u32, u32)>> = crate::lock::YLock::new(Vec::new());
-/// Closes queued or being sent.
-static PENDING: AtomicU64 = AtomicU64::new(0);
-/// Held while queued closes are sent (a flush waits for the ones under way).
-static SENDING: crate::lock::YLock<()> = crate::lock::YLock::new(());
-
-/// Queues request `label` (a close) on handle `h`, and wakes the main thread to send it.
-pub fn close_later(label: u32, h: u32) {
-    PENDING.fetch_add(1, Ordering::AcqRel);
-    CLOSING.lock().push((label, h));
-    let _ = sys::lx_ctl(LX_CTL_WAKE);
-}
-
-/// Sends the queued closes, and waits for those another thread is sending.
-pub fn flush_closes() {
-    if PENDING.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    let _s = SENDING.lock();
-    let q = core::mem::take(&mut *CLOSING.lock());
-    for (label, h) in q {
-        let mut a = [0u64; 4];
-        a[0] = h as u64;
-        let _ = send(label, a);
-        PENDING.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-// wave9 GP2 end
 
 /// wave6 G20: `n` null calls to net-server (its heartbeat), as hand-off calls when
 /// `handoff` (wave 5's way), else queued (the direct path); the nanoseconds they took in

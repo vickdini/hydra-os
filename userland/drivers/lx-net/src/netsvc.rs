@@ -67,7 +67,6 @@ pub fn tick(now: u64) -> Option<u64> {
 /// The main thread, after waking with notification bits `bits` (net-server's doorbell, or
 /// net-server gone): readiness relayed, blocked calls tried again.
 pub fn main_work(bits: u64) {
-    crate::netc::flush_closes(); // wave9 GP2: the closes the notes queued
     crate::socket::notified(bits);
     crate::socket::relay_check();
 }
