@@ -95,6 +95,9 @@ pub mod proc;
 #[cfg(not(target_os = "uefi"))]
 pub use crate::host::lx_proc as proc;
 // wave9 G7a end
+// wave9 G6b-4 begin: io_uring and aio requests routed to each descriptor's owner
+pub mod uring;
+// wave9 G6b-4 end
 
 // wave6 G21 begin: restart support for every service (design section 5)
 pub mod restart;

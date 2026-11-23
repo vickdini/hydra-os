@@ -42,6 +42,12 @@ pub fn nested_calls() -> Vec<(u64, [u64; 6])> {
     NESTED_CALLS.with_borrow(|n| n.clone())
 }
 
+/// *stub* `compat::linux::nested_routed` (wave9 G6b-4): routing is the kernel's
+/// (`lx::uring`, tested in host-t30); here the same handler as [`nested`] answers.
+pub fn nested_routed(frame: &SyscallFrame, num: u64, args: [u64; 6]) -> i64 {
+    nested(frame, num, args)
+}
+
 /// *stub* `compat::linux::nested`: one of the caller's own system calls, run by the kernel.
 pub fn nested(_frame: &SyscallFrame, num: u64, args: [u64; 6]) -> i64 {
     NESTED_CALLS.with_borrow_mut(|n| n.push((num, args)));

@@ -108,6 +108,11 @@ pub fn init(words: &[u8]) -> bool {
             super::fileh::VFS_MNT.store(false, Ordering::Relaxed);
             continue;
         }
+        // wave9 G6b-4 begin: `lx.uring=kernel`: io_uring and aio requests stay in the kernel
+        if super::uring::boot_word(w) {
+            continue;
+        }
+        // wave9 G6b-4 end
         let Some(eq) = w.iter().position(|&c| c == b'=') else { continue };
         let (name, val) = (&w[..eq], &w[eq + 1..]);
         let Some(id) = LXS_NAMES.iter().position(|n| n.as_bytes() == name) else { continue };

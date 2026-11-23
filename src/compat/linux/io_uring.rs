@@ -5,8 +5,9 @@
 //!   `IORING_OFF_CQ_RING`, `IORING_OFF_SQES`; one mapping serves both rings,
 //!   `IORING_FEAT_SINGLE_MMAP`). The kernel reads and writes them through their frames.
 //! - **Submission** (`io_uring_enter`) runs each request through the program's own system
-//!   calls ([`super::nested`]): file I/O, sockets, opens, stats, renames and the rest. A
-//!   request that would wait (a read or receive with nothing to read, an accept, a poll, a
+//!   calls ([`super::nested_routed`]: to each descriptor's owner since wave 9, as the
+//!   program's own call would go): file I/O, sockets, opens, stats, renames and the rest.
+//!   A request that would wait (a read or receive with nothing to read, an accept, a poll, a
 //!   timeout) goes to the ring's worker instead.
 //! - **The worker** is a kernel thread of the process (its address space, descriptor table
 //!   and credentials, like Linux's io-wq workers), started for a ring's first waiting
@@ -43,6 +44,7 @@ const EBUSY: i64 = -16;
 const EEXIST: i64 = -17;
 const ENXIO: i64 = -6;
 const EINVAL: i64 = -22;
+const ESPIPE: i64 = -29;
 const EMFILE: i64 = -24;
 const EOPNOTSUPP: i64 = -95;
 const ENOBUFS: i64 = -105;
@@ -599,7 +601,7 @@ impl Ring {
         if sqe.flags & !SQE_FLAGS_OK != 0 {
             return Done(EINVAL, 0);
         }
-        let n = |num: u64, a: [u64; 6]| super::nested(frame, num, a);
+        let n = |num: u64, a: [u64; 6]| super::nested_routed(frame, num, a);
         // Requests on a descriptor that may have to wait for it
         let needs = match sqe.opcode {
             OP_READ | OP_READV | OP_RECV | OP_RECVMSG | OP_ACCEPT | OP_READ_FIXED => POLLIN,
@@ -645,34 +647,37 @@ impl Ring {
             }
         }
         let at = |off: u64| off == u64::MAX;
+        // An offset on a pipe or socket is ignored, as Linux does for stream files (wave9
+        // G6b-4): the positional call's -ESPIPE turns into the plain call
+        let pos = |r: i64, plain: &dyn Fn() -> i64| if r == ESPIPE { plain() } else { r };
         let res = match sqe.opcode {
             OP_NOP => 0,
             OP_READ => {
                 if at(sqe.off) {
                     n(0, [fd, buf.0, buf.1 as u64, 0, 0, 0])
                 } else {
-                    n(17, [fd, buf.0, buf.1 as u64, sqe.off, 0, 0])
+                    pos(n(17, [fd, buf.0, buf.1 as u64, sqe.off, 0, 0]), &|| n(0, [fd, buf.0, buf.1 as u64, 0, 0, 0]))
                 }
             }
             OP_WRITE => {
                 if at(sqe.off) {
                     n(1, [fd, sqe.addr, sqe.len as u64, 0, 0, 0])
                 } else {
-                    n(18, [fd, sqe.addr, sqe.len as u64, sqe.off, 0, 0])
+                    pos(n(18, [fd, sqe.addr, sqe.len as u64, sqe.off, 0, 0]), &|| n(1, [fd, sqe.addr, sqe.len as u64, 0, 0, 0]))
                 }
             }
             OP_READV => {
                 if at(sqe.off) {
                     n(19, [fd, sqe.addr, sqe.len as u64, 0, 0, 0])
                 } else {
-                    n(295, [fd, sqe.addr, sqe.len as u64, sqe.off, 0, 0])
+                    pos(n(295, [fd, sqe.addr, sqe.len as u64, sqe.off, 0, 0]), &|| n(19, [fd, sqe.addr, sqe.len as u64, 0, 0, 0]))
                 }
             }
             OP_WRITEV => {
                 if at(sqe.off) {
                     n(20, [fd, sqe.addr, sqe.len as u64, 0, 0, 0])
                 } else {
-                    n(296, [fd, sqe.addr, sqe.len as u64, sqe.off, 0, 0])
+                    pos(n(296, [fd, sqe.addr, sqe.len as u64, sqe.off, 0, 0]), &|| n(20, [fd, sqe.addr, sqe.len as u64, 0, 0, 0]))
                 }
             }
             OP_READ_FIXED | OP_WRITE_FIXED => {
@@ -680,11 +685,11 @@ impl Ring {
                 if !ok {
                     EFAULT
                 } else if sqe.opcode == OP_READ_FIXED {
-                    if at(sqe.off) { n(0, [fd, sqe.addr, sqe.len as u64, 0, 0, 0]) } else { n(17, [fd, sqe.addr, sqe.len as u64, sqe.off, 0, 0]) }
+                    if at(sqe.off) { n(0, [fd, sqe.addr, sqe.len as u64, 0, 0, 0]) } else { pos(n(17, [fd, sqe.addr, sqe.len as u64, sqe.off, 0, 0]), &|| n(0, [fd, sqe.addr, sqe.len as u64, 0, 0, 0])) }
                 } else if at(sqe.off) {
                     n(1, [fd, sqe.addr, sqe.len as u64, 0, 0, 0])
                 } else {
-                    n(18, [fd, sqe.addr, sqe.len as u64, sqe.off, 0, 0])
+                    pos(n(18, [fd, sqe.addr, sqe.len as u64, sqe.off, 0, 0]), &|| n(1, [fd, sqe.addr, sqe.len as u64, 0, 0, 0]))
                 }
             }
             OP_FSYNC => n(if sqe.op_flags & 1 != 0 { 75 } else { 74 }, [fd, 0, 0, 0, 0, 0]),
