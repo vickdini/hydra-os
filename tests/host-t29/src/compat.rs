@@ -211,6 +211,10 @@ pub mod linux_host {
         pub fn exec_flags() -> (bool, bool) {
             crate::fake::MOUNT_EXEC_FLAGS.get()
         }
+        /// *stub* wave9 G6b-1: the flags of the mount a path lies in (none here).
+        pub fn exec_flags_of_path(_abs: &str) -> (bool, bool) {
+            (false, false)
+        }
         pub fn resolve(_base: u64, _path: &[u8], _follow: bool) -> Option<Result<u64, i64>> {
             None
         }
