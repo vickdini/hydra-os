@@ -312,7 +312,9 @@ pub mod glue {
         let (exe, ids, mm) = crate::task::SCHEDULER
             .lock()
             .with_process(pid, |t| (alloc::string::String::from(t.exe_path()), [t.uid, t.euid, t.suid, t.gid, t.egid, t.sgid], t.mm.clone()))?;
-        let mut i = LxTaskInfo { pid: to_caller(pid, init), tid: to_caller(tid, init), ids, comm: comm_of(&exe), ..Default::default() };
+        // (wave10 G7b-1: the thread's PR_SET_NAME name when it has one)
+        let comm = crate::lx::proc::comm_of(tid).unwrap_or_else(|| comm_of(&exe));
+        let mut i = LxTaskInfo { pid: to_caller(pid, init), tid: to_caller(tid, init), ids, comm, ..Default::default() };
         // wave9 G7a: the tree through the process-identity primitive
         let crate::lx::proc::Tree { ppid, pgid, sid, threads, start, zombie, pid_inits: inits } =
             crate::lx::proc::task_tree(pid).unwrap_or(crate::lx::proc::Tree { ppid: 0, pgid: pid, sid: pid, threads: 1, start: 0, zombie: false, pid_inits: Vec::new() });

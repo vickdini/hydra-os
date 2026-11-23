@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w10_proc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group 7b-1 host unit tests (wave 10): lx-proc's policy (userland/drivers/lx-proc/src/policy.rs, with the kernel's proc_rules.rs) against a model of the kernel's op-75 primitives"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

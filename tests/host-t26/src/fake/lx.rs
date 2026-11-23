@@ -121,6 +121,14 @@ pub mod obj {
 /// tested in host-t29): the tree from the fake process table.
 pub mod proc {
     use crate::compat::linux::proc::PROCS;
+    /// *stub* wave10 G7b-1: no PR_SET_NAME names on the host: the executable's.
+    pub fn comm_or_exe(_tid: u64, exe: &str) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        let name = exe.rsplit('/').next().unwrap_or("").as_bytes();
+        let n = name.len().min(15);
+        out[..n].copy_from_slice(&name[..n]);
+        out
+    }
     /// *mirror* of the kernel's.
     pub struct Tree {
         pub ppid: u64,

@@ -393,17 +393,36 @@ fn capget_and_capset() {
 fn prctl_options() {
     let _g = setup();
     proc_(980, 0);
-    for opt in [15u64, 1, 4, 36, 47, 24] {
+    // (wave10 G7b-1: PR_SET_NAME reads its name: a null one is EFAULT)
+    assert_eq!(call(157, [15, 0, 0, 0, 0, 0]), EFAULT, "PR_SET_NAME of nothing");
+    for opt in [1u64, 4, 36, 47, 24] {
         assert_eq!(call(157, [opt, 0, 0, 0, 0, 0]), 0, "option {opt}");
     }
+    assert_eq!(call(157, [3, 0, 0, 0, 0, 0]), 0, "PR_GET_DUMPABLE after PR_SET_DUMPABLE 0");
+    assert_eq!(call(157, [4, 2, 0, 0, 0, 0]), EINVAL, "PR_SET_DUMPABLE 2");
+    assert_eq!(call(157, [4, 1, 0, 0, 0, 0]), 0);
     assert_eq!(call(157, [3, 0, 0, 0, 0, 0]), 1, "PR_GET_DUMPABLE");
+    assert_eq!(call(157, [1, 65, 0, 0, 0, 0]), EINVAL, "PR_SET_PDEATHSIG 65");
+    assert_eq!(call(157, [1, 9, 0, 0, 0, 0]), 0);
+    let mut sig = [0u8; 4];
+    assert_eq!(call(157, [2, mptr(&mut sig), 0, 0, 0, 0]), 0, "PR_GET_PDEATHSIG");
+    assert_eq!(i32::from_le_bytes(sig), 9);
+    assert_eq!(call(157, [36, 1, 0, 0, 0, 0]), 0);
+    assert_eq!(call(157, [37, mptr(&mut sig), 0, 0, 0, 0]), 0, "PR_GET_CHILD_SUBREAPER");
+    assert_eq!(i32::from_le_bytes(sig), 1);
     assert_eq!(call(157, [23, 0, 0, 0, 0, 0]), 1, "PR_CAPBSET_READ");
     assert_eq!(call(157, [8, 2, 0, 0, 0, 0]), EINVAL, "PR_SET_KEEPCAPS 2");
     assert_eq!(call(157, [8, 1, 0, 0, 0, 0]), 0);
     assert_eq!(call(157, [7, 0, 0, 0, 0, 0]), 1, "PR_GET_KEEPCAPS");
     let mut name = [0u8; 16];
     assert_eq!(call(157, [16, mptr(&mut name), 0, 0, 0, 0]), 0);
-    assert_eq!(&name[..10], b"linux_app\0");
+    let exe = fake::task(980, |t| t.exe_path().to_string()).unwrap();
+    assert_eq!(name, crate::lx::proc::comm_or_exe(980, &exe), "the executable's name");
+    let new = *b"a-much-longer-name\0";
+    assert_eq!(call(157, [15, ptr(&new), 0, 0, 0, 0]), 0, "PR_SET_NAME");
+    assert_eq!(call(157, [16, mptr(&mut name), 0, 0, 0, 0]), 0);
+    assert_eq!(&name, b"a-much-longer-n\0", "cut to 15");
+    crate::lx::proc::attrs_on_exit(980);
     assert_eq!(call(157, [999, 0, 0, 0, 0, 0]), EINVAL);
     // no_new_privs goes to seccomp.rs
     assert_eq!(call(157, [39, 0, 0, 0, 0, 0]), 0);

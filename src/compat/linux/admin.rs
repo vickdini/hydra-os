@@ -40,6 +40,14 @@ fn capable(bit: u32) -> bool {
     crate::task::with_current_task_mut(|t| t.caps.effective & (1u64 << bit) != 0 && !t.caps.in_userns).unwrap_or(false)
 }
 
+// wave10 G7b-1 begin
+/// Whether lx-proc allowed the calling thread's call `nr` and sent it here (its rule was
+/// the check; the kernel runs the mechanism).
+fn approved(nr: u64) -> bool {
+    crate::lx::proc::take_approval(super::proc::current_ids().0, nr)
+}
+// wave10 G7b-1 end
+
 // ----------------------------------------------------------------------
 // The kernel log
 // ----------------------------------------------------------------------
@@ -127,7 +135,8 @@ pub fn klog(args: fmt::Arguments) {
 fn syslog(kind: u64, buf: u64, len: u64) -> i64 {
     let len = len as i32;
     // Everything but "how big" needs privilege (dmesg_restrict = 1)
-    if !(capable(34) || capable(21)) {
+    // (wave10 G7b-1: unless lx-proc decided and sent the call here)
+    if !approved(103) && !(capable(34) || capable(21)) {
         return EPERM;
     }
     match kind {
@@ -458,7 +467,8 @@ pub fn flush() {
 
 /// `acct(filename)`: accounting to `filename`, or off with NULL.
 fn acct(path: u64) -> i64 {
-    if !capable(20) {
+    // (wave10 G7b-1: unless lx-proc decided and sent the call here)
+    if !approved(163) && !capable(20) {
         return EPERM;
     }
     if path == 0 {

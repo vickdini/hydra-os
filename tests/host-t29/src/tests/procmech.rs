@@ -336,3 +336,97 @@ fn limits_update_checks_and_sets_once() {
     assert_eq!(mech::task_limits(7100)[3], (1, 2), "refused: unchanged");
     assert_eq!(mech::task_limits_update(7100, 16, (0, 0), |_| Ok(())), Err(EINVAL));
 }
+
+// ---------------------------------------------------------------- wave10 G7b-1: lx-proc's additions
+
+#[test]
+fn pgrp_probe_and_compare_and_set() {
+    let _g = setup();
+    spawn(7100, 1);
+    spawn(7101, 7100);
+    // the child inherited group 7100: move it out first
+    assert!(mech::task_pgrp_probe(7100).unwrap().1, "the child is in group 7100");
+    let c0 = mech::task_pgrp(7101).unwrap();
+    assert_eq!(mech::task_pgrp_cas(7101, (c0.pgid, c0.sid), 1, false, false), 0);
+    let (p, used) = mech::task_pgrp_probe(7100).unwrap();
+    assert!(!used, "nobody else is in group 7100");
+    assert!(mech::task_pgrp_probe(4242).is_none());
+    // a stale view is refused, a fresh one applies
+    assert_eq!(mech::task_pgrp_cas(7101, (p.pgid + 1, p.sid), 7101, false, false), mech::CHANGED);
+    let c = mech::task_pgrp(7101).unwrap();
+    assert_eq!(mech::task_pgrp_cas(7101, (c.pgid, c.sid), 7101, false, false), 0);
+    assert_eq!(mech::task_pgrp(7101).unwrap().pgid, 7101);
+    // now group 7101 is used by 7101 itself only; 7100 asking for "group 7100 unused": yes
+    let (p, used) = mech::task_pgrp_probe(7100).unwrap();
+    assert!(!used);
+    assert_eq!(mech::task_pgrp_cas(7100, (p.pgid, p.sid), 7100, true, true), 0);
+    let p = mech::task_pgrp(7100).unwrap();
+    assert_eq!((p.pgid, p.sid), (7100, 7100));
+    // another process in group 7100: "only while unused" fails with EPERM
+    let c = mech::task_pgrp(7101).unwrap();
+    assert_eq!(mech::task_pgrp_cas(7101, (c.pgid, c.sid), 7100, false, false), 0);
+    assert!(mech::task_pgrp_probe(7100).unwrap().1);
+    assert_eq!(mech::task_pgrp_cas(7100, (7100, 7100), 7100, true, true), EPERM);
+    assert_eq!(mech::task_pgrp_cas(4242, (0, 0), 1, false, false), ESRCH);
+}
+
+#[test]
+fn limits_compare_and_set() {
+    let _g = setup();
+    spawn(7110, 1);
+    let old = mech::task_limits(7110)[4];
+    assert_eq!(mech::task_limits_cas(7110, 4, (old.0 + 1, old.1), (1, 2)), mech::CHANGED);
+    assert_eq!(mech::task_limits(7110)[4], old);
+    assert_eq!(mech::task_limits_cas(7110, 4, old, (1, 2)), 0);
+    assert_eq!(mech::task_limits(7110)[4], (1, 2));
+    assert_eq!(mech::task_limits_cas(7110, 16, (1, 2), (1, 2)), EINVAL);
+}
+
+#[test]
+fn prctl_attributes_follow_fork_exec_exit() {
+    let _g = setup();
+    assert_eq!(mech::proc_attrs(7120), mech::ProcAttrs { dumpable: 1, subreaper: false }, "defaults");
+    assert_eq!(&mech::comm_or_exe(7120, "/usr/bin/very-long-program-name"), b"very-long-progr\0");
+    let mut name = [0u8; 16];
+    name[..3].copy_from_slice(b"abc");
+    mech::thread_attrs_set(7120, 7120, |t| {
+        t.comm = Some(name);
+        t.pdeathsig = 9;
+    });
+    mech::proc_attrs_set(7120, |p| {
+        p.dumpable = 0;
+        p.subreaper = true;
+    });
+    assert_eq!(mech::comm_of(7120), Some(name));
+    assert_eq!(&mech::comm_or_exe(7120, "/bin/x"), &name);
+    // a child: the name and dumpable, not the signal or subreaper
+    mech::attrs_on_fork(7120, 7120, 7121);
+    assert_eq!(mech::comm_of(7121), Some(name));
+    assert_eq!(mech::thread_attrs(7121).pdeathsig, 0);
+    assert_eq!(mech::proc_attrs(7121), mech::ProcAttrs { dumpable: 0, subreaper: false });
+    // exec: the program's name back, dumpable again; the signal stays
+    mech::attrs_on_exec(7120, 7120);
+    assert_eq!(mech::comm_of(7120), None);
+    assert_eq!(mech::thread_attrs(7120).pdeathsig, 9);
+    assert_eq!(mech::proc_attrs(7120).dumpable, 1);
+    // exit: every record of the process goes
+    mech::thread_attrs_set(7122, 7120, |t| t.comm = Some(name));
+    mech::attrs_on_exit(7120);
+    assert_eq!(mech::thread_attrs(7120), mech::ThreadAttrs::default());
+    assert_eq!(mech::comm_of(7122), None);
+    assert_eq!(mech::comm_of(7121), Some(name), "the child's stay");
+    mech::attrs_on_exit(7121);
+}
+
+#[test]
+fn approvals_are_taken_once_per_thread() {
+    mech::approve(7130, 103);
+    assert!(!mech::take_approval(7131, 103), "another thread");
+    assert!(!mech::take_approval(7130, 163), "another call: and the mark is gone");
+    assert!(!mech::take_approval(7130, 103));
+    mech::approve(7130, 272);
+    mech::approve(7130, 308);
+    assert!(mech::take_approval(7130, 308), "the latest mark of a thread");
+    assert!(!mech::take_approval(7130, 308));
+    assert!(!mech::take_approval(0, 0), "thread 0 is never approved");
+}

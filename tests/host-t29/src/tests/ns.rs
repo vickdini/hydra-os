@@ -441,3 +441,65 @@ fn mount_namespace_notes() {
     assert!(!fake::called("lx::note_to("));
     fake::set_ret("lx::vfs_host", 0);
 }
+
+// ---------------------------------------------------------------- wave10 G7b-1: lx-proc's helpers
+
+#[test]
+fn ns_fd_target_and_facts() {
+    let _g = setup();
+    user_proc(790, 1000);
+    spawn_as(791, 790, 1000, 1000);
+    run(791);
+    assert_eq!(sys_unshare(CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWPID), 0);
+    spawn_as(792, 791, 1000, 1000); // init of 791's PID namespace
+    run(790);
+    // the descriptor's target, as setns reads it
+    open_ns(3, "791", "uts");
+    let t = with_current_fds_mut(|f| ns_fd_target(f, 3, 0));
+    assert_eq!(t, Ok((791, CLONE_NEWUTS)));
+    assert_eq!(with_current_fds_mut(|f| ns_fd_target(f, 3, CLONE_NEWNET)), Err(EINVAL), "kind mismatch");
+    assert_eq!(with_current_fds_mut(|f| ns_fd_target(f, 9, 0)), Err(EBADF));
+    with_current_fds_mut(|f| f.install(4, FileDescriptor::file("/etc/passwd")));
+    assert_eq!(with_current_fds_mut(|f| ns_fd_target(f, 4, 0)), Err(EINVAL));
+    // facts of 791 seen from 790: its own user namespace (owned by 1000, below ours), a PID
+    // namespace for its children only (its own is ours), one thread
+    let f = ns_facts(791, 790).unwrap();
+    let n = ns_of(791);
+    assert_eq!(f[6], n.uts);
+    assert_eq!(f[8], 1000, "owner");
+    assert_eq!(f[9], 1, "within ours, not ours");
+    assert_eq!(f[10], 0, "the same PID namespace");
+    assert_eq!(f[11], 1);
+    // 792 lives in the new PID namespace: below ours
+    assert_eq!(ns_facts(792, 790).unwrap()[10], 1);
+    // 790 seen from 791: same? no; within? no (ours is the initial one, theirs below)
+    let g = ns_facts(790, 791).unwrap();
+    assert_eq!(g[9], 0);
+    assert_eq!(g[8], 0, "the initial namespace: owner 0");
+    assert_eq!(ns_facts(790, 790).unwrap()[9], 3, "its own: within and the same");
+    assert_eq!(ns_facts(792, 791).unwrap()[10], 1);
+    assert_eq!(ns_facts(790, 792).unwrap()[10], 2, "above: neither");
+    assert!(ns_facts(4242, 790).is_none());
+}
+
+#[test]
+fn approved_unshare_and_setns_run_only_the_mechanism() {
+    let _g = setup();
+    user_proc(795, 1000);
+    // without CAP_SYS_ADMIN: refused, unless lx-proc decided (and marked the call)
+    assert_eq!(sys_unshare(CLONE_NEWUTS), EPERM);
+    crate::lx::proc::approve(795, 272);
+    assert_eq!(sys_unshare(CLONE_NEWUTS), 0);
+    assert_ne!(ns_of(795).uts, 0);
+    assert_eq!(sys_unshare(CLONE_NEWNET), EPERM, "the mark was used up");
+    spawn_as(796, 1, 1000, 1000);
+    run(796);
+    caps(796, CAP_SYS_ADMIN);
+    assert_eq!(sys_unshare(CLONE_NEWNET), 0);
+    run(795);
+    open_ns(3, "796", "net");
+    assert_eq!(sys_setns(3, 0), EPERM);
+    crate::lx::proc::approve(795, 308);
+    assert_eq!(sys_setns(3, 0), 0);
+    assert_eq!(ns_of(795).net, ns_of(796).net);
+}

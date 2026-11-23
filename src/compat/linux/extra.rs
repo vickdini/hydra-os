@@ -268,9 +268,27 @@ static UTS: Mutex<BTreeMap<u64, (alloc::string::String, alloc::string::String)>>
 
 /// The calling process's `(host name, domain name)`.
 pub fn uts_names() -> (alloc::string::String, alloc::string::String) {
-    let id = super::proc::PROCS.lock().get(&super::proc::current_ids().1).map_or(0, |p| p.ns.uts);
-    UTS.lock().get(&id).cloned().unwrap_or_else(|| (alloc::string::String::from("hydra"), alloc::string::String::from("localdomain")))
+    uts_names_of(super::proc::current_ids().1).1
 }
+
+// wave10 G7b-1 begin: the UTS names of a named process (lx-proc's `LXP_UTS_GET`/`SET`)
+/// Process `pid`'s UTS namespace id and its `(host name, domain name)`.
+pub fn uts_names_of(pid: u64) -> (u64, (alloc::string::String, alloc::string::String)) {
+    let id = super::proc::PROCS.lock().get(&pid).map_or(0, |p| p.ns.uts);
+    (id, UTS.lock().get(&id).cloned().unwrap_or_else(|| (alloc::string::String::from("hydra"), alloc::string::String::from("localdomain"))))
+}
+
+/// Sets the host name (or with `domain` the domain name) of process `pid`'s UTS namespace.
+pub fn uts_set_of(pid: u64, domain: bool, value: alloc::string::String) {
+    let (id, (mut host, mut dom)) = uts_names_of(pid);
+    if domain {
+        dom = value;
+    } else {
+        host = value;
+    }
+    UTS.lock().insert(id, (host, dom));
+}
+// wave10 G7b-1 end
 
 /// A new UTS namespace `to` starts with the names of `from`.
 pub fn uts_copy(from: u64, to: u64) {

@@ -21,6 +21,7 @@ const DRIVERS: &[&str] = &[
     "input-server", // wave8 GI
     "lx-net", // wave8 GX2
     "lx-ipc", // wave8 GX2
+    "lx-proc", // wave10 G7b-1
     "hda-driver",
     "tty-server", // wave8 GT
     // wave8 GS

@@ -67,8 +67,9 @@ fn init_fills_the_default_registry() {
     assert_eq!(endpoint_of(LXS_SEC), ENDPOINT_LX_SEC);
     assert_eq!(endpoint_of(LXS_TEST), ENDPOINT_SVC_TEST);
     assert_eq!(endpoint_of(LXS_VFS), ENDPOINT_VFS_SERVER);
-    // Co-located pieces are hosted by linux-server, the lowest id naming its endpoint
-    assert_eq!(host_of(LXS_PROC), LXS_LINUX);
+    // wave10 G7b-1: lx-proc is its own process (its own host)
+    assert_eq!(endpoint_of(LXS_PROC), crate::ipc::protocol::ENDPOINT_LX_PROC);
+    assert_eq!(host_of(LXS_PROC), LXS_PROC);
     // wave8 GX2: lx-net and lx-ipc are their own processes (`lx.<name>=linux` co-locates)
     assert_eq!(endpoint_of(LXS_NET), ENDPOINT_LX_NET);
     assert_eq!(endpoint_of(LXS_IPC), ENDPOINT_LX_IPC);
@@ -150,8 +151,9 @@ fn hosts_are_made_once_and_named_by_id() {
     // The services it serves: the ids whose host it is
     assert_eq!(a.serves(), 1 << LXS_TEST);
     let l = host_or_make(LXS_LINUX, ENDPOINT_LINUX_SERVER);
-    let want = 1 << LXS_PROC;
-    assert_eq!(l.serves() & want, want);
+    // (wave10 G7b-1: LXS_PROC is lx-proc's own now)
+    assert_eq!(l.serves() & (1 << LXS_PROC), 0);
+    assert_eq!(l.serves() & 1 << LXS_LINUX, 1 << LXS_LINUX);
     // wave8 GX2: lx-net and lx-ipc serve themselves
     assert_eq!(l.serves() & (1 << LXS_NET | 1 << LXS_IPC), 0);
     assert_eq!(host_or_make(LXS_NET, ENDPOINT_LX_NET).serves(), 1 << LXS_NET);

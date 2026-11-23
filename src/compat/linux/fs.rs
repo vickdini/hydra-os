@@ -490,8 +490,10 @@ Seccomp:	{}
         }
         "cmdline" => Some(live_cmdline(pid).unwrap_or_else(|| cmdline.map(|c| c.to_vec()).unwrap_or_default())),
         "comm" => {
-            // The executable's file name, truncated to TASK_COMM_LEN - 1 bytes
-            let mut comm: alloc::vec::Vec<u8> = exe.rsplit('/').next().unwrap_or("").bytes().take(15).collect();
+            // The executable's file name, truncated to TASK_COMM_LEN - 1 bytes (wave10
+            // G7b-1: or the thread's PR_SET_NAME name)
+            let c = crate::lx::proc::comm_or_exe(tid, &exe);
+            let mut comm: alloc::vec::Vec<u8> = c.iter().copied().take_while(|&b| b != 0).collect();
             comm.push(b'\n');
             Some(comm)
         }

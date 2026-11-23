@@ -2429,6 +2429,9 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
         keys::on_fork(proc::current_ids().1, child);
         // The Linux server learns it too (before any call of the child can reach it)
         crate::lx::note(crate::ipc::protocol::LX_NOTE_FORK, proc::current_ids().1, child, 0);
+        // wave10 G7b-1: the child starts with this thread's name and the dumpable flag
+        let (me_tid, me_pid) = proc::current_ids();
+        crate::lx::proc::attrs_on_fork(me_tid, me_pid, child);
     }
     if args[0] & (types::CLONE_FS | types::CLONE_FILES | types::CLONE_THREAD) == types::CLONE_FS {
         // Shares our root and working directory, which live in the descriptor table

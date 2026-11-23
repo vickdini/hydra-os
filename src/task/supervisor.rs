@@ -61,6 +61,10 @@ static LX_NET_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/
 /// queues, System V; `userland/drivers/lx-ipc`).
 static LX_IPC_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/lx-ipc"));
 // wave8 GX2 end
+// wave10 G7b-1 begin
+/// lx-proc (wave 10: the process service, `userland/drivers/lx-proc`).
+static LX_PROC_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/lx-proc"));
+// wave10 G7b-1 end
 // wave7 G7-1 begin
 /// vfs-server (wave 7: the file service, `userland/drivers/vfs-server`).
 static VFS_SERVER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/drivers/x86_64-unknown-none/release/vfs-server"));
@@ -291,6 +295,14 @@ fn lx_sec_args() -> Option<Vec<String>> {
     Some(alloc::vec![String::from("workers=2")])
 }
 // wave6 G24 end
+
+// wave10 G7b-1 begin
+/// lx-proc: two workers; not started when switched back to the kernel (`lx.proc=kernel`,
+/// `lx=kernel`).
+fn lx_proc_args() -> Option<Vec<String>> {
+    split_out(crate::ipc::protocol::LXS_PROC, crate::ipc::protocol::ENDPOINT_LX_PROC).then(|| alloc::vec![String::from("workers=2")])
+}
+// wave10 G7b-1 end
 
 // wave8 GX2 begin
 /// lx-net: two workers; not started when `lx.net=linux` co-locates its pieces in
@@ -813,6 +825,18 @@ pub fn supervisor_init() {
         );
         service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LX_SEC, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_LX_SEC }>);
         // wave6 G24 end
+        // wave10 G7b-1 begin: lx-proc (the process service): it keeps nothing of its own (the
+        // identity data are the kernel's), so a restart is invisible: its calls wait for it
+        // (Transparent), a call cut by the crash is sent again when it is idempotent
+        sup.services.push(
+            ServiceDescriptor::new("lx_proc", crate::ipc::protocol::ENDPOINT_LX_PROC, LX_PROC_ELF, lx_proc_args, no_grants).linux_service(
+                crate::ipc::protocol::LXS_PROC,
+                crate::lx::restart::RestartClass::Transparent,
+                "proc",
+            ),
+        );
+        service::set_signal_hook(crate::ipc::protocol::ENDPOINT_LX_PROC, crate::lx::on_signal_for::<{ crate::ipc::protocol::ENDPOINT_LX_PROC }>);
+        // wave10 G7b-1 end
         // wave8 GX2 begin: lx-net (net-server's client for Internet sockets: its connections
         // live in net-server, so a restart adopts them: Transparent) and lx-ipc (pipes and
         // Unix sockets fail on a restart: FailObjects; programs live)

@@ -1,0 +1,8 @@
+[package]
+name = "lx-proc"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra lx-proc: the Linux process service (setuid family, setgroups, process groups and sessions, limits, prctl, unshare/setns, UTS names, syslog, acct), a Linux service of its own (wave 10)"
+
+[dependencies]
+hydra-rt = { workspace = true }

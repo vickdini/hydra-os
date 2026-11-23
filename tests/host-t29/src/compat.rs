@@ -247,6 +247,13 @@ pub mod linux_host {
     pub mod pidfd {
         /// Woken when a process exits.
         pub static EXIT_WQ: crate::task::wait::WaitQueue = crate::task::wait::WaitQueue::new();
+        /// wave10 G7b-1: as the kernel's, in a given table.
+        pub fn pid_in(f: &crate::fs::FdTable, fd: u64) -> Option<u64> {
+            match f.get(fd as usize) {
+                Some(crate::fs::FileDescriptor::PidFd(p)) => Some(**p),
+                _ => None,
+            }
+        }
         pub fn pid_of(fd: u64) -> Result<u64, i64> {
             crate::task::with_current_fds_mut(|f| match f.get(fd as usize) {
                 Some(crate::fs::FileDescriptor::PidFd(p)) => Ok(**p),
