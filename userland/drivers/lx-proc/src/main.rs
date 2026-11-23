@@ -106,7 +106,7 @@ impl Mem for CallerMem<'_> {
 /// Serves one forwarded call.
 fn serve(c: &LxCall, page: *mut u8) -> Answer {
     let cx = Cx::from_call(c, page);
-    let call = Call { nr: c.nr, args: c.args, tgid: c.tgid, caps: c.caps };
+    let call = Call { nr: c.nr, args: c.args, tgid: c.tgid, caps: c.caps, ids: [c.uid, c.euid, c.suid, c.gid, c.egid, c.sgid] };
     match policy::serve(&Sys { req: c.id }, &CallerMem(&cx), &call) {
         Out::Ret(r) => (r, 0),
         // The kernel's own code answers (service 0)

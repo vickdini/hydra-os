@@ -107,6 +107,9 @@ pub struct Call {
     /// The caller's effective capabilities as `Caps::has` sees them (0 when they hold only
     /// in a user namespace of its own: `LxCall::caps`).
     pub caps: u64,
+    /// The calling thread's real, effective, saved user id, then group id (`LxCall`'s: the
+    /// setuid family's rules need no other look at the kernel).
+    pub ids: [u32; 6],
 }
 
 impl Call {
@@ -207,11 +210,9 @@ pub fn serve<K: Kernel, M: Mem>(k: &K, m: &M, c: &Call) -> Out {
         105 | 106 | 113 | 114 | 117 | 119 => set_ids(k, c),
         // setfsuid / setfsgid: the file-system ids follow the effective ones (the current
         // one is the answer, as the kernel's code)
-        122 | 123 => match task(k, 0, false) {
-            Ok(t) => (if c.nr == 122 { t.uid[1] } else { t.gid[1] }) as i64,
-            Err(e) => e,
-        },
-        116 => setgroups(k, m, a[0], a[1]),
+        122 => c.ids[1] as i64,
+        123 => c.ids[4] as i64,
+        116 => setgroups(k, m, c, a[0], a[1]),
         121 | 124 => {
             let (r, w) = op(k, LXP_PGRP_GET, &[a[0] as u32 as u64]);
             if r < 0 {
@@ -254,15 +255,12 @@ fn approve_if<K: Kernel>(k: &K, nr: u64, allowed: bool) -> Out {
     }
 }
 
-/// The setuid family: today's rule on the calling thread's ids, then `LXP_CREDS_SET`.
+/// The setuid family: today's rule on the calling thread's ids (the call carries them and
+/// its capabilities), then `LXP_CREDS_SET`.
 fn set_ids<K: Kernel>(k: &K, c: &Call) -> i64 {
-    let t = match task(k, 0, false) {
-        Ok(t) => t,
-        Err(_) => return EPERM,
-    };
-    let (cap_uid, cap_gid) = (t.has(CAP_SETUID), t.has(CAP_SETGID));
+    let (cap_uid, cap_gid) = (c.has(CAP_SETUID), c.has(CAP_SETGID));
     let (x, y, z) = (c.args[0] as u32, c.args[1] as u32, c.args[2] as u32);
-    let (mut uid, mut gid) = (t.uid, t.gid);
+    let (mut uid, mut gid) = ([c.ids[0], c.ids[1], c.ids[2]], [c.ids[3], c.ids[4], c.ids[5]]);
     let r = match c.nr {
         105 => rules::set_id(uid, x, cap_uid).map(|v| uid = v),
         106 => rules::set_id(gid, x, cap_gid).map(|v| gid = v),
@@ -283,13 +281,12 @@ fn set_ids<K: Kernel>(k: &K, c: &Call) -> i64 {
 }
 
 /// `setgroups(size, list)`: `CAP_SETGID` (system-wide).
-fn setgroups<K: Kernel, M: Mem>(k: &K, m: &M, size: u64, list: u64) -> i64 {
+fn setgroups<K: Kernel, M: Mem>(k: &K, m: &M, c: &Call, size: u64, list: u64) -> i64 {
     if size > 65536 {
         return EINVAL;
     }
-    match task(k, 0, false) {
-        Ok(t) if t.has(CAP_SETGID) => {}
-        _ => return EPERM,
+    if !c.has(CAP_SETGID) {
+        return EPERM;
     }
     let groups: Vec<u32> = if size == 0 {
         Vec::new()

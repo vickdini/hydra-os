@@ -27,26 +27,29 @@ pub fn ctl(h: SvcId, req: u64, sub: u64, io: u64) -> i64 {
     }
     let Some(client) = super::client_of(req) else { return ESRCH };
     let Some(tgid) = crate::task::SCHEDULER.lock().with_task_mut(TaskId(client), |t| t.tgid) else { return ESRCH };
-    let mut x = match read_io(io) {
-        Ok(x) => x,
-        Err(e) => return e,
+    // Only the words travel, unless the sub-op reads or writes the bytes too (the copies are
+    // most of a sub-op's cost)
+    let words = core::mem::size_of::<[u64; 16]>();
+    let (bytes_in, bytes_out) = match sub {
+        LXP_ATTR_SET | LXP_UTS_SET => (true, false),
+        LXP_TASK_GET | LXP_UTS_GET => (false, true),
+        _ => (false, false),
     };
+    let mut x = LxProcIo::EMPTY;
+    let size_in = if bytes_in { core::mem::size_of::<LxProcIo>() } else { words };
+    // SAFETY: a plain repr(C) struct of integers: any bytes are a valid value
+    if let Err(e) = super::copy::read_user(io, unsafe { core::slice::from_raw_parts_mut(&mut x as *mut LxProcIo as *mut u8, size_in) }) {
+        return e;
+    }
     let r = run(client, tgid, sub, &mut x);
     if r >= 0 {
-        // SAFETY: a plain repr(C) struct of integers, read as its bytes
-        let bytes = unsafe { core::slice::from_raw_parts(&x as *const LxProcIo as *const u8, core::mem::size_of::<LxProcIo>()) };
-        if let Err(e) = crate::compat::linux::vfs::copy_out(io, bytes) {
+        let size_out = if bytes_out { core::mem::size_of::<LxProcIo>() } else { words };
+        // SAFETY: as above, read as its bytes
+        if let Err(e) = super::copy::write_user(io, unsafe { core::slice::from_raw_parts(&x as *const LxProcIo as *const u8, size_out) }) {
             return e;
         }
     }
     r
-}
-
-/// The [`LxProcIo`] at `io` of the calling service.
-fn read_io(io: u64) -> Result<LxProcIo, i64> {
-    let v = crate::compat::linux::vfs::copy_in(io, core::mem::size_of::<LxProcIo>())?;
-    // SAFETY: `v` holds exactly one LxProcIo's bytes; any bit pattern is valid
-    Ok(unsafe { core::ptr::read_unaligned(v.as_ptr() as *const LxProcIo) })
 }
 
 /// Thread `tid`'s process.

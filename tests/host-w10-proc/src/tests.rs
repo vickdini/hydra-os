@@ -9,14 +9,14 @@ const EPERM: i64 = -1;
 
 /// Serves call `nr(args)` for the model's caller; `caps` as `LxCall::caps`.
 fn call(k: &K, m: &Memory, nr: u64, args: &[u64]) -> Out {
-    let (tgid, caps) = {
+    let (tgid, caps, ids) = {
         let mm = k.0.borrow();
         let t = &mm.threads[&mm.caller];
-        (t.tgid, if t.userns { 0 } else { t.eff })
+        (t.tgid, if t.userns { 0 } else { t.eff }, [t.uid[0], t.uid[1], t.uid[2], t.gid[0], t.gid[1], t.gid[2]])
     };
     let mut a = [0u64; 6];
     a[..args.len()].copy_from_slice(args);
-    serve(k, m, &Call { nr, args: a, tgid, caps })
+    serve(k, m, &Call { nr, args: a, tgid, caps, ids })
 }
 
 fn ret(o: Out) -> i64 {
@@ -119,7 +119,7 @@ fn setuid_of_a_thread_that_went_away_is_eperm() {
             -3
         }
     }
-    let c = Call { nr: 105, args: [0; 6], tgid: 100, caps: ALL_CAPS };
+    let c = Call { nr: 105, args: [0; 6], tgid: 100, caps: ALL_CAPS, ids: [0; 6] };
     assert_eq!(serve(&Gone, &Memory::default(), &c), Out::Ret(EPERM));
 }
 
