@@ -477,6 +477,14 @@ fn outcome(r: i64) -> Option<i64> {
 pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
     let nr = frame.rax;
     let tid = crate::task::CURRENT_TID.load(Ordering::Relaxed);
+    // wave9 GP2: a handle the lock-free path got for this very call
+    let args = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
+    if let Some(h) = fh_take(tid, nr, &args) {
+        let d = fh_desc(nr, &args, h).ok()?;
+        let fd = crate::task::with_current_fds_mut(|t| install_in(t, &d));
+        SERVED.fetch_add(1, Ordering::Relaxed);
+        return Some(fd.map_or_else(|e| e, |fd| fd as i64));
+    }
     if take_mark(tid, nr) {
         return None;
     }
@@ -570,6 +578,50 @@ pub(super) fn fh_answer(c: &LxCall, redir: (u64, u64)) -> i64 {
     (1u64 << 63 | dir << 61 | mnt << 45 | ino) as i64
 }
 
+/// Per CPU: a handle the lock-free path got, for the ordinary path to make: (thread,
+/// call number, coded handle, path pointer, flags, tick).
+static FH_STASH: [[AtomicU64; 6]; crate::arch::smp::MAX_CPUS] = [const { [const { AtomicU64::new(0) }; 6] }; crate::arch::smp::MAX_CPUS];
+
+/// The words of call (`nr`, `args`) a stash is matched by: the path pointer, and the flags
+/// with the directory descriptor.
+fn fh_key(nr: u64, args: &[u64; 6]) -> (u64, u64) {
+    if nr == 2 {
+        (args[0], args[1])
+    } else {
+        (args[1], args[2] | args[0] << 32)
+    }
+}
+
+/// Keeps handle `h` of call (`tid`, `nr`, `args`) for [`fh_take`] on this CPU.
+fn fh_stash(tid: u64, nr: u64, args: &[u64; 6], (ino, mnt, dir): (u64, u32, bool)) {
+    let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+    let s = &FH_STASH[cpu];
+    let (p, f) = fh_key(nr, args);
+    s[1].store(nr, Ordering::Relaxed);
+    s[2].store(1u64 << 63 | (dir as u64) << 61 | (mnt as u64) << 45 | ino, Ordering::Relaxed);
+    s[3].store(p, Ordering::Relaxed);
+    s[4].store(f, Ordering::Relaxed);
+    s[5].store(crate::arch::pit::ticks(), Ordering::Relaxed);
+    s[0].store(tid, Ordering::Release);
+}
+
+/// The handle [`fh_stash`] kept on this CPU for exactly this call (same thread, number,
+/// path pointer, flags and directory descriptor, within a tick); taken in any case.
+fn fh_take(tid: u64, nr: u64, args: &[u64; 6]) -> Option<(u64, u32, bool)> {
+    let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+    let s = &FH_STASH[cpu];
+    if tid == 0 || s[0].load(Ordering::Acquire) != tid {
+        return None;
+    }
+    s[0].store(0, Ordering::Relaxed);
+    let (p, f) = fh_key(nr, args);
+    let fresh = crate::arch::pit::ticks().saturating_sub(s[5].load(Ordering::Relaxed)) <= 1;
+    if s[1].load(Ordering::Relaxed) != nr || s[3].load(Ordering::Relaxed) != p || s[4].load(Ordering::Relaxed) != f || !fresh {
+        return None;
+    }
+    fh_decode(s[2].load(Ordering::Relaxed) as i64)
+}
+
 /// `(inode, mount, directory)` of an [`fh_answer`] result.
 pub fn fh_decode(r: i64) -> Option<(u64, u32, bool)> {
     if r >= -(1i64 << 62) {
@@ -611,6 +663,8 @@ pub fn fh_desc(nr: u64, args: &[u64; 6], (ino, mnt, dir): (u64, u32, bool)) -> R
 /// kernel answers).
 pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
     let nr = frame.rax;
+    // wave9 GP2: a stash of this thread not taken by its ordinary path goes
+    let _ = fh_take(id.tid, u64::MAX, &[0; 6]);
     // wave8 GF: the mount calls take the ordinary path (the capability rule needs the task,
     // a down service is waited for)
     if is_mount_call(nr) {
@@ -665,28 +719,13 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
     for h in held.into_iter().flatten() {
         super::drop_last(h);
     }
-    // wave9 GP2 begin: the handle in the answer goes into the caller's table here (a busy
-    // table or an unreadable path: the ordinary path asks again)
+    // wave9 GP2 begin: the handle in the answer is made on the ordinary path, as
+    // `LX_FH_INSTALL` made it (under the kernel lock, interrupts on: the first open
+    // reference of a file may ask zfs-server), from this CPU's stash: the call is not sent
+    // again
     if let Some(h) = fh_decode(r) {
-        // (the path is read before the table is locked: reading may fault a page in, which
-        // takes the kernel lock, and a thread holding that may wait for this table)
-        let d = fh_desc(nr, &c.args, h).ok()?;
-        // The handle is made as `LX_FH_INSTALL` makes it: under the kernel lock, interrupts
-        // on (the first open reference of a file may ask zfs-server, and the lock comes
-        // before the table, as on the ordinary path); the lock stays until the return to
-        // user mode, as after `copy::fault_in`
-        if !crate::arch::smp::bkl_held() {
-            crate::arch::smp::bkl_enter();
-            crate::task::scheduler::wait_out_handoff();
-        }
-        let was_on = x86_64::instructions::interrupts::are_enabled();
-        x86_64::instructions::interrupts::enable();
-        let fd = crate::task::with_current_fds_mut(|t| install_in(t, &d));
-        if !was_on {
-            x86_64::instructions::interrupts::disable();
-        }
-        SERVED.fetch_add(1, Ordering::Relaxed);
-        return Some(fd.map_or_else(|e| e, |fd| fd as i64));
+        fh_stash(id.tid, nr, &c.args, h);
+        return None;
     }
     // wave9 GP2 end
     match outcome(r) {
