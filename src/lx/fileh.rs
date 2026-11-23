@@ -576,10 +576,11 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
     let sh = shape(nr)?;
     // wave8 GF: a mount change waits for a restarting vfs-server (below)
     let host = vfs_host();
-    // wave9 G6b-1: an inotify/fanotify call waits for a restarting vfs-server (its objects
-    // are vfs-server's; a new instance made by the kernel meanwhile would keep every change
-    // in the kernel)
-    let host = if host.is_none() && is_notify_call(nr) { notify_wait() } else { host };
+    // wave9 G9-C (was G6b-1's, for the notify calls): every file call waits for a
+    // restarting vfs-server (the ladder's 30 s) instead of the kernel answering meanwhile;
+    // the kernel answers only before vfs-server first comes up (boot) or once the ladder
+    // gave it up (its code is needed anyway for the calls vfs-server sends back)
+    let host = if host.is_none() { offline_wait() } else { host };
     if host.is_none() && !is_mount_call(nr) {
         KEPT.fetch_add(1, Ordering::Relaxed);
         count_kernel(nr, false);
@@ -870,15 +871,16 @@ pub fn takes_notify_obj(nr: u64) -> bool {
     matches!(nr, 254 | 255 | 301)
 }
 
-/// Inotify/fanotify calls that waited for a restarting vfs-server.
-pub static NOTIFY_WAITS: AtomicU64 = AtomicU64::new(0);
+/// File calls that waited for a restarting vfs-server (wave9 G6b-1: the notify calls;
+/// wave9 G9-C: every file call).
+pub static OFFLINE_WAITS: AtomicU64 = AtomicU64::new(0);
 
 /// vfs-server is offline: if it is being restarted, wait for it (the ladder's 30 s).
-fn notify_wait() -> Option<&'static Host> {
+fn offline_wait() -> Option<&'static Host> {
     if !super::restart::restarting(LXS_VFS) {
         return None;
     }
-    NOTIFY_WAITS.fetch_add(1, Ordering::Relaxed);
+    OFFLINE_WAITS.fetch_add(1, Ordering::Relaxed);
     super::restart::wait_online(LXS_VFS, &|| vfs_host().is_some()).ok().and_then(|()| vfs_host())
 }
 // wave9 G6b-1 end
@@ -1259,7 +1261,7 @@ pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
 /// `[prof] vfs:` line of `linux prof show`.
 pub fn summary() -> String {
     alloc::format!(
-        "vfs: served {} to kernel {} kept {} (landlock {} fanotify {} foreign {} mounts {} abac {} inotify {}) notes {} mount-waits {}/{} notify: posted {} dropped {} perm {}/{} waits {}",
+        "vfs: served {} to kernel {} kept {} (landlock {} fanotify {} foreign {} mounts {} abac {} inotify {}) notes {} mount-waits {}/{} notify: posted {} dropped {} perm {}/{}; offline waits {}",
         SERVED.load(Ordering::Relaxed),
         TO_KERNEL_CALLS.load(Ordering::Relaxed),
         KEPT.load(Ordering::Relaxed),
@@ -1277,7 +1279,7 @@ pub fn summary() -> String {
         super::notifyfwd::DROPPED.load(Ordering::Relaxed),
         super::notifyfwd::PERM_ASKED.load(Ordering::Relaxed),
         super::notifyfwd::PERM_DENIED.load(Ordering::Relaxed),
-        NOTIFY_WAITS.load(Ordering::Relaxed)
+        OFFLINE_WAITS.load(Ordering::Relaxed)
     )
 }
 
