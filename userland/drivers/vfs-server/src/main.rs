@@ -53,6 +53,8 @@ mod recover;
 // wave7 G7-6 end
 mod perm;
 mod walk;
+// wave9 G6b-1: inotify and fanotify
+mod notify;
 // wave7 G7-5 begin: files for the other services (execve, socket nodes)
 mod xfile;
 mod xpath;
@@ -157,6 +159,9 @@ fn main(args: &[&str]) {
         recover::Found::NoKept(e) => println!("[vfs-server] no kept-state objects ({}): nothing will survive a restart", e),
     }
     // wave7 G7-6 end
+    // wave9 G6b-1: inotify instances and fanotify groups of the previous instance (their
+    // objects and watches), before any call can come
+    notify::start(win);
     let mut root = zfs::root();
     for _ in 0..120 {
         if root.is_ok() {
@@ -187,12 +192,15 @@ fn main(args: &[&str]) {
     println!("[vfs-server] {} file calls claimed", calls::claim_all(args));
     // wave7 G7-3: the mount calls moved so far (`mcalls=0`: none)
     println!("[vfs-server] {} mount calls claimed", mountcalls::claim_all(args));
+    // wave9 G6b-1 (`notify=0`: none)
+    println!("[vfs-server] {} inotify/fanotify calls claimed", notify::claim(args));
     loop {
         match svc.recv(100) {
             Event::Request(id, _req) => svc.reply(id, &hydra_rt::Message::new(MSG_LX_REPLY as u64, [ENOSYS as u64, 0, 0, 0])),
             Event::Notify(_) | Event::Idle => {}
         }
         take_notes(u64::MAX);
+        svcrt::objs::flush(); // wave9 G6b-1: readiness of the notify objects
         // wave7 G7-3
         if !root_known {
             root_known = zfs::root().map(mount::set_pool_root).unwrap_or(false);
@@ -243,11 +251,24 @@ fn take_notes(seq: u64) {
     // wave7 G7-6 (saves when it changed something)
     if overflow {
         let _ = recover::resync();
+        notify::lost_events(); // wave9 G6b-1: the kernel's event records may be among them
     }
 }
 
 /// One notification: the kernel changed the file system (`LX_NOTE_FSCHANGE`).
-fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
+fn on_note(kind: u64, a: u64, b: u64, c: u64) {
+    // wave9 G6b-1 begin: the kernel's file events, and the notify objects' close and
+    // interrupt notes
+    if notify::on_note(kind, a, b, c) {
+        return;
+    }
+    if kind == LX_NOTE_CLOSE && notify::closed(a as u32, b as u32) {
+        return;
+    }
+    if kind == LX_NOTE_INTERRUPT && notify::interrupted(a) {
+        return;
+    }
+    // wave9 G6b-1 end
     // wave9 G6b-2 begin: the daemons' /dev/fuse descriptors
     if kind == LX_NOTE_CLOSE && b == LX_OBJ_KIND_FUSE as u64 {
         fuse::on_close(a as u32);
@@ -284,6 +305,11 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
 fn serve(c: &LxCall, page: *mut u8) -> Answer {
     take_notes(c.note_seq);
     let cx = Cx::from_call(c, page);
+    // wave9 G6b-1: inotify, fanotify (and their objects)
+    if let Some(a) = notify::serve(&cx) {
+        svcrt::objs::flush();
+        return a;
+    }
     // wave9 G6b-2 begin: FUSE (the kernel's operations on FUSE inodes, the daemons' devices)
     if c.nr == LX_KCALL_FUSE {
         return fuse::kcall(&cx);

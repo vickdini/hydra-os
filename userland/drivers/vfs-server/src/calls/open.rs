@@ -44,6 +44,11 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
 // wave7 G7-5 end
     let c = &cx.c;
     ctxt::check(c, LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_ABAC)?;
+    // wave9 G6b-1: with vfs-server's fanotify groups the kernel opens (FAN_OPEN and the
+    // permission events are made there, with the kernel's path)
+    if crate::notify::fan_any() {
+        return Err(KERNEL);
+    }
     let a = cx.args;
     let (dirfd, path_ptr, flags) = if cx.nr == 2 { (-100i32, a[0], a[1] as u32) } else { (a[0] as i32, a[1], a[2] as u32) };
     if !rules::servable(flags) {

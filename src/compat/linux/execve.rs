@@ -234,6 +234,10 @@ fn level(ino: u64, abs_path: &str, follow: bool) -> Result<Level, i64> {
         let dir = super::fanotify::parent_of_path(abs_path);
         super::fanotify::on_open(ino, dir, abs_path, false, true)?;
     }
+    // wave9 G6b-1: vfs-server's fanotify groups
+    if crate::lx::notifyfwd::want_fan() {
+        crate::lx::notifyfwd::on_open(ino, crate::lx::notifyfwd::parent_of(abs_path), abs_path, false, true)?;
+    }
     let source = super::mm::inode_source(ino)?;
     let mut set_uid = (attr.mode & 0o4000 != 0).then_some(attr.uid);
     // File capabilities (security.capability) of the program that will run; with the
@@ -243,6 +247,9 @@ fn level(ino: u64, abs_path: &str, follow: bool) -> Result<Level, i64> {
     let mut set_gid = (attr.mode & 0o2010 == 0o2010).then_some(attr.gid);
     // A noexec mount refuses to run anything; a nosuid one ignores the set-ID bits
     let (noexec, nosuid) = super::mount::exec_flags();
+    // wave9 G6b-1: also the mount the path lies in (the lookup may have been the services')
+    let (noexec2, nosuid2) = super::mount::exec_flags_of_path(abs_path);
+    let (noexec, nosuid) = (noexec || noexec2, nosuid || nosuid2);
     if noexec {
         return Err(EACCES);
     }
@@ -358,7 +365,8 @@ pub static PRIVILEGED_TO_KERNEL: core::sync::atomic::AtomicU64 = core::sync::ato
 fn from_plan(plan: crate::lx::xexec::ExecPlan, argv: &[Vec<u8>], envp: &[Vec<u8>], flags: u64) -> Option<Result<Ready, i64>> {
     // (checks only the kernel's own lookup makes at every `#!` level: Landlock, fanotify, app
     // control; such callers get no plan, but the rules may have come meanwhile)
-    if super::landlock::active() || super::fanotify::active() || super::abac::active() {
+    // (wave9 G6b-1: also vfs-server's fanotify groups)
+    if super::landlock::active() || super::fanotify::active() || super::abac::active() || crate::lx::notifyfwd::want_fan() {
         return None;
     }
     let follow = flags & AT_SYMLINK_NOFOLLOW == 0 || !plan.prefix.is_empty();

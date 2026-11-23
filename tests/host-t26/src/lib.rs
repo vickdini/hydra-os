@@ -55,6 +55,28 @@ pub mod task {
 
 pub mod lx {
     pub use crate::fake::lx::*;
+    // wave9 G6b-1 begin: *stub* the kernel's events for vfs-server's inotify/fanotify
+    // (`lx::notifyfwd`): vfs-server wants none here
+    pub mod notifyfwd {
+        pub fn want_zfs() -> bool {
+            false
+        }
+        pub fn want_close_write() -> bool {
+            false
+        }
+        pub fn want_fan() -> bool {
+            false
+        }
+        pub fn zfs_event(_ino: u64, _mask: u32, _cookie: u32, _name: &[u8]) {}
+        pub fn file_event(_ino: u64, _dir: u64, _path: &str, _mask: u64, _is_dir: bool) {}
+        pub fn on_open(_ino: u64, _dir: u64, _path: &str, _is_dir: bool, _exec: bool) -> Result<(), i64> {
+            Ok(())
+        }
+        pub fn parent_of(_path: &str) -> u64 {
+            0
+        }
+    }
+    // wave9 G6b-1 end
 }
 
 pub mod ipc {

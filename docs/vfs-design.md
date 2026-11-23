@@ -441,6 +441,14 @@ Each group owns its files. Shared files (the kernel routing table of P2, the cop
 - **The switch back** (`lx=kernel`) keeps every moved call working in the kernel until 7-7 deletes the copies.
 - **Step 6b** (`io_uring`, `aio`, `inotify`, `fanotify`, FUSE, Landlock, ACLs, ABAC) follows in wave 8. Its file-side pieces go to vfs-server, and `io_uring`/`aio` to whichever service owns the descriptor.
 
+## 12b. Wave 9 (6b-1): inotify and fanotify in vfs-server, as built
+
+- **Objects.** An inotify instance and a fanotify group are vfs-server server objects (`LX_OBJ_KIND_INOTIFY` 73, `LX_OBJ_KIND_FANOTIFY` 74; `vfs-server/src/notify`). `inotify_init[1]`, `fanotify_init` (253/294/300) go to vfs-server by number; `inotify_add_watch`, `inotify_rm_watch`, `fanotify_mark` (254/255/301) only when `args[0]` is one of its objects (`fileh` shapes `Notify`/`NotifyAt3`), else the kernel answers (its own instance). `read` is pending while the queue is empty; `poll` reads the readiness word; `FIONREAD`; `write` answers a permission event.
+- **Events.** vfs-server's own changes: from its zfs-server replies. The kernel's changes and open files: posted to vfs-server's note ring (`src/lx/notifyfwd.rs`: `LX_NOTE_FSEVENT` + `LX_NOTE_FSDATA` entries), only for inodes in the map vfs-server publishes in its window (flags word = note-ring header word 3, 16 Kbit inode hash at 0x20400). A call carries the ring position, so a `read` after a change sees its event.
+- **Permission events.** The kernel posts the event with an id, then asks `LX_KCALL_FANPERM` (0x6792), pending until every group answered. While a mark wants descriptor or permission events, vfs-server sends its opens and `getdents` to the kernel, so those events are made where the open is.
+- **Restart.** Groups, watches and marks are kept records (kept key 3); the objects are adopted; queued events become one `IN_Q_OVERFLOW`/`FAN_Q_OVERFLOW`. A second crash within 30 s (the ladder: FailObjects) makes the descriptors stale (`POLLERR|POLLHUP`).
+- **kernel_mask.** The inotify/fanotify bits now come only from kernel-owned instances (switch back: `lx.vfs=kernel`, `lx=kernel`, vfs-server given up); with vfs-server serving them no call stays in the kernel because of a watch.
+
 ## 13. Not measured, and limits
 
 - **KVM, not the NUC.** Forwarding costs and zfs-server request costs on real hardware were never measured.

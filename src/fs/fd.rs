@@ -100,8 +100,13 @@ impl OpenFile {
 
     /// Reports a file event (`FAN_ACCESS`, `FAN_MODIFY`, `FAN_CLOSE_*`) to fanotify.
     pub fn fan(&self, mask: u64) {
-        if crate::compat::linux::fanotify::active() && !self.nonotify && self.flags & O_PATH == 0 {
+        // (wave9 G6b-1: and to vfs-server's fanotify groups)
+        let fwd = crate::lx::notifyfwd::want_fan();
+        if (fwd || crate::compat::linux::fanotify::active()) && !self.nonotify && self.flags & O_PATH == 0 {
             crate::compat::linux::fanotify::file_event(self.ino, self.fan_dir, &self.path, mask, self.is_dir);
+            if fwd {
+                crate::lx::notifyfwd::file_event(self.ino, self.fan_dir, &self.path, mask, self.is_dir);
+            }
         }
     }
 

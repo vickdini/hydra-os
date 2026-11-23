@@ -2679,3 +2679,60 @@ pub const FUSE_OP_MOUNT: u64 = 24;
 /// `(connection)`: unmounted -> 0 (the daemon reads ENODEV).
 pub const FUSE_OP_ABORT: u64 = 25;
 // wave9 G6b-2 end
+
+
+// wave9 G6b-1 begin: inotify and fanotify in vfs-server (`userland/drivers/vfs-server/src/notify`)
+/// Server-object kind (wave 9, Group 6b-1): an inotify instance of vfs-server.
+pub const LX_OBJ_KIND_INOTIFY: u32 = 73;
+/// Server-object kind (wave 9, Group 6b-1): a fanotify group of vfs-server.
+pub const LX_OBJ_KIND_FANOTIFY: u32 = 74;
+/// Kernel call (wave 9, Group 6b-1), to vfs-server: a fanotify permission decision for the
+/// open whose event record (`LX_NOTE_FSEVENT` with [`LX_FSEV_PERM`]) the kernel posted just
+/// before with id `args[0]`. Answers 0 (allowed, or nobody asked) or `EPERM`, after every
+/// group that wanted the event answered (pending meanwhile).
+pub const LX_KCALL_FANPERM: u64 = 0x6792;
+/// Notification (wave 9, Group 6b-1): the head of one file-event record from the kernel:
+/// `a` = inode, `b` = mask (low 32 bits) | cookie (high 32 bits), `c` = kind ([`LX_FSEV_ZFS`],
+/// [`LX_FSEV_FILE`], [`LX_FSEV_PERM`]) | payload bytes << 8. The payload follows in
+/// [`LX_NOTE_FSDATA`] entries, 24 bytes each: `dir` u64, `pid` u32, `tid` u32, `id` u64 (a
+/// permission event's), then the name (zfs events) or path (file events).
+pub const LX_NOTE_FSEVENT: u64 = 11;
+/// Notification (wave 9, Group 6b-1): 24 payload bytes of the [`LX_NOTE_FSEVENT`] record
+/// before it (`a`, `b`, `c` little-endian).
+pub const LX_NOTE_FSDATA: u64 = 12;
+/// [`LX_NOTE_FSEVENT`] kind: an event zfs-server reported for a change the kernel made
+/// (inotify's masks: entry events on the directory with a name, self events without).
+pub const LX_FSEV_ZFS: u64 = 0;
+/// [`LX_NOTE_FSEVENT`] kind: an event on an open file (`FAN_ACCESS`, `FAN_MODIFY`,
+/// `FAN_CLOSE_*`, `FAN_OPEN`, `FAN_OPEN_EXEC`; bit 30 = a directory).
+pub const LX_FSEV_FILE: u64 = 1;
+/// [`LX_NOTE_FSEVENT`] kind: a permission event (`FAN_OPEN_PERM`, `FAN_OPEN_EXEC_PERM`) the
+/// kernel then waits for with [`LX_KCALL_FANPERM`].
+pub const LX_FSEV_PERM: u64 = 2;
+/// Word index in the note ring's header (`LX_NOTES_OFF`) that vfs-server writes for the
+/// kernel: which events it wants ([`LX_NOTIFY_INO`] ...; 0 = none: nothing is posted).
+pub const LX_NOTES_SVCWORD: usize = 3;
+/// [`LX_NOTES_SVCWORD`] bit: inotify watches or fanotify marks for entry and attribute
+/// events exist (zfs events of watched inodes; the close-write event is asked of
+/// zfs-server).
+pub const LX_NOTIFY_INO: u64 = 1;
+/// [`LX_NOTES_SVCWORD`] bit: fanotify marks for descriptor or permission events exist
+/// (open files' events of marked inodes; opens find the file's directory).
+pub const LX_NOTIFY_FAN: u64 = 2;
+/// [`LX_NOTES_SVCWORD`] bit: a mount or file-system mark: every inode counts as marked.
+pub const LX_NOTIFY_ALL: u64 = 4;
+/// [`LX_NOTES_SVCWORD`] bit: a permission mark exists (opens ask with [`LX_KCALL_FANPERM`]).
+pub const LX_NOTIFY_PERM: u64 = 8;
+/// Offset in vfs-server's window of the watched-inode map: bit `notify_hash(ino)` set =
+/// inode `ino` may be watched or marked (a hash: false hits only cost a posted event).
+pub const LX_VFS_NOTIFY_MAP_OFF: usize = 0x20400;
+/// Bytes of the watched-inode map.
+pub const LX_VFS_NOTIFY_MAP_LEN: usize = 0x800;
+/// The bit of inode `ino` in the watched-inode map.
+pub const fn notify_hash(ino: u64) -> usize {
+    (ino.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 50) as usize % (LX_VFS_NOTIFY_MAP_LEN * 8)
+}
+/// `LxFhDesc::flags` bit (wave 9, Group 6b-1): the handle makes no fanotify events (a
+/// fanotify event's descriptor).
+pub const LX_FH_NONOTIFY: u32 = 1 << 31;
+// wave9 G6b-1 end

@@ -135,6 +135,12 @@ fn exec(cx: &Cx, a: &DcallArgs) -> Result<i64, i64> {
         Walked::Found { node, attr } => (node, attr),
         Walked::Redirect(_) => return Err(KERNEL),
     };
+    // wave9 G6b-1: a noexec mount runs nothing (Linux's `path_noexec`: EACCES), whoever
+    // loads the file (found once the fanotify test no longer kept every later call in the
+    // kernel: the kernel's own front half did not see this namespace's tmpfs mount flags)
+    if node.mnt != 0 && ctxt::mount_flags(&c, node)? & crate::kmounts::MS_NOEXEC != 0 {
+        return Err(EACCES);
+    }
     // (the kernel loads pool objects only)
     if node.mnt != 0 {
         return Err(KERNEL);
@@ -247,6 +253,8 @@ fn sock(cx: &Cx, a: &DcallArgs) -> Result<i64, i64> {
                 w.u64(c.euid as u64);
                 w.u64(c.egid as u64);
             });
+            // wave9 G6b-1: the events of the change for inotify/fanotify
+            crate::notify::changed(&r, &who);
             names_changed(p.dir, None);
             r.map(|r| r.value as i64)
         }
@@ -276,6 +284,8 @@ fn sock(cx: &Cx, a: &DcallArgs) -> Result<i64, i64> {
                 w.u64(p.dir.ino);
                 w.bytes(&p.name);
             });
+            // wave9 G6b-1: the events of the change for inotify/fanotify
+            crate::notify::changed(&r, &who);
             names_changed(p.dir, if r.is_ok() { victim.map(|v| v.ino) } else { None });
             r.map(|_| 0)
         }

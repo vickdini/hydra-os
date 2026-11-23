@@ -507,6 +507,8 @@ pub mod fs {
         pub mnt: usize,
         pub is_dir: bool,
         pub foreign: Option<(u64, u64, usize)>,
+        /// wave9 G6b-1: a fanotify event's descriptor (no events).
+        pub nonotify: bool,
     }
     impl Vnode {
         /// *stub* `OpenFile::new` (the open reference is recorded).

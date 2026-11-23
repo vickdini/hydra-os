@@ -1462,7 +1462,12 @@ pub fn restart_init() -> (usize, usize) {
     let mut dropped = 0;
     let mut keep: Vec<ConnRec> = Vec::new();
     for o in &found {
-        match recs.iter().find(|r| r.slot == o.slot && o.kind == LX_OBJ_KIND_FUSE) {
+        // (merge of wave 9 6b-1: only /dev/fuse objects are FUSE's to keep or drop; the
+        // notify objects, kinds 73/74, are taken back by `notify`)
+        if o.kind != LX_OBJ_KIND_FUSE {
+            continue;
+        }
+        match recs.iter().find(|r| r.slot == o.slot) {
             Some(r) => keep.push(*r),
             None => {
                 let _ = sys::lx_svc_dead(o.slot);

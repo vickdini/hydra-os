@@ -1673,6 +1673,11 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     if super::fanotify::active() && flags & O_PATH == 0 {
         super::fanotify::on_open(ino, fan_dir, &raw, ftype == S_IFDIR, false)?;
     }
+    // wave9 G6b-1: vfs-server's fanotify groups (permission events, then FAN_OPEN)
+    let fan_dir = if fan_dir == 0 && flags & O_PATH == 0 && crate::lx::notifyfwd::want_fan() { crate::lx::notifyfwd::parent_of(&raw) } else { fan_dir };
+    if flags & O_PATH == 0 {
+        crate::lx::notifyfwd::on_open(ino, fan_dir, &raw, ftype == S_IFDIR, false)?;
+    }
     let file = OpenFile::new(ino, keep, raw);
     file.lock().mnt = super::mount::last_mount();
     file.lock().foreign = super::mount::last_foreign();
