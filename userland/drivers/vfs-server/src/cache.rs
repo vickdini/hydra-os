@@ -342,6 +342,14 @@ impl Cache {
         g.acls.m.remove(&key(n));
     }
 
+    /// wave10 GV1: forgets the attributes of `n` but keeps its ACL (an xattr other than the
+    /// ACLs changed).
+    pub fn forget_attr_keep_acl(&self, n: Node) {
+        let mut g = self.inner.lock();
+        self.changed();
+        g.attrs.m.remove(&key(n));
+    }
+
     /// Forgets the link target of `n`.
     pub fn forget_link(&self, n: Node) {
         let mut g = self.inner.lock();

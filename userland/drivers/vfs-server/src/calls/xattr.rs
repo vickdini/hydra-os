@@ -46,13 +46,15 @@ pub fn serve(cx: &Cx) -> Result<i64, i64> {
     let a = cx.args;
     // (kind: 0 set, 1 get, 2 list, 3 remove; by path followed, path not followed, handle)
     let (kind, how) = ((cx.nr - 188) / 3, (cx.nr - 188) % 3);
-    let who = ctxt::caller(c)?;
+    // (one copy of the caller's mount table for the whole call)
+    let k = ctxt::call(c)?;
+    let who = k.who.clone();
     let (n, attr) = if how == 2 {
         let n = ctxt::handle(c)?;
         (n, ctxt::BE.getattr(n)?)
     } else {
         let path = ctxt::path(cx, a[0], false)?;
-        ctxt::find(c, &who, &path, how == 0)?
+        k.find(c, &path, how == 0)?
     };
     let out = |data: &[u8], ptr: u64, size: u64| -> Result<i64, i64> {
         let n = rules::xattr_fits(data.len(), size)?;
@@ -72,7 +74,7 @@ pub fn serve(cx: &Cx) -> Result<i64, i64> {
         return Err(if kind == 0 { rules::EOPNOTSUPP } else { ENODATA });
     }
     if write {
-        ctxt::writable(c, n)?;
+        k.writable(n)?;
     }
     if let (XattrNs::Acl(default), 3) = (ns, kind) {
         return acl_remove(&who, n, &attr, default);
@@ -146,7 +148,12 @@ fn set(who: &Ctx, n: Node, name: &[u8], data: &[u8], flags: u32) -> Result<i64, 
 /// attributes in the kernel; a label: the kernel's ABAC caches).
 fn changed(who: &Ctx, n: Node, name: &[u8], r: &Result<zfs::Reply, i64>) {
     crate::notify::changed(r, who);
-    cache::forget_attr(n);
+    // (an ACL changed: its cached copy goes too)
+    if name == acl::ACCESS || name == acl::DEFAULT {
+        cache::forget_attr(n);
+    } else {
+        cache::CACHE.forget_attr_keep_acl(n);
+    }
     let labels = if name == acl::LABELS { LX_FHC_LABELS } else { 0 };
     tell_kernel(n.ino, LX_FHC_ATTR | labels, 0);
 }
