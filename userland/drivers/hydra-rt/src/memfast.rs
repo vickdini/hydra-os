@@ -3,7 +3,7 @@
 //! The built-in ones (compiler_builtins) run three `rep` string instructions for every copy;
 //! their start-up cost dominates the 8..512-byte copies a forwarded call makes (the call
 //! record, `Attr`s, `Ctx`, results returned by value): a stat in vfs-server spent about a
-//! third of its own time in `memcpy` (100 Hz profile, 2026-11-23). Up to 128 bytes these copy
+//! third of its own time in `memcpy` (100 Hz profile, 2026-11-23). Up to 64 bytes these copy
 //! with straight-line overlapping 8-byte moves (every load before any store), larger ones
 //! with one `rep movsq` plus an overlapping tail. The built-in symbols are weak, so these
 //! take their place in every program linked with hydra-rt.
