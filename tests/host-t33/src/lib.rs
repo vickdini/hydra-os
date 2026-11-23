@@ -297,6 +297,28 @@ pub mod pkg;
 /// *stub* The forwarding to the ring-3 Linux server.
 pub mod lx {
     pub fn note(_kind: u64, _a: u64, _b: u64, _c: u64) {}
+    // wave9 G6b-1 begin: *stub* the kernel's events for vfs-server's inotify/fanotify
+    // (`lx::notifyfwd`): vfs-server wants none here
+    pub mod notifyfwd {
+        pub fn want_zfs() -> bool {
+            false
+        }
+        pub fn want_close_write() -> bool {
+            false
+        }
+        pub fn want_fan() -> bool {
+            false
+        }
+        pub fn zfs_event(_ino: u64, _mask: u32, _cookie: u32, _name: &[u8]) {}
+        pub fn file_event(_ino: u64, _dir: u64, _path: &str, _mask: u64, _is_dir: bool) {}
+        pub fn on_open(_ino: u64, _dir: u64, _path: &str, _is_dir: bool, _exec: bool) -> Result<(), i64> {
+            Ok(())
+        }
+        pub fn parent_of(_path: &str) -> u64 {
+            0
+        }
+    }
+    // wave9 G6b-1 end
     /// *stub* wave7 G7-2: the kernel's changes noted for vfs-server (recorded).
     pub mod fileh {
         pub static CHANGED: std::sync::Mutex<alloc::vec::Vec<u64>> = std::sync::Mutex::new(alloc::vec::Vec::new());

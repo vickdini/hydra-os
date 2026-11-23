@@ -43,12 +43,16 @@ pub struct Ctx {
     pub ns: u32,
     /// The caller's root directory.
     pub root: Node,
+    /// wave9 G6b-1: the calling process and thread (the events of its changes say who).
+    pub pid: u32,
+    /// See [`Ctx::pid`].
+    pub tid: u32,
 }
 
 impl Ctx {
     /// A caller with these ids and no supplementary groups.
     pub fn new(uid: u32, gid: u32, caps: u64, root: Node) -> Self {
-        Self { uid, gid, groups: [0; LX_GROUPS], ngroups: 0, caps, ns: 0, root }
+        Self { uid, gid, groups: [0; LX_GROUPS], ngroups: 0, caps, ns: 0, root, pid: 0, tid: 0 }
     }
 
     /// The caller of forwarded call `c`, whose root is `root`.
@@ -58,6 +62,8 @@ impl Ctx {
         x.groups[..n].copy_from_slice(&c.groups[..n]);
         x.ngroups = n;
         x.ns = c.mnt_ns;
+        x.pid = c.tgid as u32;
+        x.tid = c.tid as u32;
         x
     }
 

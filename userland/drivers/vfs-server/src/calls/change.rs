@@ -77,6 +77,8 @@ fn setattr(who: &Ctx, n: Node, a: &Attr, mut set: SetAttr) -> Result<i64, i64> {
         w.u64(n.ino);
         w.setattr(&set);
     });
+    // wave9 G6b-1: the events of the change for inotify/fanotify
+    crate::notify::changed(&r, who);
     cache::forget_attr(n);
     // (the page cache is cut only when the file was)
     let size = set.size.unwrap_or(0);
@@ -263,6 +265,8 @@ pub fn mkdir(cx: &Cx) -> Result<i64, i64> {
         w.u64(c.euid as u64);
         w.u64(c.egid as u64);
     });
+    // wave9 G6b-1: the events of the change for inotify/fanotify
+    crate::notify::changed(&r, &who);
     names_changed(&[p.dir], None);
     r.map(|_| 0)
 }
@@ -284,6 +288,8 @@ pub fn symlink(cx: &Cx) -> Result<i64, i64> {
         w.u64(c.euid as u64);
         w.u64(c.egid as u64);
     });
+    // wave9 G6b-1: the events of the change for inotify/fanotify
+    crate::notify::changed(&r, &who);
     names_changed(&[p.dir], None);
     r.map(|_| 0)
 }
@@ -311,6 +317,8 @@ pub fn unlink(cx: &Cx) -> Result<i64, i64> {
         w.u64(p.dir.ino);
         w.bytes(&p.name);
     });
+    // wave9 G6b-1: the events of the change for inotify/fanotify
+    crate::notify::changed(&r, &who);
     if r.is_ok() && rmdir {
         if let Some(v) = victim {
             cache::CACHE.forget_object(v.ino);
@@ -386,6 +394,8 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
         w.u64(dst.dir.ino);
         w.bytes(&dst.name);
     });
+    // wave9 G6b-1: the events of the change for inotify/fanotify
+    crate::notify::changed(&r, &who);
     let replaced = if r.is_ok() { dst.child.map(|d| d.ino).filter(|&d| Some(d) != src.child.map(|s| s.ino)) } else { None };
     if let Some(s) = src.child {
         cache::CACHE.forget_object(s.ino);

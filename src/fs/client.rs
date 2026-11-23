@@ -1031,7 +1031,8 @@ impl ZfsClient {
     ///
     /// * `ino` - Inode number of the closed file.
     pub fn notify_close_write(ino: u64) {
-        if crate::compat::linux::inotify::active() {
+        // (wave9 G6b-1: or vfs-server's inotify watches)
+        if crate::compat::linux::inotify::active() || crate::lx::notifyfwd::want_close_write() {
             let _ = with_server(|s| {
                 s.notify_file(ino, crate::compat::linux::inotify::IN_CLOSE_WRITE);
                 Ok(())

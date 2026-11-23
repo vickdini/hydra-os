@@ -17,6 +17,10 @@ const EINVAL: i64 = -22;
 pub fn getdents(cx: &Cx) -> Result<i64, i64> {
     let c = &cx.c;
     ctxt::check(c, LX_FS_FANOTIFY)?;
+    // wave9 G6b-1: FAN_ACCESS of a directory read is the kernel's handle's
+    if crate::notify::fan_any() {
+        return Err(super::KERNEL);
+    }
     let [fd, buf, count, ..] = cx.args;
     let count = count as u32 as usize;
     let n = ctxt::handle(c)?;

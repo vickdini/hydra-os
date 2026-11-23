@@ -81,6 +81,14 @@ pub enum Shape {
     At1,
     /// `args[0]` is a descriptor the call acts on: only a handle goes to the service.
     Handle,
+    // wave9 G6b-1 begin: inotify and fanotify (vfs-server's objects)
+    /// No descriptor to describe; `args[0]` of `inotify_add_watch`/`inotify_rm_watch` is
+    /// the instance (only one of vfs-server's goes there: [`LxCall::obj`]).
+    Notify,
+    /// `fanotify_mark`: `args[0]` is the group (as [`Shape::Notify`]), `args[3]` the
+    /// directory descriptor.
+    NotifyAt3,
+    // wave9 G6b-1 end
 }
 
 /// The file-service calls and their shapes (x86-64 Linux numbers).
@@ -102,6 +110,10 @@ pub fn shape(nr: u64) -> Option<Shape> {
         217 | 78 | 77 | 91 | 93 | 74 | 75 | 285 | 190 | 193 | 196 | 199 | 138 | 81 | 277 => Shape::Handle,
         // wave8 GF: pivot_root, mount, umount2 (paths only)
         155 | 165 | 166 => Shape::Path,
+        // wave9 G6b-1: inotify_init, inotify_init1, fanotify_init, inotify_add_watch,
+        // inotify_rm_watch; fanotify_mark
+        253 | 294 | 300 | 254 | 255 => Shape::Notify,
+        301 => Shape::NotifyAt3,
         _ => return None,
     })
 }
@@ -315,8 +327,21 @@ pub(super) fn fill(c: &mut LxCall, t: &FdTable, sh: Shape, wait: bool) -> Result
         c.fs_flags |= LX_FS_FOREIGN;
     }
     let mut held: Held = [None, None];
+    // wave9 G6b-1 begin: the instance or group the call acts on: vfs-server's object, or
+    // the kernel answers (an instance the kernel made while vfs-server was away)
+    if takes_notify_obj(c.nr) {
+        match super::obj::object_in(t, c.args[0]) {
+            Some((_dev, slot, flags, h)) if h == svc::host_of(LXS_VFS) => {
+                c.obj = slot;
+                c.obj_flags = flags;
+            }
+            _ => return Ok(None),
+        }
+    }
+    // wave9 G6b-1 end
     let (first, second) = match sh {
-        Shape::Path => (None, None),
+        Shape::Path | Shape::Notify => (None, None),
+        Shape::NotifyAt3 => (Some(c.args[3]), None), // wave9 G6b-1
         Shape::At0 | Shape::Handle => (Some(c.args[0]), None),
         Shape::At0At2 => (Some(c.args[0]), Some(c.args[2])),
         Shape::At1 => (Some(c.args[1]), None),
@@ -352,6 +377,11 @@ pub(super) fn fill(c: &mut LxCall, t: &FdTable, sh: Shape, wait: bool) -> Result
 /// its arguments (`calls/ctxt.rs` `check` and the calls' own masks): the kernel then answers
 /// at once, without the round trip. vfs-server checks them again.
 pub fn kernel_mask(nr: u64) -> u32 {
+    // wave9 G6b-1: vfs-server's inotify/fanotify calls are its own whatever the caller's
+    // state (it walks what it can; the kernel's instances are the kernel's anyway)
+    if is_notify_call(nr) {
+        return 0;
+    }
     let always = LX_FS_FOREIGN | LX_FS_MOUNTS;
     always
         | match nr {
@@ -380,7 +410,7 @@ fn kernel_only(c: &LxCall) -> bool {
     // namespace a root or working directory on a mount is a FUSE one)
     // (wave8 GF: the initial namespace's mounts are fixed apart from FUSE, which is the
     // kernel's: its mount calls stay here)
-    let mounts = c.mnt_ns == 0 && (c.root_mnt != 0 || c.cwd_mnt != 0 || is_mount_call(c.nr));
+    let mounts = c.mnt_ns == 0 && (c.root_mnt != 0 || c.cwd_mnt != 0 || is_mount_call(c.nr)) && !is_notify_call(c.nr); // (wave9 G6b-1)
     if hit == 0 && !mounts {
         return false;
     }
@@ -453,6 +483,10 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
     let sh = shape(nr)?;
     // wave8 GF: a mount change waits for a restarting vfs-server (below)
     let host = vfs_host();
+    // wave9 G6b-1: an inotify/fanotify call waits for a restarting vfs-server (its objects
+    // are vfs-server's; a new instance made by the kernel meanwhile would keep every change
+    // in the kernel)
+    let host = if host.is_none() && is_notify_call(nr) { notify_wait() } else { host };
     if host.is_none() && !is_mount_call(nr) {
         KEPT.fetch_add(1, Ordering::Relaxed);
         return None;
@@ -606,6 +640,30 @@ fn mount_wait(ns: u32) -> Option<&'static Host> {
     }
 }
 
+// wave9 G6b-1 begin: inotify and fanotify
+/// Whether `nr` is one of the inotify/fanotify calls vfs-server serves.
+pub fn is_notify_call(nr: u64) -> bool {
+    matches!(nr, 253 | 294 | 300 | 254 | 255 | 301)
+}
+
+/// Whether call `nr` acts on an instance or group at `args[0]`.
+pub fn takes_notify_obj(nr: u64) -> bool {
+    matches!(nr, 254 | 255 | 301)
+}
+
+/// Inotify/fanotify calls that waited for a restarting vfs-server.
+pub static NOTIFY_WAITS: AtomicU64 = AtomicU64::new(0);
+
+/// vfs-server is offline: if it is being restarted, wait for it (the ladder's 30 s).
+fn notify_wait() -> Option<&'static Host> {
+    if !super::restart::restarting(LXS_VFS) {
+        return None;
+    }
+    NOTIFY_WAITS.fetch_add(1, Ordering::Relaxed);
+    super::restart::wait_online(LXS_VFS, &|| vfs_host().is_some()).ok().and_then(|()| vfs_host())
+}
+// wave9 G6b-1 end
+
 /// [`LX_FH_MNTGET`](crate::ipc::protocol::LX_FH_MNTGET): namespace `ns`'s whole table to
 /// `buf` if it fits in `cap` bytes; its length.
 fn mntget(ns: u64, buf: u64, cap: u64) -> i64 {
@@ -746,6 +804,8 @@ pub fn install_in(t: &mut FdTable, d: &LxFhDesc) -> Result<usize, i64> {
         let mut f = file.lock();
         f.mnt = d.mnt as usize;
         f.is_dir = d.is_dir != 0;
+        // wave9 G6b-1: a fanotify event's descriptor makes no events
+        f.nonotify = d.flags & crate::ipc::protocol::LX_FH_NONOTIFY != 0;
     }
     let fd = t.alloc_fd(FileDescriptor::Vnode(file)).map_err(|_| EMFILE)?;
     t.set_cloexec(fd, d.flags & O_CLOEXEC != 0);
@@ -961,7 +1021,7 @@ pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
 /// `[prof] vfs:` line of `linux prof show`.
 pub fn summary() -> String {
     alloc::format!(
-        "vfs: served {} to kernel {} kept {} (landlock {} fanotify {} foreign {} mounts {} abac {} inotify {}) notes {} mount-waits {}/{}",
+        "vfs: served {} to kernel {} kept {} (landlock {} fanotify {} foreign {} mounts {} abac {} inotify {}) notes {} mount-waits {}/{} notify: posted {} dropped {} perm {}/{} waits {}",
         SERVED.load(Ordering::Relaxed),
         TO_KERNEL_CALLS.load(Ordering::Relaxed),
         KEPT.load(Ordering::Relaxed),
@@ -973,7 +1033,13 @@ pub fn summary() -> String {
         KEPT_BY[5].load(Ordering::Relaxed),
         NOTES.load(Ordering::Relaxed),
         MOUNT_WAITS.load(Ordering::Relaxed), // wave8 GF
-        MOUNT_WAIT_FAILED.load(Ordering::Relaxed)
+        MOUNT_WAIT_FAILED.load(Ordering::Relaxed),
+        // wave9 G6b-1: events handed to vfs-server, permission questions (asked/denied)
+        super::notifyfwd::POSTED.load(Ordering::Relaxed),
+        super::notifyfwd::DROPPED.load(Ordering::Relaxed),
+        super::notifyfwd::PERM_ASKED.load(Ordering::Relaxed),
+        super::notifyfwd::PERM_DENIED.load(Ordering::Relaxed),
+        NOTIFY_WAITS.load(Ordering::Relaxed)
     )
 }
 

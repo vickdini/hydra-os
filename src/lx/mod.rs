@@ -86,6 +86,9 @@ pub mod desktop;
 pub mod hotplug;
 pub mod uevent;
 // wave8 GH end
+// wave9 G6b-1 begin: file events for vfs-server's inotify/fanotify
+pub mod notifyfwd;
+// wave9 G6b-1 end
 
 // wave6 G21 begin: restart support for every service (design section 5)
 pub mod restart;
@@ -683,6 +686,9 @@ fn plain_svc(nr: u64, args: &[u64; 6]) -> SvcId {
     match nr {
         41 | 53 => family_svc(args[0]),
         crate::ipc::protocol::LX_KCALL_REOPEN | crate::ipc::protocol::LX_KCALL_PIDFD | crate::ipc::protocol::LX_KCALL_FCNTL | crate::ipc::protocol::LX_KCALL_FIFO => LXS_IPC,
+        // wave9 G6b-1 begin: a fanotify permission question (`notifyfwd::on_open`)
+        crate::ipc::protocol::LX_KCALL_FANPERM => crate::ipc::protocol::LXS_VFS,
+        // wave9 G6b-1 end
         _ => entry_svc(entry(nr)),
     }
 }
