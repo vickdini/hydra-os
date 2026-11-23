@@ -417,7 +417,8 @@ pub fn init() {
 /// Routes the moved calls to their services (`true`; a service switched back with
 /// `lx.<name>=kernel` stays in the kernel) or all to the in-kernel code.
 pub fn set_forwarding(on: bool) {
-    let ent = |bits: u32, s: SvcId| if on && svc::mode(s) == svc::SvcMode::Forward { T_SERVER | bits | (s as u32) << T_SVC_SHIFT } else { 0 };
+    // (wave9 G9-C: the file service's entries also with `lx=kernel`)
+    let ent = |bits: u32, s: SvcId| if (on || s == crate::ipc::protocol::LXS_VFS) && svc::mode(s) == svc::SvcMode::Forward { T_SERVER | bits | (s as u32) << T_SVC_SHIFT } else { 0 };
     for &(nr, bits, s) in MOVED.iter().chain(MOVED_STEP2).chain(MOVED_STEP4) {
         TABLE[nr as usize].store(ent(bits, s), Ordering::Release);
     }
@@ -451,7 +452,8 @@ pub fn set_forwarding(on: bool) {
         TABLE[nr as usize].store(if on { T_SERVER | T_BYFD } else { 0 }, Ordering::Release);
     }
     // wave7 G7-2: the file service's calls (those vfs-server claimed)
-    fileh::apply(on);
+    // (wave9 G9-C: always, also with `lx=kernel`)
+    fileh::apply();
 }
 
 /// The entry of system call `nr` (0: the kernel answers it). One load.

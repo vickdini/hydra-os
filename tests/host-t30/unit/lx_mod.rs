@@ -558,14 +558,14 @@ fn the_vfs_walk_call_routes_to_vfs_server_with_its_context() {
     });
     vfs_ctx(&mut c);
     assert_eq!((c.root, c.cwd), (u64::MAX, 0));
-    // lx.vfs=kernel: back to the kernel (which does not know the number: ENOSYS)
+    // wave9 G9-C: `lx.vfs=kernel` is ignored and `lx=kernel` leaves the file service forwarded
     svc::init(b"lx.vfs=kernel");
     set_forwarding(true);
-    assert_eq!(entry(LX_VFS_WALK_NR), 0);
+    assert_eq!(entry_svc(entry(LX_VFS_WALK_NR)), LXS_VFS);
     svc::tests::reset();
     svc::init(b"");
     set_forwarding(false);
-    assert_eq!(entry(LX_VFS_WALK_NR), 0);
+    assert_eq!(entry_svc(entry(LX_VFS_WALK_NR)), LXS_VFS);
     set_forwarding(true);
     assert_eq!(entry_svc(entry(LX_VFS_WALK_NR)), LXS_VFS);
 }

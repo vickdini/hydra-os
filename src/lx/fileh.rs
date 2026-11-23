@@ -35,7 +35,7 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 use super::svc::{self, Host};
@@ -127,17 +127,17 @@ pub fn shape(nr: u64) -> Option<Shape> {
 
 /// The numbers vfs-server claimed (bit `nr`), below the table's 512.
 static CLAIMED: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
-/// Whether moved calls are routed at all (`lx=kernel` turns it off): set by `set_forwarding`.
-static ROUTING: AtomicBool = AtomicBool::new(false);
 
 /// Whether vfs-server claimed call `nr`.
 pub fn claimed(nr: u64) -> bool {
     nr < 512 && CLAIMED[nr as usize / 64].load(Ordering::Acquire) & (1 << (nr % 64)) != 0
 }
 
-/// The routing entry of file-service call `nr` (0: the kernel answers it).
-pub fn entry_for(nr: u64, routing: bool, forward_mode: bool) -> u32 {
-    if routing && forward_mode && shape(nr).is_some() && claimed(nr) {
+/// The routing entry of file-service call `nr` (0: the kernel answers it). wave9 G9-C: the
+/// file service is always forwarded (`lx.vfs=kernel` is gone; `lx=kernel` moves the other
+/// services back, not this one: the kernel no longer has every file call's code).
+pub fn entry_for(nr: u64) -> u32 {
+    if shape(nr).is_some() && claimed(nr) {
         T_SERVER | T_VFS | T_FSCTX | T_UMASK | (LXS_VFS as u32) << T_SVC_SHIFT
     } else {
         0
@@ -148,17 +148,15 @@ pub fn entry_for(nr: u64, routing: bool, forward_mode: bool) -> u32 {
 static APPLY: Mutex<()> = Mutex::new(());
 
 /// Writes the routing entries of every file-service number (`set_forwarding` and a claim).
-pub fn apply(on: bool) {
+pub fn apply() {
     let _g = APPLY.lock();
-    apply_locked(on);
+    apply_locked();
 }
 
-fn apply_locked(on: bool) {
-    ROUTING.store(on, Ordering::Release);
-    let fwd = svc::mode(LXS_VFS) == svc::SvcMode::Forward;
+fn apply_locked() {
     for nr in 0..512u64 {
         if shape(nr).is_some() {
-            super::TABLE[nr as usize].store(entry_for(nr, on, fwd), Ordering::Release);
+            super::TABLE[nr as usize].store(entry_for(nr), Ordering::Release);
         }
     }
 }
@@ -175,7 +173,7 @@ fn claim(nr: u64, on: bool) -> i64 {
     } else {
         CLAIMED[nr as usize / 64].fetch_and(!bit, Ordering::AcqRel);
     }
-    apply_locked(ROUTING.load(Ordering::Acquire));
+    apply_locked();
     0
 }
 
@@ -278,26 +276,17 @@ pub(super) fn fs_flags_global(c: &mut LxCall) -> u32 {
     if (l::abac::active() || l::abac::apps_active()) && l::abac::applies_to_current() {
         f |= LX_FS_ABAC;
     }
-    // wave7 G7-7 begin: the service walks with its copy of the caller's mount table (taken
-    // by generation, `LX_FH_MNTTAB`); only a table it cannot walk keeps the call here
-    if VFS_MNT.load(Ordering::Relaxed) {
-        match l::mount::vfs_gen(c.mnt_ns as u64) {
-            Some(g) => c.mnt_gen = g,
-            None => f |= LX_FS_MOUNTS,
-        }
-        return f;
-    }
-    // wave7 G7-7 end
-    if c.mnt_ns != 0 || l::fuse::ns0_any() {
-        f |= LX_FS_MOUNTS;
+    // wave7 G7-7: the service walks with its copy of the caller's mount table (taken by
+    // generation, `LX_FH_MNTTAB`); only a table it cannot walk keeps the call here
+    // (wave9 G9-C: `lx.vfsmnt=kernel` is gone)
+    match l::mount::vfs_gen(c.mnt_ns as u64) {
+        Some(g) => c.mnt_gen = g,
+        None => f |= LX_FS_MOUNTS,
     }
     f
 }
 
 // wave7 G7-7 begin
-/// Whether the file service gets the calls of callers with mounts (a copy of their mount
-/// table); `lx.vfsmnt=kernel` at boot: no, the kernel answers them (the behaviour before).
-pub static VFS_MNT: AtomicBool = AtomicBool::new(true);
 
 /// [`LX_FH_MNTTAB`](crate::ipc::protocol::LX_FH_MNTTAB): namespace `ns`'s table to `buf` (a
 /// head and at most `cap` records); the number of slots.
@@ -411,10 +400,8 @@ pub fn kernel_mask(nr: u64) -> u32 {
         & policy_mask(nr) // wave9 G6b-3
 }
 
-// wave9 G6b-3 begin: Landlock and ABAC checked by vfs-server
-/// `lx.policy=kernel`: the kernel keeps every call of a landlocked caller or one under an
-/// access policy (before wave 9; for comparisons).
-pub static POLICY_KERNEL: AtomicBool = AtomicBool::new(false);
+// wave9 G6b-3 begin: Landlock and ABAC checked by vfs-server (wave9 G9-C: `lx.policy=kernel`
+// is gone)
 
 /// The bits [`kernel_mask`] keeps for call `nr`: vfs-server checks Landlock and ABAC for
 /// the calls it serves (open, access, the attribute changes, mkdir, symlink, unlink, rmdir,
@@ -422,7 +409,7 @@ pub static POLICY_KERNEL: AtomicBool = AtomicBool::new(false);
 /// utime(s)) stay with the kernel.
 pub fn policy_mask(nr: u64) -> u32 {
     let served = matches!(nr, 2 | 257 | 21 | 269 | 439 | 90 | 268 | 91 | 92 | 94 | 260 | 93 | 76 | 77 | 280 | 83 | 258 | 88 | 266 | 87 | 84 | 263 | 82 | 264 | 316 | 155 | 165 | 166);
-    if served && !POLICY_KERNEL.load(Ordering::Relaxed) {
+    if served {
         !(LX_FS_LANDLOCK | LX_FS_ABAC)
     } else {
         u32::MAX
@@ -494,6 +481,7 @@ fn kernel_only(c: &LxCall) -> bool {
         }
     }
     KEPT.fetch_add(1, Ordering::Relaxed);
+    count_kernel(c.nr, false);
     true
 }
 
@@ -512,6 +500,32 @@ pub static SERVED: AtomicU64 = AtomicU64::new(0);
 pub static TO_KERNEL_CALLS: AtomicU64 = AtomicU64::new(0);
 /// See [`SERVED`].
 pub static KEPT: AtomicU64 = AtomicU64::new(0);
+
+// wave9 G9-C begin: which calls the kernel's file code still answers, by number
+/// Per call number below 512: (sent back by vfs-server, kept without asking) since boot.
+static KERNEL_BY_NR: [[AtomicU32; 2]; 512] = [const { [const { AtomicU32::new(0) }; 2] }; 512];
+
+/// Counts call `nr` answered by the kernel's own file code (`sent`: vfs-server sent it back).
+fn count_kernel(nr: u64, sent: bool) {
+    if let Some(c) = KERNEL_BY_NR.get(nr as usize) {
+        c[if sent { 0 } else { 1 }].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The calls the kernel's file code answered, most first: `nr:sent/kept` (at most `n`).
+pub fn kernel_by_nr(n: usize) -> String {
+    let mut v: Vec<(u32, u32, usize)> = (0..512)
+        .map(|i| (KERNEL_BY_NR[i][0].load(Ordering::Relaxed), KERNEL_BY_NR[i][1].load(Ordering::Relaxed), i))
+        .filter(|&(a, b, _)| a + b != 0)
+        .collect();
+    v.sort_unstable_by(|x, y| (y.0 + y.1).cmp(&(x.0 + x.1)));
+    let mut s = String::from("vfs to kernel by call (nr:sent/kept):");
+    for (a, b, i) in v.into_iter().take(n) {
+        s += &alloc::format!(" {}:{}/{}", i, a, b);
+    }
+    s
+}
+// wave9 G9-C end
 
 /// The host serving the file service now, if it is online.
 fn vfs_host() -> Option<&'static Host> {
@@ -536,9 +550,10 @@ fn set_mark(tid: u64, nr: u64) {
 }
 
 /// What a forwarded call's result means for the dispatcher: `None` the kernel answers it.
-fn outcome(r: i64) -> Option<i64> {
+fn outcome(nr: u64, r: i64) -> Option<i64> {
     if r == LX_TO_KERNEL {
         TO_KERNEL_CALLS.fetch_add(1, Ordering::Relaxed);
+        count_kernel(nr, true);
         None
     } else {
         SERVED.fetch_add(1, Ordering::Relaxed);
@@ -571,6 +586,7 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
     let host = if host.is_none() && is_notify_call(nr) { notify_wait() } else { host };
     if host.is_none() && !is_mount_call(nr) {
         KEPT.fetch_add(1, Ordering::Relaxed);
+        count_kernel(nr, false);
         return None;
     }
     let mut c = LxCall::EMPTY;
@@ -593,6 +609,7 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
             Some(x) => x,
             None => {
                 KEPT.fetch_add(1, Ordering::Relaxed);
+                count_kernel(nr, false);
                 return None;
             }
         },
@@ -603,6 +620,7 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
         Ok(Some(h)) => h,
         _ => {
             KEPT.fetch_add(1, Ordering::Relaxed);
+            count_kernel(nr, false);
             return None;
         }
     };
@@ -610,7 +628,7 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
     c.fs_flags |= f;
     // wave8 GF: a mount call whose generation was not at hand (the lock was busy) takes it
     // waiting, so it is not left to the kernel's copy of the rules by chance
-    if is_mount_call(nr) && c.fs_flags & LX_FS_MOUNTS != 0 && VFS_MNT.load(Ordering::Relaxed) {
+    if is_mount_call(nr) && c.fs_flags & LX_FS_MOUNTS != 0 {
         if let Some(g) = crate::compat::linux::mount::vfs_gen_wait(c.mnt_ns as u64) {
             c.mnt_gen = g;
             c.fs_flags &= !LX_FS_MOUNTS;
@@ -632,7 +650,7 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
         SERVED.fetch_add(1, Ordering::Relaxed);
         return Some(fd.map_or_else(|e| e, |fd| fd as i64));
     }
-    outcome(r)
+    outcome(nr, r)
 }
 
 // wave9 GP2 begin: open's handle made from the answer (`LX_REDIR_FH`)
@@ -770,6 +788,7 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
         // A call on a descriptor that is not a handle: the kernel, without asking again
         Ok(None) => {
             KEPT.fetch_add(1, Ordering::Relaxed);
+            count_kernel(nr, false);
             set_mark(id.tid, nr);
             return None;
         }
@@ -802,7 +821,7 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
         return None;
     }
     // wave9 GP2 end
-    match outcome(r) {
+    match outcome(nr, r) {
         Some(r) => Some(r),
         None => {
             set_mark(id.tid, nr);

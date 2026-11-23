@@ -675,7 +675,6 @@ pub mod compat {
 
         /// *stub* wave9 G6b-2: FUSE inodes of vfs-server's (`lx::fileh` accepts them for a handle).
         pub mod fuse_svc {
-            pub static KERNEL_ONLY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
             pub fn is_remote(ino: u64) -> bool {
                 ino >> 62 == 1 && (ino >> 40) & 0x8000 != 0
             }

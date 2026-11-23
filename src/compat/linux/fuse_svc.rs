@@ -10,12 +10,11 @@
 //! ([`LX_KCALL_FUSE`](crate::ipc::protocol::LX_KCALL_FUSE)), lending the kernel's buffers
 //! for the data ([`crate::lx::call_vfs_fuse`]).
 //!
-//! `lx.fuse=kernel` (or `lx.vfs=kernel`, `lx=kernel`) at boot: the kernel's own client
-//! serves `/dev/fuse` as before.
+//! (wave9 G9-C: always; the kernel's own client and `lx.fuse=kernel` are gone.)
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Mutex;
 
@@ -23,8 +22,6 @@ use super::fuse::{attr_of, dirents, is_fuse, statfs_of, u64_at};
 use crate::fs::zfs::fsproto::{Attr, ReaddirEntry};
 use crate::ipc::protocol::*;
 
-/// `lx.fuse=kernel` at boot: `/dev/fuse` stays the kernel's client.
-pub static KERNEL_ONLY: AtomicBool = AtomicBool::new(false);
 /// Operations forwarded to vfs-server since boot.
 pub static CALLS: AtomicU64 = AtomicU64::new(0);
 
@@ -32,7 +29,7 @@ const EIO: i64 = -5;
 
 /// Whether new `/dev/fuse` opens go to vfs-server.
 pub fn forwarded() -> bool {
-    !KERNEL_ONLY.load(Ordering::Relaxed) && crate::lx::svc::mode(LXS_VFS) == crate::lx::svc::SvcMode::Forward && !crate::lx::all_kernel()
+    true
 }
 
 /// Whether `ino` is a file of one of vfs-server's FUSE connections.

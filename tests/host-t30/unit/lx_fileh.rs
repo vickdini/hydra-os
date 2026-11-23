@@ -14,7 +14,6 @@ pub(crate) fn reset() {
     for c in CLAIMED.iter() {
         c.store(0, Ordering::Release);
     }
-    ROUTING.store(false, Ordering::Release);
     for m in TO_KERNEL.iter() {
         m.0.store(0, Ordering::Release);
         m.1.store(0, Ordering::Release);
@@ -88,18 +87,16 @@ fn a_call_goes_to_the_file_service_only_once_claimed() {
 }
 
 #[test]
-fn claims_are_ignored_when_switched_back() {
+fn claims_route_also_with_lx_kernel() {
+    // wave9 G9-C: the file service has no switch back; `lx=kernel` leaves it forwarded
     let _sim = world();
+    assert_eq!(entry_for(6), 0, "not claimed");
     claim_nr(6);
     set_forwarding(false);
-    assert_eq!(entry(6), 0);
+    assert_ne!(entry(6), 0);
     set_forwarding(true);
     assert_ne!(entry(6), 0);
-    svc::tests::set_mode(LXS_VFS, svc::SvcMode::Kernel);
-    set_forwarding(true);
-    assert_eq!(entry(6), 0);
-    assert_eq!(entry_for(6, true, false), 0);
-    assert_eq!(entry_for(6, false, true), 0);
+    assert_ne!(entry_for(6), 0);
 }
 
 #[test]
@@ -206,21 +203,19 @@ fn foreign_roots_and_busy_files_are_marked() {
 fn the_callers_state_becomes_flags() {
     let _sim = world();
     let mut c = LxCall::EMPTY;
-    // (wave7 G7-7: the behaviour before the mounts step, `lx.vfsmnt=kernel`)
-    VFS_MNT.store(false, Ordering::Relaxed);
     assert_eq!(fs_flags_global(&mut c), 0);
     crate::fake::FS_FLAGS.store(31, Ordering::Release);
-    assert_eq!(fs_flags_global(&mut c), LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_INOTIFY | LX_FS_ABAC | LX_FS_MOUNTS);
+    assert_eq!(fs_flags_global(&mut c), LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_INOTIFY | LX_FS_ABAC);
     // wave9 G6b-3: the domain's id travels with the call; ABAC only for a caller with a subject
     assert_eq!(c.ll_dom, 7);
     crate::fake::FS_FLAGS.store(31 | 32, Ordering::Release);
-    assert_eq!(fs_flags_global(&mut c), LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_INOTIFY | LX_FS_MOUNTS);
+    assert_eq!(fs_flags_global(&mut c), LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_INOTIFY);
     crate::fake::FS_FLAGS.store(0, Ordering::Release);
     assert_eq!(fs_flags_global(&mut c), 0);
     assert_eq!(c.ll_dom, 0);
+    // a table the service cannot have (no generation)
     c.mnt_ns = 4;
     assert_eq!(fs_flags_global(&mut c), LX_FS_MOUNTS);
-    VFS_MNT.store(true, Ordering::Relaxed);
 }
 
 // wave7 G7-7 begin
@@ -676,13 +671,7 @@ fn calls_the_service_would_send_back_stay_in_the_kernel() {
     crate::world::bkl_enter();
     assert_eq!(forward(&frame(4, [p(), o(), 0, 0, 0, 0])), Some(0));
     assert_eq!(n.load(Ordering::Acquire), 2);
-    // ... and everything stays when it cannot have it (`lx.vfsmnt=kernel`)
-    VFS_MNT.store(false, Ordering::Relaxed);
-    assert_eq!(forward(&frame(4, [p(), o(), 0, 0, 0, 0])), None);
-    VFS_MNT.store(true, Ordering::Relaxed);
     assert_eq!(n.load(Ordering::Acquire), 2);
-    assert_eq!(KEPT_BY[3].load(Ordering::Relaxed), 1);
-    assert!(summary().contains("mounts 1"));
     assert_eq!(kernel_mask(332) & LX_FS_INOTIFY, 0);
     // wave9 G6b-3: vfs-server checks Landlock and ABAC for what it serves; the rest stays
     assert_eq!(kernel_mask(257) & (LX_FS_LANDLOCK | LX_FS_ABAC), 0);
@@ -693,10 +682,6 @@ fn calls_the_service_would_send_back_stay_in_the_kernel() {
     assert_eq!(kernel_mask(133) & (LX_FS_LANDLOCK | LX_FS_ABAC), LX_FS_LANDLOCK | LX_FS_ABAC, "mknod is not served");
     assert_ne!(kernel_mask(265) & LX_FS_LANDLOCK, 0, "linkat is not served");
     assert_ne!(kernel_mask(188) & LX_FS_ABAC, 0, "setxattr is not served");
-    POLICY_KERNEL.store(true, Ordering::Relaxed);
-    assert_ne!(kernel_mask(257) & LX_FS_LANDLOCK, 0, "lx.policy=kernel");
-    assert_eq!(kernel_mask(21) & LX_FS_ABAC, LX_FS_ABAC);
-    POLICY_KERNEL.store(false, Ordering::Relaxed);
 }
 
 #[test]
@@ -765,8 +750,9 @@ fn claims_and_the_routing_switch_do_not_race() {
     claim_nr(4);
     set_forwarding(false);
     claim_nr(6);
-    assert_eq!(entry(4), 0);
-    assert_eq!(entry(6), 0);
+    // (wave9 G9-C: `lx=kernel` leaves the file service forwarded)
+    assert_ne!(entry(4), 0);
+    assert_ne!(entry(6), 0);
     set_forwarding(true);
     assert_ne!(entry(4), 0);
     assert_ne!(entry(6), 0);
@@ -786,7 +772,7 @@ fn notify_calls_shapes_and_no_kernel_bits() {
     assert!(!takes_notify_obj(253) && !takes_notify_obj(294) && !takes_notify_obj(300));
     assert!(!is_notify_call(257) && kernel_mask(257) != 0);
     // claimed like any file-service call: the routing entry names vfs-server
-    assert_eq!(entry_for(254, true, true) & T_VFS, if claimed(254) { T_VFS } else { 0 });
+    assert_eq!(entry_for(254) & T_VFS, if claimed(254) { T_VFS } else { 0 });
 }
 
 #[test]
