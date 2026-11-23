@@ -149,7 +149,7 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
             let (n, at) = target(cx, &who, a[0], true, false)?;
             // wave9 G6b-3: Landlock's TRUNCATE first, as the kernel
             if let Some(d) = policy::domain(c)? {
-                if policy::refused_on(&d, n, at.is_dir(), ll::TRUNCATE)? != 0 {
+                if policy::refused_on(&d, c.id, n, at.is_dir(), ll::TRUNCATE)? != 0 {
                     return Err(EACCES);
                 }
             }
@@ -401,7 +401,9 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
             return Err(ENOTDIR);
         }
         let acl = ctxt::acl_of(d.dir, &d.dir_attr)?;
-        if !ctxt::may_access(&who, &d.dir_attr, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE | rules::MAY_EXEC) {
+        // (wave9 G6b-3: and the access policies, as the kernel's `may_access` — review)
+        let named = if d.dir == src.dir { &op } else { &np };
+        if !ctxt::allowed(&who, &d.dir_attr, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE | rules::MAY_EXEC, named)? {
             return Err(EACCES);
         }
     }
@@ -450,7 +452,11 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
     if let Some(s) = src.child {
         cache::CACHE.forget_object(s.ino);
     }
-    policy::names_changed(src.child.map_or(0, |s| s.ino)); // wave9 G6b-3: (a directory may have moved)
+    // wave9 G6b-3: (a directory may have moved, or been replaced)
+    policy::names_changed(src.child.map_or(0, |s| s.ino));
+    if let Some(d) = dst.child {
+        policy::names_changed(d.ino);
+    }
     names_changed(&[src.dir, dst.dir], replaced);
     r.map(|_| 0)
 }

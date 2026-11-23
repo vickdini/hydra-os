@@ -7,3 +7,6 @@ extern crate alloc;
 
 #[path = "../../../userland/drivers/vfs-server/src/policy/ll.rs"]
 pub mod ll;
+
+#[path = "../../../userland/drivers/vfs-server/src/policy/steps.rs"]
+pub mod steps;

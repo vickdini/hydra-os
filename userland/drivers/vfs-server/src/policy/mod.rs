@@ -14,6 +14,7 @@
 //! Anything a copy cannot answer (too big, a parent not known) is the kernel's ([`KERNEL`]).
 
 pub mod ll;
+pub mod steps;
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -89,13 +90,24 @@ pub fn forget_all() {
     DOMAINS.lock().clear();
     HINTS.lock().clear();
     PARENTS.lock().clear();
+    CALL_LAST.lock().clear();
 }
 
-/// A landlocked caller's walk found `child` by `name` in `dir`.
-pub fn hint(dir: Node, name: &[u8], child: Node) {
+/// The last object each call's walk found, and the directory it found it in (a file's
+/// parent comes from the call's own walk: with hard links, another call's hint could name an
+/// allowed directory for a denied path — review of 6b-3).
+/// (Most calls remembered: 1024; all go when full, and a call that lost its entry is the
+/// kernel's.)
+static CALL_LAST: YLock<steps::LastSteps> = YLock::new(steps::LastSteps::new(1024));
+/// Moves on with every [`names_changed`]: a `..` answer taken across one is not kept.
+static PARENTS_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// A landlocked caller's walk (call `req`) found `child` by `name` in `dir`.
+pub fn hint(req: u64, dir: Node, name: &[u8], child: Node) {
     if name == b"." || name == b".." || dir.ino == child.ino {
         return;
     }
+    CALL_LAST.lock().record(req, child.ino, dir.ino);
     let mut g = HINTS.lock();
     if g.len() >= MAX_HINTS {
         g.clear();
@@ -103,11 +115,17 @@ pub fn hint(dir: Node, name: &[u8], child: Node) {
     g.insert(child.ino, (dir, name.to_vec(), child));
 }
 
-/// The directory above `ino` in the pool: a hint the name cache still confirms, else
-/// zfs-server's `..` (directories only).
-fn parent_of(ino: u64, is_dir: bool) -> Option<u64> {
+/// The directory call `req`'s walk found file `ino` in (its last step), if that is what it
+/// found last.
+fn call_parent(req: u64, ino: u64) -> Option<u64> {
+    CALL_LAST.lock().take(req, ino)
+}
+
+/// The directory above directory `ino` in the pool (a directory has one parent): a hint
+/// the name cache still confirms, else zfs-server's `..`.
+fn parent_of(ino: u64) -> Option<u64> {
     // (the pool root is its own parent: no question to zfs-server)
-    if is_dir && crate::zfs::root().ok() == Some(ino) {
+    if crate::zfs::root().ok() == Some(ino) {
         return Some(ino);
     }
     let h = HINTS.lock().get(&ino).cloned();
@@ -116,14 +134,16 @@ fn parent_of(ino: u64, is_dir: bool) -> Option<u64> {
             return Some(d.ino);
         }
     }
-    if !is_dir {
-        return None;
-    }
     if let Some(&p) = PARENTS.lock().get(&ino) {
         return Some(p);
     }
+    let epoch = PARENTS_EPOCH.load(Ordering::Acquire);
     let p = crate::zfs::lookup(ino, b"..").ok()?;
     let mut g = PARENTS.lock();
+    // (a change meanwhile: the answer may be stale, not kept)
+    if PARENTS_EPOCH.load(Ordering::Acquire) != epoch {
+        return Some(p);
+    }
     if g.len() >= MAX_PARENTS {
         g.clear();
     }
@@ -135,6 +155,7 @@ fn parent_of(ino: u64, is_dir: bool) -> Option<u64> {
 /// may have): the parent zfs-server named for it may be stale.
 pub fn names_changed(ino: u64) {
     let mut g = PARENTS.lock();
+    PARENTS_EPOCH.fetch_add(1, Ordering::AcqRel);
     if g.is_empty() {
         return;
     }
@@ -150,7 +171,7 @@ pub fn dir_chain(dir: u64) -> Vec<u64> {
     let mut v = vec![dir];
     let mut cur = dir;
     for _ in 0..MAX_DEPTH {
-        match parent_of(cur, true) {
+        match parent_of(cur) {
             Some(p) if p != cur => {
                 v.push(p);
                 cur = p;
@@ -169,23 +190,25 @@ fn pool_only(ino: u64) -> Result<(), i64> {
     Ok(())
 }
 
-/// The chain of object `n` (a directory's own chain; a file, its directory's after it):
-/// [`KERNEL`] when the file's directory is not known.
-fn chain_of(n: Node, is_dir: bool) -> Result<Vec<u64>, i64> {
+/// The chain of object `n` that call `req` walked to (a directory's own chain; a file, the
+/// chain of the directory the call's own walk found it in): [`KERNEL`] when not known (a
+/// file reached otherwise, e.g. a file bind-mounted over a name).
+fn chain_of(req: u64, n: Node, is_dir: bool) -> Result<Vec<u64>, i64> {
     pool_only(n.ino)?;
     if is_dir {
+        CALL_LAST.lock().forget(req);
         return Ok(dir_chain(n.ino));
     }
-    let p = parent_of(n.ino, false).ok_or(KERNEL)?;
+    let p = call_parent(req, n.ino).ok_or(KERNEL)?;
     let mut v = vec![n.ino];
     v.extend(dir_chain(p));
     Ok(v)
 }
 
-/// Which of `want` the domain refuses on object `n`.
-pub fn refused_on(d: &Domain, n: Node, is_dir: bool, want: u64) -> Result<u64, i64> {
+/// Which of `want` the domain refuses on object `n`, which call `req` walked to.
+pub fn refused_on(d: &Domain, req: u64, n: Node, is_dir: bool, want: u64) -> Result<u64, i64> {
     LL_CHECKS.fetch_add(1, Ordering::Relaxed);
-    Ok(ll::refused(d, &chain_of(n, is_dir)?, want))
+    Ok(ll::refused(d, &chain_of(req, n, is_dir)?, want))
 }
 
 /// Checks making or removing an entry (`want`) in directory `dir`: `EACCES` when refused.

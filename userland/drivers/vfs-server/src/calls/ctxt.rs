@@ -40,6 +40,8 @@ pub struct Walker {
     // wave9 G6b-2 end
     /// wave9 G6b-3: the caller is landlocked (its walks leave parent hints).
     pub ll: bool,
+    /// wave9 G6b-3: the call (its walk's last step is remembered for it).
+    pub req: u64,
 }
 
 impl Walker {
@@ -85,10 +87,14 @@ impl Backend for Walker {
     // wave9 G6b-3 begin
     fn found(&self, dir: Node, name: &[u8], child: Node) {
         if self.ll {
-            crate::policy::hint(dir, name, child);
+            crate::policy::hint(self.req, dir, name, child);
         }
     }
     fn may_search_policy(&self, cx: &Ctx, dir: &Attr) -> Result<bool, i64> {
+        // (root is not restricted: the kernel's `may_search` returns before for euid 0)
+        if cx.uid == 0 {
+            return Ok(true);
+        }
         crate::policy::abac(cx, dir, perm::MAY_EXEC, false, b"")
     }
     // wave9 G6b-3 end
@@ -97,7 +103,7 @@ impl Backend for Walker {
 /// The walker of call `c`: the copy of its caller's mount table at least as new as the
 /// call (`LxCall::mnt_gen`).
 pub fn walker(c: &LxCall) -> Result<Walker, i64> {
-    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)?, fuse: crate::fuse::rerunnable(c.nr) && !(c.ll_dom != 0 && matches!(c.nr, 2 | 257)), euid: c.euid, ll: c.ll_dom != 0 })
+    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)?, fuse: crate::fuse::rerunnable(c.nr) && !(c.ll_dom != 0 && matches!(c.nr, 2 | 257)), euid: c.euid, ll: c.ll_dom != 0, req: c.id })
 }
 
 /// The caller's root in table `v`: inode `c.root` (0: the pool's root, or in another

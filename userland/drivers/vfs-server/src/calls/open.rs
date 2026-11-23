@@ -81,7 +81,7 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
         }
         // wave9 G6b-3: Landlock
         if let Some(d) = &dom {
-            if policy::refused_on(d, n, false, ll::open_rights(flags, false))? != 0 {
+            if policy::refused_on(d, c.id, n, false, ll::open_rights(flags, false))? != 0 {
                 return Err(EACCES);
             }
         }
@@ -110,7 +110,7 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
         let is_dir = attr.is_dir();
         let want = ll::open_rights(flags, is_dir);
         let extra = if is_dir { 0 } else { ll::TRUNCATE };
-        let refused = policy::refused_on(d, n, is_dir, want | extra)?;
+        let refused = policy::refused_on(d, c.id, n, is_dir, want | extra)?;
         if refused & want != 0 {
             return Err(EACCES);
         }
