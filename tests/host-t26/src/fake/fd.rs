@@ -39,10 +39,8 @@ impl OpenFile {
         Arc::new(Mutex::new(Self { ino, offset: 0, flags, path, mnt: 0, foreign: None, no_truncate: false, nonotify: false, fan_dir: 0, is_dir: false }))
     }
 
-    pub fn fan(&self, mask: u64) {
-        if lx::fanotify::active() && !self.nonotify && self.flags & O_PATH == 0 {
-            lx::fanotify::file_event(self.ino, self.fan_dir, &self.path, mask, self.is_dir);
-        }
+    pub fn fan(&self, _mask: u64) {
+        // (wave9 G9-C: the kernel's own fanotify groups are gone; vfs-server wants none here)
     }
 
     pub fn readable(&self) -> bool {
@@ -80,7 +78,6 @@ pub enum FileDescriptor {
     SignalFd(Arc<lx::signalfd::SignalFd>),
     Unix(Arc<lx::unix::UnixSocket>),
     TimerFd(Arc<lx::timerfd::TimerFd>),
-    Inotify(Arc<lx::inotify::Inotify>),
     PidFd(Arc<lx::pidfd::PidFd>),
     Device(Arc<dyn lx::chardev::CharDevice>),
     File { path: String, cursor: crate::fs::FileCursor, readable: bool, writable: bool, append: bool, shown: Option<String> },

@@ -118,9 +118,6 @@ pub mod chardev {
         fn as_fuse(&self) -> Option<Arc<crate::compat::linux::fuse::Conn>> {
             None
         }
-        fn as_fanotify(&self) -> Option<Arc<crate::compat::linux::fanotify::Group>> {
-            None
-        }
         fn as_mount_obj(&self) -> Option<&crate::compat::linux::mount::MountObj> {
             None
         }

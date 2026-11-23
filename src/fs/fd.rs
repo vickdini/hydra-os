@@ -102,11 +102,9 @@ impl OpenFile {
     pub fn fan(&self, mask: u64) {
         // (wave9 G6b-1: and to vfs-server's fanotify groups)
         let fwd = crate::lx::notifyfwd::want_fan();
-        if (fwd || crate::compat::linux::fanotify::active()) && !self.nonotify && self.flags & O_PATH == 0 {
-            crate::compat::linux::fanotify::file_event(self.ino, self.fan_dir, &self.path, mask, self.is_dir);
-            if fwd {
-                crate::lx::notifyfwd::file_event(self.ino, self.fan_dir, &self.path, mask, self.is_dir);
-            }
+        // (wave9 G9-C: the kernel's own groups are gone)
+        if fwd && !self.nonotify && self.flags & O_PATH == 0 {
+            crate::lx::notifyfwd::file_event(self.ino, self.fan_dir, &self.path, mask, self.is_dir);
         }
     }
 
@@ -184,8 +182,6 @@ pub enum FileDescriptor {
     Unix(Arc<crate::compat::linux::unix::UnixSocket>),
     /// POSIX interval timer exposed as a readable file descriptor (`timerfd_create`).
     TimerFd(Arc<crate::compat::linux::timerfd::TimerFd>),
-    /// Filesystem event watch descriptor (`inotify_init1`).
-    Inotify(Arc<crate::compat::linux::inotify::Inotify>),
     /// Process reference file descriptor (`pidfd_open` / `CLONE_PIDFD`).
     PidFd(Arc<crate::compat::linux::pidfd::PidFd>),
     /// Character device driven by a kernel driver (DRM, evdev) or a netlink socket.
@@ -336,7 +332,6 @@ impl FileDescriptor {
             FileDescriptor::SignalFd(a) => of(a),
             FileDescriptor::Unix(a) => of(a),
             FileDescriptor::TimerFd(a) => of(a),
-            FileDescriptor::Inotify(a) => of(a),
             FileDescriptor::PidFd(a) => of(a),
             FileDescriptor::Device(a) => of(a),
             // Held by value: the description is its shared cursor (wave7 G7-7)
@@ -421,7 +416,7 @@ impl FileDescriptor {
             FileDescriptor::Pty(_) => Err("Pseudo-terminals are read through the Linux terminal layer"),
             FileDescriptor::SignalFd(_) => Err("signalfd is read through the Linux layer"),
             FileDescriptor::Unix(_) => Err("Unix sockets are read through the Linux socket layer"),
-            FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_) => Err("read through the Linux layer"),
+            FileDescriptor::TimerFd(_) => Err("read through the Linux layer"),
             FileDescriptor::PidFd(_) => Err("pidfds are not readable"),
             FileDescriptor::Device(_) => Err("devices are read through the Linux layer"),
             FileDescriptor::Vnode(file) => {
@@ -606,7 +601,7 @@ impl FileDescriptor {
             FileDescriptor::SignalFd(_) => Err("signalfd is not writable"),
             // Kernel output to a process whose stdout is a socket: best effort, never waits
             FileDescriptor::Unix(_) => Ok(data.len()),
-            FileDescriptor::TimerFd(_) | FileDescriptor::Inotify(_) | FileDescriptor::PidFd(_) => Err("not writable"),
+            FileDescriptor::TimerFd(_) | FileDescriptor::PidFd(_) => Err("not writable"),
             FileDescriptor::Device(_) => Err("devices are written through the Linux layer"),
             FileDescriptor::Vnode(file) => {
                 let mut f = file.lock();
@@ -670,7 +665,6 @@ impl FileDescriptor {
                 waits.add(QueueRef::Shared(t.wq.clone()));
                 waits.add_deadline(t.clone());
             }
-            FileDescriptor::Inotify(i) => waits.add(QueueRef::Shared(i.wq.clone())),
             FileDescriptor::PidFd(_) => waits.add(QueueRef::Static(&crate::compat::linux::pidfd::EXIT_WQ)),
             FileDescriptor::Device(d) => d.add_wait_queues(waits),
             FileDescriptor::EventFd(e) => waits.add(QueueRef::Shared(e.lock().wq.clone())),
@@ -733,7 +727,6 @@ impl FileDescriptor {
             FileDescriptor::SignalFd(s) => s.poll_events(),
             FileDescriptor::Unix(s) => s.poll_events(),
             FileDescriptor::TimerFd(t) => t.poll_events(),
-            FileDescriptor::Inotify(i) => i.poll_events(),
             FileDescriptor::PidFd(p) => p.poll_events(),
             FileDescriptor::Device(d) => d.poll_events(),
             // Regular and anonymous files are always ready
@@ -1041,7 +1034,6 @@ impl FdTable {
             FileDescriptor::SignalFd(_) => "signalfd",
             FileDescriptor::Unix(_) => "unix",
             FileDescriptor::TimerFd(_) => "timerfd",
-            FileDescriptor::Inotify(_) => "inotify",
             FileDescriptor::PidFd(_) => "pidfd",
             FileDescriptor::Device(_) => "device",
             FileDescriptor::File { .. } => "file",

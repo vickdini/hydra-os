@@ -224,14 +224,8 @@ fn fd_links_of_every_kind() {
     assert_eq!(rl(install(FileDescriptor::Pty(lx::pty::PtyFile::named("/dev/pts/4", false)))), "/dev/pts/4");
     let d: Arc<dyn lx::chardev::CharDevice> = Arc::new(lx::chardev::TestDev::new("/dev/dri/card0", 0));
     assert_eq!(rl(install(FileDescriptor::Device(d))), "/dev/dri/card0");
-    let ino = sys_inotify();
-    assert_eq!(rl(ino), "anon_inode:inotify");
     // Another process's descriptors are not shown as links here
     assert!(sys(89, &[cstr("/proc/1/fd/0"), b, 128]) < 0);
-}
-
-fn sys_inotify() -> i64 {
-    lx::inotify::sys_init1(0)
 }
 
 #[test]

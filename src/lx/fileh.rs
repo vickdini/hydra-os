@@ -265,12 +265,8 @@ pub(super) fn fs_flags_global(c: &mut LxCall) -> u32 {
         f |= LX_FS_LANDLOCK;
     }
     // wave9 G6b-3 end
-    if l::fanotify::active() {
-        f |= LX_FS_FANOTIFY;
-    }
-    if l::inotify::active() {
-        f |= LX_FS_INOTIFY;
-    }
+    // (wave9 G9-C: `LX_FS_FANOTIFY`/`LX_FS_INOTIFY` are never set: the kernel has no
+    // instances of its own since its copy of the notify code is gone)
     // wave9 G6b-3: only callers the policies apply to (a subject; the service asks the
     // kernel for them, `LX_FH_ABAC`)
     if (l::abac::active() || l::abac::apps_active()) && l::abac::applies_to_current() {

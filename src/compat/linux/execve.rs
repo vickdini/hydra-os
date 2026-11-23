@@ -229,12 +229,8 @@ fn level(ino: u64, abs_path: &str, follow: bool) -> Result<Level, i64> {
     if super::landlock::check_at(abs_path, ino, false, follow, super::landlock::EXECUTE).is_err() {
         return Err(EACCES);
     }
-    // fanotify: FAN_OPEN_EXEC_PERM (a listener may refuse), FAN_OPEN_EXEC
-    if super::fanotify::active() {
-        let dir = super::fanotify::parent_of_path(abs_path);
-        super::fanotify::on_open(ino, dir, abs_path, false, true)?;
-    }
-    // wave9 G6b-1: vfs-server's fanotify groups
+    // wave9 G6b-1: vfs-server's fanotify groups (FAN_OPEN_EXEC_PERM, FAN_OPEN_EXEC; wave9
+    // G9-C: the kernel has no groups of its own)
     if crate::lx::notifyfwd::want_fan() {
         crate::lx::notifyfwd::on_open(ino, crate::lx::notifyfwd::parent_of(abs_path), abs_path, false, true)?;
     }
@@ -366,7 +362,7 @@ fn from_plan(plan: crate::lx::xexec::ExecPlan, argv: &[Vec<u8>], envp: &[Vec<u8>
     // (checks only the kernel's own lookup makes at every `#!` level: Landlock, fanotify, app
     // control; such callers get no plan, but the rules may have come meanwhile)
     // (wave9 G6b-1: also vfs-server's fanotify groups; wave9 G6b-3: and app rules alone)
-    if super::landlock::active() || super::fanotify::active() || super::abac::active() || crate::lx::notifyfwd::want_fan() || super::abac::apps_active() {
+    if super::landlock::active() || super::abac::active() || crate::lx::notifyfwd::want_fan() || super::abac::apps_active() {
         return None;
     }
     let follow = flags & AT_SYMLINK_NOFOLLOW == 0 || !plan.prefix.is_empty();

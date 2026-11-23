@@ -221,11 +221,6 @@ pub trait CharDevice: Send + Sync {
         None
     }
 
-    /// The fanotify group behind this descriptor, if it is one.
-    fn as_fanotify(&self) -> Option<Arc<super::fanotify::Group>> {
-        None
-    }
-
     /// The new mount API's object behind this descriptor, if it is one.
     fn as_mount_obj(&self) -> Option<&super::mount::MountObj> {
         None
