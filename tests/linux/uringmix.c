@@ -349,8 +349,8 @@ static void bench(int mb) {
     int n = 2000;
     t0 = now();
     for (int i = 0; i < n; i++) {
-        prep(get_sqe(), WRITE, pp[1], (uint64_t)blk[0], 4096, 0, 500)->flags = F_LINK;
-        prep(get_sqe(), READ, pp[0], (uint64_t)blk[1], 4096, 0, 501);
+        prep(get_sqe(), WRITE, pp[1], (uint64_t)blk[0], 4096, (uint64_t)-1, 500)->flags = F_LINK;
+        prep(get_sqe(), READ, pp[0], (uint64_t)blk[1], 4096, (uint64_t)-1, 501);
         enter(2, 2);
         take();
         take();
