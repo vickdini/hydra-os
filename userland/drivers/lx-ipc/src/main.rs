@@ -14,8 +14,8 @@
 //! bytes in pipes and Unix sockets live in a kept data arena ([`arena`]), every pipe,
 //! socket, connection, eventfd, timerfd and signalfd has a kept record ([`kstore`]), and
 //! the new instance takes the old one's objects back before it goes online ([`restore`]);
-//! waiting calls are sent again by the kernel. Message queues and System V objects are not
-//! kept yet: their descriptors fail (`EBADF`) and their tables start empty. A second crash
+//! waiting calls are sent again by the kernel. Message queues and System V tables are kept
+//! too (each written whole at each change: they are small and rarely used). A second crash
 //! within 30 s drops to FailObjects (the kept objects are dropped, the old objects fail:
 //! the desktop session ends, `src/lx/desktop.rs`).
 

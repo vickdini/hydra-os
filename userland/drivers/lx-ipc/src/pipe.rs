@@ -77,6 +77,8 @@ struct Pipe {
     id: u64,
     /// wave9 GX3: the bytes, in the (kept) arena.
     buf: Chain,
+    /// Partial answers of waiting calls, published after the record write.
+    pend: kstore::Pend,
     cap: usize,
     /// Open ends (slots).
     rslots: Vec<u32>,
@@ -124,7 +126,7 @@ const SEG_MIN: usize = 4096;
 
 impl Pipe {
     fn new(id: u64, ino: u64, fifo: bool) -> Self {
-        Pipe { id, buf: Chain::new(), cap: DEFAULT_CAP, rslots: Vec::new(), wslots: Vec::new(), rwait: VecDeque::new(), wwait: VecDeque::new(), ino, fifo }
+        Pipe { id, buf: Chain::new(), pend: Vec::new(), cap: DEFAULT_CAP, rslots: Vec::new(), wslots: Vec::new(), rwait: VecDeque::new(), wwait: VecDeque::new(), ino, fifo }
     }
 
     /// Bytes waiting.
@@ -176,9 +178,14 @@ impl Pipe {
         if kstore::kept(self.id) {
             let mut w = kstore::W::new(kstore::K_PIPE);
             w.u32(self.cap as u32).u64(self.ino).u8(self.fifo as u8).raw(&self.buf.image());
-            kstore::put(self.id, &w.0);
+            if !kstore::put_logged(self.id, &w.0) {
+                // (the old record still names the space freed: it stays taken)
+                kstore::flush(&mut self.pend);
+                return;
+            }
         }
         self.buf.release(arena::get());
+        kstore::flush(&mut self.pend);
     }
 
     /// The pipe is gone: its bytes and record.
@@ -217,7 +224,7 @@ impl Pipe {
                 Ok(()) => {
                     self.buf.consume(n);
                     // wave9 GX3: its answer if lx-ipc dies before it is given
-                    kstore::partial(core::ptr::null_mut(), r.id, n as i64);
+                    self.pend.push((r.id, n as i64));
                     done.push((r.id, n as i64))
                 }
                 // Its memory went bad: the bytes stay for the next reader
@@ -248,7 +255,8 @@ impl Pipe {
                 Ok(()) => {
                     w.done += n;
                     // wave9 GX3: its bytes so far are its answer if lx-ipc dies now
-                    kstore::partial(core::ptr::null_mut(), w.id, w.done as i64);
+                    let (wid, wd) = (w.id, w.done as i64);
+                    self.pend.push((wid, wd));
                     if w.done == w.total {
                         let w = self.wwait.pop_front().unwrap();
                         done.push((w.id, w.total as i64));
@@ -385,8 +393,8 @@ fn read(cx: &Cx, slot: u32) -> (i64, u64) {
                 Ok(()) => {
                     p.buf.consume(n);
                     p.settle(&mut done);
-                    kstore::partial(cx.page(), cx.id, n as i64);
                     p.persist();
+                    kstore::partial(cx.page(), cx.id, n as i64);
                     p.publish(false, true);
                     (n as i64, 0)
                 }
@@ -445,8 +453,8 @@ fn write(cx: &Cx, slot: u32) -> (i64, u64) {
                     }
                     wrote = now;
                     p.settle(&mut done);
-                    kstore::partial(cx.page(), cx.id, wrote as i64);
                     p.persist();
+                    kstore::partial(cx.page(), cx.id, wrote as i64);
                     p.publish(true, false);
                 }
                 Err(e) => return (e, 0),

@@ -4,6 +4,12 @@
 
 #![allow(dead_code)]
 
+/// *stub* the runtime's log line: standard output.
+#[macro_export]
+macro_rules! println {
+    ($($t:tt)*) => { std::println!($($t)*) };
+}
+
 #[path = "../../../userland/drivers/hydra-rt/src/kept.rs"]
 pub mod kept;
 

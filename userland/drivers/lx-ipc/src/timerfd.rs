@@ -44,6 +44,8 @@ pub const TIMER_TAG: u64 = 1 << 56;
 struct Tfd {
     /// wave9 GX3: its id (`kstore` record).
     id: u64,
+    /// Partial answers of waiting calls, published after the record write.
+    pend: kstore::Pend,
     clock: u64,
     /// The next expiry (monotonic ns), and the period (0: one-shot).
     next: Option<u64>,
@@ -125,8 +127,14 @@ impl Tfd {
         if kstore::kept(self.id) {
             let mut w = kstore::W::new(kstore::K_TFD);
             w.u64(self.clock).u64(self.next.map_or(0, |n| n.max(1))).u64(self.interval);
-            kstore::put(self.id, &w.0);
+            kstore::put_logged(self.id, &w.0);
         }
+    }
+
+    /// Writes the record, then the waiting calls' answers.
+    fn commit(&mut self) {
+        self.persist();
+        kstore::flush(&mut self.pend);
     }
 
     /// Expirations by `now`, moving `next` on (a periodic timer) or clearing it.
@@ -193,7 +201,7 @@ pub fn create(cx: &Cx) -> (i64, u64) {
         Err(e) => return (e, 0),
     };
     let id = kstore::id();
-    let t = Tfd { id, clock, next: None, interval: 0, armed: None, readers: Vec::new() };
+    let t = Tfd { id, pend: Vec::new(), clock, next: None, interval: 0, armed: None, readers: Vec::new() };
     t.persist();
     T.lock().insert(slot, t);
     match crate::obj::install_keyed(cx, slot, LX_OBJ_KIND_TIMERFD, flags as u32, 0o600, cx.c.euid, cx.c.egid, b"anon_inode:[timerfd]", 0, kstore::key(id)) {
@@ -252,7 +260,7 @@ pub fn settime(cx: &Cx) -> (i64, u64) {
         if t.next.is_some_and(|n| n <= now) {
             serve_readers(t, now, &mut done);
         }
-        t.persist();
+        t.commit();
         old
     };
     finish(done);
@@ -296,7 +304,7 @@ fn serve_readers(t: &mut Tfd, now: u64, done: &mut Vec<(u64, i64)>) {
     let (c, buf) = t.readers.remove(0);
     let r = match sys::lx_write(c.id, buf, &n.to_ne_bytes()) {
         Ok(()) => {
-            kstore::partial(core::ptr::null_mut(), c.id, 8);
+            t.pend.push((c.id, 8));
             8
         }
         Err(e) => e,
@@ -330,8 +338,8 @@ pub fn io(cx: &Cx) -> (i64, u64) {
             Ok(()) => (8, 0),
             Err(e) => (e, 0),
         };
-        kstore::partial(cx.page(), cx.id, 8);
         t.persist();
+        kstore::partial(cx.page(), cx.id, 8);
         return r;
     }
     if cx.nonblock() || kbuf(cx) {
@@ -359,7 +367,7 @@ pub fn fired(cookie: u64) {
                 serve_readers(t, now, &mut done);
                 if !done.is_empty() {
                     t.arm(slot, now);
-                    t.persist();
+                    t.commit();
                 }
             }
             None => {}
@@ -414,7 +422,7 @@ pub fn restore(slot: u32, id: u64, rec: &[u8]) -> bool {
     if !matches!(clock, 0 | 1 | 7 | 8 | 9) || !crate::obj::reserve(slot, LX_OBJ_KIND_TIMERFD) {
         return false;
     }
-    let mut t = Tfd { id, clock, next: (next != 0).then_some(next), interval, armed: None, readers: Vec::new() };
+    let mut t = Tfd { id, pend: Vec::new(), clock, next: (next != 0).then_some(next), interval, armed: None, readers: Vec::new() };
     t.arm(slot, now());
     T.lock().insert(slot, t);
     true

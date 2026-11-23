@@ -290,6 +290,22 @@ fn records_ids_and_restart() {
     assert_eq!(page[0x1F8 / 8], 9);
     kstore::partial(pp, 9, 3);
     assert_eq!((page[0x1E8 / 8], page[0x1F0 / 8], page[0x1F8 / 8]), (9, 3, 0));
+    // review fixes: a record that does not fit is refused, not written in part
+    let (_, _) = unsafe { kstore::open(p, size) };
+    let id = kstore::id();
+    assert!(!kstore::put_logged(id, &vec![0u8; kstore::REC + 1]));
+    assert!(kstore::put_logged(id, &[kstore::K_EFD, 1]));
+    kstore::release(id);
+    // waiting calls' answers are published only by flush (after the owner's record), in order
+    hydra_rt::sys::CALLS.lock().unwrap().clear();
+    let mut pend: kstore::Pend = vec![(5, 7), (6, 8)];
+    assert!(hydra_rt::sys::CALLS.lock().unwrap().is_empty());
+    kstore::flush(&mut pend);
+    assert!(pend.is_empty());
+    assert_eq!(hydra_rt::sys::CALLS.lock().unwrap().as_slice(), &[(71, 5, 7, 0), (71, 6, 8, 0)]);
+    // a token record of the most tokens fits a record
+    assert!(2 + kstore::TOKENS_MAX * 8 <= kstore::REC);
+    kstore::keep_only(&[]);
 }
 
 #[test]
@@ -308,4 +324,12 @@ fn crc32c_hardware_matches_table() {
             .collect();
         assert_eq!(crc32c(&v), crc32c_table(&v), "len {}", len);
     }
+}
+
+#[test]
+fn largest_unix_socket_record_fits() {
+    // unix.rs persist_sock: 49 bytes of fields, then two names (tag, node, length, at most
+    // 108 bytes: sun_path; read_addr/path_of refuse longer addresses)
+    let name = 1 + 8 + 1 + 108;
+    assert!(49 + 2 * name <= kstore::REC);
 }

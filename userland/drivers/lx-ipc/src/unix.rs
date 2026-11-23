@@ -297,7 +297,8 @@ enum RecvKind {
 /// A call waiting on a socket (its call is pending; `c` is the call as the kernel gave it).
 enum Wait {
     Recv { c: LxCall, iov: Iov, kind: RecvKind, flags: u64 },
-    Send { c: LxCall, iov: Iov, total: usize, done: usize, flags: u64, fds: Vec<u64>, unix_in: Vec<u32>, mmsg: Option<u64> },
+    /// (`tokrec`: the record of its descriptors' tokens, 0 none)
+    Send { c: LxCall, iov: Iov, total: usize, done: usize, flags: u64, fds: Vec<u64>, unix_in: Vec<u32>, mmsg: Option<u64>, tokrec: u64 },
     Accept { c: LxCall, addr: u64, len: u64, flags: u64 },
 }
 
@@ -341,12 +342,17 @@ struct After {
     done: Vec<(u64, i64)>,
     drop: Vec<u64>,
     pipe: Vec<u64>,
+    /// wave9 GX3: token records to clear once the tokens are queued (written) or let go.
+    rel: Vec<u64>,
 }
 
 impl After {
     fn run(self) {
         if !self.drop.is_empty() {
             drop_tokens(&self.drop);
+        }
+        for id in self.rel {
+            kstore::release(id);
         }
         for tgid in self.pipe {
             sigpipe(tgid, 0);
@@ -393,7 +399,7 @@ impl Unix {
         w.u8(s.ty as u8).u8(st).u8(s.passcred as u8 | (s.shut_rd as u8) << 1).u64(s.ino).u64(pair).u8(side).u64(s.listener).u64(s.seq).raw(&cred.bytes());
         addr_rec(&mut w, s.local.as_ref());
         addr_rec(&mut w, peer);
-        kstore::put(sid, &w.0);
+        kstore::put_logged(sid, &w.0);
     }
 
     /// wave9 GX3: writes connection `pid`'s record (its two queues: where their bytes are in
@@ -406,7 +412,10 @@ impl Unix {
             for q in &p.q {
                 w.u8(q.flags()).raw(&q.chain.image());
             }
-            kstore::put(pid, &w.0);
+            if !kstore::put_logged(pid, &w.0) {
+                // (the old record still names the space freed: it stays taken)
+                return;
+            }
         }
         let a = arena::get();
         p.q[0].chain.release(a);
@@ -767,6 +776,7 @@ fn put(u: &mut Unix, sid: u64, data: &[u8], fds: &mut Vec<u64>, unix_in: &mut Ve
 /// waiting senders on its peer put what fits, until nothing moves.
 fn settle(u: &mut Unix, sid: u64, after: &mut After) {
     let Some((pair, side)) = u.pair_of(sid) else { return };
+    let mut pend = kstore::Pend::new();
     let socks = u.pairs[&pair].socks;
     for _ in 0..64 {
         let mut moved = false;
@@ -786,6 +796,12 @@ fn settle(u: &mut Unix, sid: u64, after: &mut After) {
                     let passcred = u.socks[&rsid].passcred;
                     let res = match r {
                         Ok(Some(g)) => {
+                            if !g.fds.is_empty() && !peek {
+                                // wave9 GX3: the removal is written before the descriptors
+                                // are installed (and earlier answers with it)
+                                u.persist_pair(pair);
+                                kstore::flush(&mut pend);
+                            }
                             let cx = Cx::from_call(&c, core::ptr::null_mut());
                             deliver(&cx, &iov, kind, flags, passcred, g, after)
                         }
@@ -794,7 +810,7 @@ fn settle(u: &mut Unix, sid: u64, after: &mut After) {
                     };
                     if res > 0 && !peek {
                         // wave9 GX3: its answer if lx-ipc dies before it is given
-                        kstore::partial(core::ptr::null_mut(), c.id, res);
+                        pend.push((c.id, res));
                     }
                     after.done.push((c.id, res));
                     moved = true;
@@ -808,7 +824,7 @@ fn settle(u: &mut Unix, sid: u64, after: &mut After) {
         let wsid = socks[1 - side];
         loop {
             let Some(pos) = u.socks.get(&wsid).and_then(|s| s.waits.iter().position(|w| matches!(w, Wait::Send { .. }))) else { break };
-            let Some(Wait::Send { c, iov, total, mut done, flags, mut fds, mut unix_in, mmsg }) = u.socks.get_mut(&wsid).unwrap().waits.remove(pos) else { unreachable!() };
+            let Some(Wait::Send { c, iov, total, mut done, flags, mut fds, mut unix_in, mmsg, tokrec }) = u.socks.get_mut(&wsid).unwrap().waits.remove(pos) else { unreachable!() };
             let ty = u.socks[&wsid].ty;
             let want = if ty == SOCK_STREAM { (total - done).min(BUFFER_LIMIT) } else { total };
             let data = match iov.gather_later(c.id, done, want) {
@@ -822,7 +838,7 @@ fn settle(u: &mut Unix, sid: u64, after: &mut After) {
             match put(u, wsid, &data, &mut fds, &mut unix_in, Ucred::of(&c)) {
                 Ok(0) if !(data.is_empty() && total == 0) => {
                     // Still no room: back in its place
-                    u.socks.get_mut(&wsid).unwrap().waits.insert(pos, Wait::Send { c, iov, total, done, flags, fds, unix_in, mmsg });
+                    u.socks.get_mut(&wsid).unwrap().waits.insert(pos, Wait::Send { c, iov, total, done, flags, fds, unix_in, mmsg, tokrec });
                     break;
                 }
                 Ok(n) => {
@@ -830,13 +846,14 @@ fn settle(u: &mut Unix, sid: u64, after: &mut After) {
                     moved = true;
                     if done >= total || ty != SOCK_STREAM {
                         let r = finish_send(&c, done as i64, mmsg);
-                        kstore::partial(core::ptr::null_mut(), c.id, r);
+                        pend.push((c.id, r));
+                        after.rel.push(tokrec);
                         after.done.push((c.id, r));
                     } else {
                         if mmsg.is_none() {
-                            kstore::partial(core::ptr::null_mut(), c.id, done as i64);
+                            pend.push((c.id, done as i64));
                         }
-                        u.socks.get_mut(&wsid).unwrap().waits.insert(pos, Wait::Send { c, iov, total, done, flags, fds, unix_in, mmsg });
+                        u.socks.get_mut(&wsid).unwrap().waits.insert(pos, Wait::Send { c, iov, total, done, flags, fds, unix_in, mmsg, tokrec });
                     }
                 }
                 Err(e) => {
@@ -852,8 +869,9 @@ fn settle(u: &mut Unix, sid: u64, after: &mut After) {
             break;
         }
     }
-    // wave9 GX3: the queues' change is written before anyone is answered
+    // wave9 GX3: the queues' change is written, then the waiting calls' answers
     u.persist_pair(pair);
+    kstore::flush(&mut pend);
     u.publish(socks[0], true);
     u.publish(socks[1], true);
 }
@@ -878,13 +896,17 @@ fn recv(cx: &Cx, sid: u64, iov: Iov, kind: RecvKind, flags: u64) -> (i64, u64) {
             Ok(Some(g)) => {
                 let passcred = u.socks[&sid].passcred;
                 if !g.fds.is_empty() && !peek {
-                    // wave9 GX3: descriptors installed cannot be installed again
+                    // wave9 GX3: descriptors installed cannot be installed again: the
+                    // message's removal is written first (a crash then loses it: EIO)
                     kstore::partial(cx.page(), cx.id, 0);
+                    if let Some((pair, _)) = u.pair_of(sid) {
+                        u.persist_pair(pair);
+                    }
                 }
                 let r = deliver(cx, &iov, kind, flags, passcred, g, &mut after);
                 if !peek {
-                    kstore::partial(cx.page(), cx.id, r);
                     settle(&mut u, sid, &mut after);
+                    kstore::partial(cx.page(), cx.id, r);
                 }
                 (r, 0)
             }
@@ -917,6 +939,8 @@ fn send(cx: &Cx, sid: u64, iov: Iov, control: (u64, u64), flags: u64, mmsg: Opti
         Ok(f) => f,
         Err(e) => return (e, 0),
     };
+    // wave9 GX3: the tokens taken are written down until they are queued or let go
+    let tokrec = token_record(&fds);
     let mut after = After::default();
     let r = 'r: {
         let mut u = U.lock();
@@ -958,10 +982,10 @@ fn send(cx: &Cx, sid: u64, iov: Iov, control: (u64, u64), flags: u64, mmsg: Opti
             Ok(n) => {
                 if n > 0 || (total == 0 && ty != SOCK_STREAM) {
                     // wave9 GX3: what went in is its answer if lx-ipc dies now
-                    kstore::partial(cx.page(), cx.id, if mmsg.is_none() { n as i64 } else { 0 });
                     let (pair, side) = u.pair_of(sid).unwrap();
                     let peer = u.pairs[&pair].socks[1 - side];
                     settle(&mut u, peer, &mut after);
+                    kstore::partial(cx.page(), cx.id, if mmsg.is_none() { n as i64 } else { 0 });
                 }
                 if n >= total && (n > 0 || fds.is_empty()) {
                     (finish_now(cx, n as i64, mmsg), 0)
@@ -972,14 +996,35 @@ fn send(cx: &Cx, sid: u64, iov: Iov, control: (u64, u64), flags: u64, mmsg: Opti
                     if n > 0 && mmsg.is_none() {
                         kstore::partial(core::ptr::null_mut(), cx.id, n as i64);
                     }
-                    u.socks.get_mut(&sid).unwrap().waits.push_back(Wait::Send { c: cx.c, iov, total, done: n, flags, fds, unix_in, mmsg });
+                    u.socks.get_mut(&sid).unwrap().waits.push_back(Wait::Send { c: cx.c, iov, total, done: n, flags, fds, unix_in, mmsg, tokrec });
                     (0, LX_REPLY_PENDING)
                 }
             }
         }
     };
+    if r.1 & LX_REPLY_PENDING == 0 {
+        after.rel.push(tokrec);
+    }
     after.run();
     r
+}
+
+/// wave9 GX3: a record of tokens taken for a send (0: none, or too many to record).
+fn token_record(fds: &[u64]) -> u64 {
+    if fds.is_empty() || fds.len() > kstore::TOKENS_MAX || !kstore::active() {
+        return 0;
+    }
+    let id = kstore::id();
+    let mut w = kstore::W::new(kstore::K_TOKENS);
+    w.u8(fds.len() as u8);
+    for &t in fds {
+        w.u64(t);
+    }
+    if !kstore::put_logged(id, &w.0) {
+        kstore::release(id);
+        return 0;
+    }
+    id
 }
 
 fn finish_now(cx: &Cx, n: i64, mmsg: Option<u64>) -> i64 {
@@ -1636,8 +1681,9 @@ fn close_sock(u: &mut Unix, sid: u64, after: &mut After) {
     for w in s.waits {
         // (a descriptor's last close while its call waits cannot happen: the kernel holds
         // the descriptor during the call; these are calls of a process that ended)
-        if let Wait::Send { mut fds, .. } = w {
+        if let Wait::Send { mut fds, tokrec, .. } = w {
             after.drop.append(&mut fds);
+            after.rel.push(tokrec);
         }
     }
     match s.state {
@@ -1684,8 +1730,9 @@ fn fail_senders(u: &mut Unix, sid: u64, after: &mut After) {
     let mut keep = VecDeque::new();
     for w in s.waits.drain(..) {
         match w {
-            Wait::Send { c, done, flags, mut fds, mmsg, .. } => {
+            Wait::Send { c, done, flags, mut fds, mmsg, tokrec, .. } => {
                 after.drop.append(&mut fds);
+                after.rel.push(tokrec);
                 if done > 0 {
                     after.done.push((c.id, finish_send(&c, done as i64, mmsg)));
                 } else {
@@ -1722,8 +1769,9 @@ pub fn interrupted(id: u64) -> bool {
         for s in u.socks.values_mut() {
             if let Some(pos) = s.waits.iter().position(|w| w.call().id == id) {
                 found = Some(match s.waits.remove(pos).unwrap() {
-                    Wait::Send { done, mut fds, c, mmsg, .. } => {
+                    Wait::Send { done, mut fds, c, mmsg, tokrec, .. } => {
                         after.drop.append(&mut fds);
+                        after.rel.push(tokrec);
                         if done > 0 {
                             finish_send(&c, done as i64, mmsg)
                         } else {
@@ -1756,8 +1804,9 @@ pub fn on_exit(tgid: u64) {
             let mut keep = VecDeque::new();
             for w in s.waits.drain(..) {
                 if w.call().tgid == tgid {
-                    if let Wait::Send { mut fds, .. } = w {
+                    if let Wait::Send { mut fds, tokrec, .. } = w {
                         after.drop.append(&mut fds);
+                        after.rel.push(tokrec);
                     }
                 } else {
                     keep.push_back(w);
@@ -1959,7 +2008,7 @@ fn parse_sock(d: &[u8]) -> Option<SockRec> {
 /// A connection's record: its sockets and its two queues (chains restored in the arena,
 /// segments' metadata read back), `None` if any part fails its checks (nothing kept).
 #[allow(dead_code)] // (linux-server never restores)
-fn parse_pair(d: &[u8]) -> Option<Pair> {
+fn parse_pair(d: &[u8], drop: &mut Vec<u64>) -> Option<Pair> {
     let a = arena::get();
     let mut r = kstore::R::new(d);
     if r.u8()? != kstore::K_UPAIR {
@@ -2002,6 +2051,9 @@ fn parse_pair(d: &[u8]) -> Option<Pair> {
     }
     if !ok {
         for qi in q.iter_mut() {
+            for s in qi.segs.iter_mut() {
+                drop.append(&mut s.fds);
+            }
             qi.segs.clear();
             qi.chain.clear();
             qi.chain.release(a);
@@ -2017,7 +2069,7 @@ fn parse_pair(d: &[u8]) -> Option<Pair> {
 /// while lx-ipc was away are closed now (their peers see end of file); nobody waits yet:
 /// waiting calls are sent again by the kernel.
 #[allow(dead_code)] // (linux-server never restores)
-pub fn restore(socks: &[(u64, &[u8])], pairs: &[(u64, &[u8])], objs: &[(u32, u64)]) -> (Vec<u64>, Vec<u32>) {
+pub fn restore(socks: &[(u64, &[u8])], pairs: &[(u64, &[u8])], objs: &[(u32, u64)], tokens: &[(u64, &[u8])]) -> (Vec<u64>, Vec<u32>) {
     let mut dead = Vec::new();
     let mut after = After::default();
     let live = {
@@ -2025,7 +2077,7 @@ pub fn restore(socks: &[(u64, &[u8])], pairs: &[(u64, &[u8])], objs: &[(u32, u64
         let mut recs: BTreeMap<u64, SockRec> = socks.iter().filter_map(|&(id, d)| parse_sock(d).map(|s| (id, s))).collect();
         // Connections: each socket that names one must be named back at its side
         for &(pid, d) in pairs {
-            let Some(mut p) = parse_pair(d) else { continue };
+            let Some(mut p) = parse_pair(d, &mut after.drop) else { continue };
             let named = (0..2).any(|s| recs.get(&p.socks[s]).is_some_and(|r| r.st == 2 && r.pair == pid && r.side == s));
             if named {
                 u.pairs.insert(pid, p);
@@ -2104,6 +2156,22 @@ pub fn restore(socks: &[(u64, &[u8])], pairs: &[(u64, &[u8])], objs: &[(u32, u64
         for pid in orphans {
             let mut fds = u.dispose_pair(pid);
             after.drop.append(&mut fds);
+        }
+        // Tokens a send took but had not queued when lx-ipc died: let go (those a queue
+        // names were queued after all)
+        let queued: alloc::collections::BTreeSet<u64> = u.pairs.values().flat_map(|p| p.q.iter()).flat_map(|q| q.segs.iter()).flat_map(|s| s.fds.iter().copied()).collect();
+        for &(_, d) in tokens {
+            let mut r = kstore::R::new(d);
+            if r.u8() != Some(kstore::K_TOKENS) {
+                continue;
+            }
+            let n = r.u8().unwrap_or(0) as usize;
+            for _ in 0..n {
+                match r.u64() {
+                    Some(t) if !queued.contains(&t) => after.drop.push(t),
+                    _ => {}
+                }
+            }
         }
         let ids: Vec<u64> = u.socks.keys().copied().collect();
         for &sid in &ids {

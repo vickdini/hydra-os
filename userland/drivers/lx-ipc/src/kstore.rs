@@ -53,6 +53,11 @@ pub const K_TFD: u8 = 5;
 pub const K_SFD: u8 = 6;
 pub const K_MQ: u8 = 8;
 pub const K_SYSV: u8 = 9;
+/// Descriptor tokens a send took from the kernel and has not queued (or let go) yet: a
+/// restarted lx-ipc lets go of those no queue names (review fix: no tokens leak).
+pub const K_TOKENS: u8 = 10;
+/// Most tokens one such record holds.
+pub const TOKENS_MAX: usize = (REC - 2) / 8;
 
 struct Store {
     k: Option<Kept>,
@@ -162,6 +167,27 @@ pub fn put(id: u64, data: &[u8]) -> bool {
         Some(k) => k.put(id as usize - 1, data),
         None => false,
     }
+}
+
+/// Partial answers of waiting calls, published by [`flush`] once the change they report
+/// is written (review fix: never before the owner's record).
+pub type Pend = Vec<(u64, i64)>;
+
+/// Publishes the partial answers collected in `pend` (after the owner's record write).
+pub fn flush(pend: &mut Pend) {
+    for (id, n) in pend.drain(..) {
+        partial(core::ptr::null_mut(), id, n);
+    }
+}
+
+/// Writes record `id`, saying so in the log when it does not fit (`false`: the caller keeps
+/// the arena space the old record names).
+pub fn put_logged(id: u64, data: &[u8]) -> bool {
+    if put(id, data) {
+        return true;
+    }
+    hydra_rt::println!("[lx-ipc] record {} ({} bytes, kind {}) not written: it does not survive a restart", id, data.len(), data.first().copied().unwrap_or(0));
+    false
 }
 
 /// Thing `id` is gone: its record is cleared and its id free again.

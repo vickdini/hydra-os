@@ -117,7 +117,8 @@ pub fn start() -> Vec<(u32, u32, u64)> {
     }
     let socks: Vec<(u64, &[u8])> = recs.iter().filter(|(_, d)| d.first() == Some(&kstore::K_USOCK)).map(|(&k, &d)| (k, d)).collect();
     let pairs: Vec<(u64, &[u8])> = recs.iter().filter(|(_, d)| d.first() == Some(&kstore::K_UPAIR)).map(|(&k, &d)| (k, d)).collect();
-    let (ulive, udead) = crate::unix::restore(&socks, &pairs, &unix_objs);
+    let tokens: Vec<(u64, &[u8])> = recs.iter().filter(|(_, d)| d.first() == Some(&kstore::K_TOKENS)).map(|(&k, &d)| (k, d)).collect();
+    let (ulive, udead) = crate::unix::restore(&socks, &pairs, &unix_objs, &tokens);
     live.extend(ulive);
     for &(slot, key) in &unix_objs {
         if udead.contains(&slot) {

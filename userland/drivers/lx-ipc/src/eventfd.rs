@@ -39,6 +39,8 @@ struct Waiter {
 struct Efd {
     /// wave9 GX3: its id (`kstore` record).
     id: u64,
+    /// Partial answers of waiting calls, published after the record write.
+    pend: kstore::Pend,
     count: u64,
     semaphore: bool,
     readers: VecDeque<Waiter>,
@@ -64,8 +66,14 @@ impl Efd {
         if kstore::kept(self.id) {
             let mut w = kstore::W::new(kstore::K_EFD);
             w.u64(self.count).u8(self.semaphore as u8);
-            kstore::put(self.id, &w.0);
+            kstore::put_logged(self.id, &w.0);
         }
+    }
+
+    /// Writes the record, then the waiting calls' answers.
+    fn commit(&mut self) {
+        self.persist();
+        kstore::flush(&mut self.pend);
     }
 
     fn take(&mut self) -> Option<u64> {
@@ -90,7 +98,7 @@ impl Efd {
                 let v = self.take().unwrap();
                 match sys::lx_write(w.id, w.arg, &v.to_ne_bytes()) {
                     Ok(()) => {
-                        kstore::partial(core::ptr::null_mut(), w.id, 8);
+                        self.pend.push((w.id, 8));
                         out.push((w.id, 8))
                     }
                     Err(e) => {
@@ -106,7 +114,7 @@ impl Efd {
                 }
                 let w = self.writers.pop_front().unwrap();
                 self.count += w.arg;
-                kstore::partial(core::ptr::null_mut(), w.id, 8);
+                self.pend.push((w.id, 8));
                 out.push((w.id, 8));
                 moved = true;
             }
@@ -130,7 +138,7 @@ pub fn create(cx: &Cx) -> (i64, u64) {
     let id = kstore::id();
     {
         let mut m = EFDS.lock();
-        let e = Efd { id, count: cx.args[0] as u32 as u64, semaphore: flags & EFD_SEMAPHORE != 0, readers: VecDeque::new(), writers: VecDeque::new() };
+        let e = Efd { id, pend: alloc::vec::Vec::new(), count: cx.args[0] as u32 as u64, semaphore: flags & EFD_SEMAPHORE != 0, readers: VecDeque::new(), writers: VecDeque::new() };
         e.persist();
         e.publish(slot, false);
         m.insert(slot, e);
@@ -170,8 +178,8 @@ pub fn io(cx: &Cx) -> (i64, u64) {
                     Some(v) => match iov.scatter(cx, &v.to_ne_bytes()) {
                         Ok(()) => {
                             e.settle(&mut done);
+                            e.commit();
                             kstore::partial(cx.page(), cx.id, 8);
-                            e.persist();
                             e.publish(slot, false);
                             (8, 0)
                         }
@@ -209,8 +217,8 @@ pub fn io(cx: &Cx) -> (i64, u64) {
                 if MAX - e.count >= v && e.writers.is_empty() {
                     e.count += v;
                     e.settle(&mut done);
+                    e.commit();
                     kstore::partial(cx.page(), cx.id, 8);
-                    e.persist();
                     e.publish(slot, true);
                     (8, 0)
                 } else if cx.nonblock() || kbuf(cx) {
@@ -255,7 +263,7 @@ pub fn restore(slot: u32, id: u64, rec: &[u8]) -> bool {
     if count > MAX || !crate::obj::reserve(slot, LX_OBJ_KIND_EVENTFD) {
         return false;
     }
-    let e = Efd { id, count, semaphore: sem != 0, readers: VecDeque::new(), writers: VecDeque::new() };
+    let e = Efd { id, pend: alloc::vec::Vec::new(), count, semaphore: sem != 0, readers: VecDeque::new(), writers: VecDeque::new() };
     e.publish(slot, true);
     EFDS.lock().insert(slot, e);
     true

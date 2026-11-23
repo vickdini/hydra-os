@@ -821,14 +821,17 @@ pub fn restore(recs: &[(u64, &[u8])], objs: &[(u32, u64)]) -> (Vec<u64>, Vec<u32
             if maxmsg == 0 || maxmsg > HARD_MSG_MAX || msgsize == 0 || msgsize > HARD_MSGSIZE_MAX {
                 return None;
             }
-            let kept = Chain::restore(a, img)?;
+            let mut kept = Chain::restore(a, img)?;
             let mut msgs = Vec::new();
             for i in 0..kept.segs.len() {
                 let m = kept.meta(a, i);
                 if m.len() != 4 {
+                    // (its units go back)
+                    kept.clear();
+                    kept.release(a);
                     return None;
                 }
-                msgs.push((u32::from_le_bytes(m.try_into().ok()?), kept.data(a, i).to_vec()));
+                msgs.push((u32::from_le_bytes(m.try_into().unwrap()), kept.data(a, i).to_vec()));
             }
             Some(Queue { id, name, kept, ns, uid, gid, mode, maxmsg, msgsize, bytes: msgs.iter().map(|m| m.1.len() as u64).sum(), msgs, notify, receivers: Vec::new(), senders: Vec::new(), opens: Vec::new(), linked })
         })();
