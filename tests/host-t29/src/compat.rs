@@ -125,6 +125,10 @@ pub mod linux_host {
         pub fn active() -> bool {
             crate::fake::ret("abac::active") != 0
         }
+        /// wave9 G6b-3: app rules loaded (a test sets fake ret "abac::apps_active").
+        pub fn apps_active() -> bool {
+            crate::fake::ret("abac::apps_active") != 0
+        }
         pub fn console_subject() -> u32 {
             0
         }

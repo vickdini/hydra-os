@@ -52,6 +52,8 @@ mod locks;
 mod recover;
 // wave7 G7-6 end
 mod perm;
+// wave9 G6b-3: Landlock and ABAC for forwarded callers
+mod policy;
 mod walk;
 // wave7 G7-5 begin: files for the other services (execve, socket nodes)
 mod xfile;

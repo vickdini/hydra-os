@@ -152,6 +152,20 @@ on the Apps tab).
 
 The compiled format is documented at the top of `src/compat/linux/abac_core.rs`.
 
+### In the file service (wave 9, Group 6b-3)
+
+The file calls vfs-server serves (open, access, the stat family's walk, truncate, mkdir,
+symlink, unlink, rename, chroot) take the same decisions there: after the mode bits and the
+ACLs allowed an access, vfs-server asks the kernel's evaluator with `SYS_LX_OBJ` op
+`LX_FH_ABAC` (77) for the calling program (its subject, caches and audit record are the
+kernel's, so nothing changes in the audit log). It asks only for objects with extended
+attributes, callers that are not root, and only when the kernel marked the call
+`LX_FS_ABAC`, which it now does only for a process with a subject under a loaded policy.
+The policy store stays in the kernel (prctl, subjects across fork/exec, app control at
+`execve` all live there until the process service, wave 10); vfs-server keeps no copy, so a
+restart of vfs-server loses nothing. `lx.policy=kernel` (boot word) keeps every call of
+such a caller in the kernel, as before wave 9.
+
 ### Performance
 
 The evaluator never allocates on a decision: attribute names and values are interned when

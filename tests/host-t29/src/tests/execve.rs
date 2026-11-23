@@ -509,3 +509,17 @@ fn nofollow_does_not_follow_proc_links() {
     crate::memory::vm::set_current_mm(None);
     assert_eq!(r, ELOOP);
 }
+
+#[test]
+fn a_plan_is_not_used_under_app_rules_alone() {
+    // wave9 G6b-3: a policy with app rules and no file rules still controls apps
+    let _g = setup();
+    proc_(1166, 1000);
+    file("/bin/sh", 70, 0o100755, program());
+    file("/bin/prog", 50, 0o100755, program());
+    fake::set_ret("abac::apps_active", 1);
+    fake::EXEC_FRONT.with_borrow_mut(|m| *m = Some(Ok(plan(70, "/bin/sh", &[], None))));
+    assert_eq!(exec("/bin/prog", &["prog"], &[]).0, 0);
+    assert_eq!(fake::task(1166, |t| t.exe.clone()).flatten().as_deref(), Some("/bin/prog"));
+    fake::set_ret("abac::apps_active", 0);
+}

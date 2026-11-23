@@ -2,7 +2,7 @@
 //! its mount namespace and its root (`docs/vfs-design.md` section 6: every forwarded call
 //! carries this, so vfs-server keeps no per-process state).
 
-use crate::proto::{LxCall, LX_GROUPS};
+use crate::proto::{LxCall, LX_FS_ABAC, LX_GROUPS};
 
 /// `CAP_DAC_OVERRIDE`: read, write and search anything; execute what has an `x` bit.
 pub const CAP_DAC_OVERRIDE: u32 = 1;
@@ -43,12 +43,19 @@ pub struct Ctx {
     pub ns: u32,
     /// The caller's root directory.
     pub root: Node,
+    // wave9 G6b-3 begin
+    /// The forwarded call (its request id: the kernel's ABAC decisions are made for it).
+    pub req: u64,
+    /// The access policies apply to the caller (`LX_FS_ABAC`): objects with extended
+    /// attributes are asked about (`crate::policy::abac`).
+    pub abac: bool,
+    // wave9 G6b-3 end
 }
 
 impl Ctx {
     /// A caller with these ids and no supplementary groups.
     pub fn new(uid: u32, gid: u32, caps: u64, root: Node) -> Self {
-        Self { uid, gid, groups: [0; LX_GROUPS], ngroups: 0, caps, ns: 0, root }
+        Self { uid, gid, groups: [0; LX_GROUPS], ngroups: 0, caps, ns: 0, root, req: 0, abac: false }
     }
 
     /// The caller of forwarded call `c`, whose root is `root`.
@@ -58,6 +65,8 @@ impl Ctx {
         x.groups[..n].copy_from_slice(&c.groups[..n]);
         x.ngroups = n;
         x.ns = c.mnt_ns;
+        x.req = c.id; // wave9 G6b-3
+        x.abac = c.fs_flags & LX_FS_ABAC != 0; // wave9 G6b-3
         x
     }
 
