@@ -66,6 +66,7 @@ pub fn start() -> Vec<(u32, u32, u64)> {
     if found.is_empty() || sys::lx_svc_adopt().is_err() {
         // A first start, or nothing to take back
         kstore::keep_only(&[]);
+        crate::sysv::shm_fresh_start(); // wave10 G8-2
         return Vec::new();
     }
     let objs = list();
@@ -138,10 +139,16 @@ pub fn start() -> Vec<(u32, u32, u64)> {
         }
     }
     // System V's tables (no objects: one record)
+    let mut sysv_back = false;
     if let Some((&id, &d)) = recs.iter().find(|(_, d)| d.first() == Some(&kstore::K_SYSV)) {
         if crate::sysv::restore(id, d) {
             live.push(id);
+            sysv_back = true;
         }
+    }
+    // wave10 G8-2: no tables back = no segments: the kernel's old attachments stop counting
+    if !sysv_back {
+        crate::sysv::shm_fresh_start();
     }
     for &slot in &dead {
         let _ = sys::lx_svc_dead(slot);

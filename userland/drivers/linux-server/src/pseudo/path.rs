@@ -57,6 +57,8 @@ pub enum File {
     /// `/sys/firmware/efi/efivars/<Name>-<GUID>`: a UEFI variable (the file name is the
     /// tail's last component).
     Efivar,
+    /// wave10 G8-2: `/proc/sysvipc/{shm,sem,msg}` (0, 1, 2): the IPC service's info call.
+    SysvIpc(u8),
     /// `/proc/<who>/<file>`, or `/proc/<who>/task/<tid>/<file>` (`tid` != 0).
     Pid {
         /// The process.
@@ -220,6 +222,12 @@ pub fn classify(obj: u64, tail: &[u8]) -> Target {
         ["stat"] => file(File::Stat),
         ["meminfo"] => file(File::Meminfo),
         ["cpuinfo"] => file(File::Cpuinfo),
+        // wave10 G8-2
+        ["sysvipc", k @ ("shm" | "sem" | "msg")] => file(File::SysvIpc(match *k {
+            "shm" => 0,
+            "sem" => 1,
+            _ => 2,
+        })),
         ["self"] if !trailing => Target::SelfLink(false),
         ["thread-self"] if !trailing => Target::SelfLink(true),
         [who, rest @ ..] if !rest.is_empty() => {

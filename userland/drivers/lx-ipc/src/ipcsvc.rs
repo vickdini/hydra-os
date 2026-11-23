@@ -52,7 +52,8 @@ pub fn dispatch(cx: &Cx) -> Option<(i64, u64)> {
         286 => crate::timerfd::settime(cx),
         287 => crate::timerfd::gettime(cx),
         240..=245 => crate::mqueue::dispatch(cx),
-        64..=66 | 220 | 68..=71 => crate::sysv::dispatch(cx),
+        // (wave10 G8-2: + shmget, shmat, shmctl)
+        29..=31 | 64..=66 | 220 | 68..=71 => crate::sysv::dispatch(cx),
         _ => return None,
     })
 }

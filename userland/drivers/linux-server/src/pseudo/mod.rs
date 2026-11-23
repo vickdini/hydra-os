@@ -143,6 +143,11 @@ pub fn redirected(cx: &Cx) -> Answer {
     if target == Target::Missing {
         return done(ENOENT);
     }
+    // wave10 G8-2: /proc/sysvipc/* only while an IPC service answers the info call (with
+    // `lx.ipc=kernel` the kernel decides: there is no such file then)
+    if matches!(target, Target::File(File::SysvIpc(_))) && hydra_rt::svccall::dcall(LXS_IPC, LX_DCALL_OP_NULL, &[], &mut []) < 0 {
+        return kernel(cx);
+    }
     let r = match cx.nr {
         4 | 6 | 262 | 332 => stat(cx, obj, tail, target),
         21 | 269 | 439 => Some(access(cx, target)),
@@ -358,6 +363,7 @@ fn make(id: u64, file: File, tail: &[u8]) -> Result<Vec<u8>, i64> {
             }
         }
         File::Meminfo => text::meminfo(&sysinfo(LX_INFO_SYS_MEM)?),
+        File::SysvIpc(kind) => sysvipc(kind)?,
         File::Cpuinfo => text::cpuinfo(sysinfo(0)?.ncpu.max(1)),
         File::CpuRange => text::cpu_range(sysinfo(0)?.ncpu.max(1)),
         File::Pid { who, tid, file } => match file {
@@ -370,6 +376,35 @@ fn make(id: u64, file: File, tail: &[u8]) -> Result<Vec<u8>, i64> {
         },
     })
 }
+
+// wave10 G8-2 begin
+/// `/proc/sysvipc/<kind>` for the caller of the request being served: the IPC service's
+/// info call (`LX_IPC_OP_SYSVIPC`, a delegated direct call: lx-ipc finds the reader's IPC
+/// namespace), chunk by chunk. `ENOENT` when the IPC calls are the kernel's (`lx.ipc=kernel`:
+/// `ipcs` then asks with `shmctl`).
+fn sysvipc(kind: u8) -> Result<Vec<u8>, i64> {
+    let mut text = Vec::new();
+    let mut cursor = 0u64;
+    let mut out = alloc::vec![0u8; 2048];
+    for _ in 0..4096 {
+        let mut input = [0u8; 24];
+        input[..8].copy_from_slice(&(kind as u64).to_le_bytes());
+        input[8..16].copy_from_slice(&cursor.to_le_bytes());
+        input[16..].copy_from_slice(&u64::MAX.to_le_bytes());
+        let n = hydra_rt::svccall::dcall(LXS_IPC, LX_IPC_OP_SYSVIPC, &input, &mut out);
+        if n < 8 {
+            return Err(ENOENT);
+        }
+        let n = (n as usize).min(out.len());
+        text.extend_from_slice(&out[8..n]);
+        cursor = u64::from_le_bytes(out[..8].try_into().unwrap());
+        if cursor == 0 {
+            break;
+        }
+    }
+    Ok(text)
+}
+// wave10 G8-2 end
 
 fn pid_word(who: Who) -> u64 {
     match who {

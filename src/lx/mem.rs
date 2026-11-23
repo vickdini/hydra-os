@@ -242,7 +242,38 @@ fn dma(endpoint: u32, size: u64) -> Result<Arc<MemObject>, i64> {
 /// The kept object `idx` of service `svc`, made zeroed with `size` bytes the first time
 /// (`new` = true). Index 0 is restart support's kept-state object (Group 21).
 pub fn kept_get_or_create(svc: u8, idx: u64, size: u64) -> Result<(Arc<MemObject>, bool), i64> {
-    let fresh = anon(size)?;
+    kept_get_or_create_with(svc, idx, size, LX_MEM_MAX)
+}
+
+// wave10 G8-2 begin: objects up to `LX_MEM_BIG_MAX` (System V segments; sparse)
+/// A new anonymous object of `size` bytes, at most `max`.
+fn anon_max(size: u64, max: u64) -> Result<Arc<MemObject>, i64> {
+    if size == 0 || size > max {
+        return Err(EINVAL);
+    }
+    Ok(MemObject::anon((size + PAGE_SIZE - 1) / PAGE_SIZE))
+}
+
+/// The size limit of an `LX_MEM_ANON` with flags `b`.
+fn anon_limit(b: u64) -> u64 {
+    if b & crate::ipc::protocol::LX_MEM_BIG != 0 {
+        crate::ipc::protocol::LX_MEM_BIG_MAX
+    } else {
+        LX_MEM_MAX
+    }
+}
+
+/// The kept object `key` of the service serving `endpoint` (a System V segment named in
+/// lx-ipc's answer to `shmat`, `lx::shm`).
+pub fn kept_of_endpoint(endpoint: u32, key: u64) -> Option<Arc<MemObject>> {
+    let svc = svc_of_endpoint(endpoint)?;
+    kept(|k| k.get(&(svc, key)).cloned())
+}
+// wave10 G8-2 end
+
+/// [`kept_get_or_create`] with a size limit (wave10 G8-2).
+fn kept_get_or_create_with(svc: u8, idx: u64, size: u64, max: u64) -> Result<(Arc<MemObject>, bool), i64> {
+    let fresh = anon_max(size, max)?;
     kept(|k| {
         if let Some(o) = k.get(&(svc, idx)) {
             return Ok((o.clone(), false));
@@ -331,7 +362,7 @@ pub fn sys_mem(op: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
                 if c == 0 {
                     return EINVAL;
                 }
-                let (obj, new) = match kept_get_or_create(svc, c, a) {
+                let (obj, new) = match kept_get_or_create_with(svc, c, a, anon_limit(b)) {
                     Ok(x) => x,
                     Err(e) => return e,
                 };
@@ -340,7 +371,7 @@ pub fn sys_mem(op: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
                     Err(e) => e,
                 }
             } else {
-                match anon(a).and_then(|o| give(ep, o)) {
+                match anon_max(a, anon_limit(b)).and_then(|o| give(ep, o)) {
                     Ok(h) => h as i64,
                     Err(e) => e,
                 }

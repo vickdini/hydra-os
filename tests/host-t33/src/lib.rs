@@ -297,6 +297,22 @@ pub mod pkg;
 /// *stub* The forwarding to the ring-3 Linux server.
 pub mod lx {
     pub fn note(_kind: u64, _a: u64, _b: u64, _c: u64) {}
+    // wave10 G8-2 begin: *stub* System V shared memory in lx-ipc (`src/lx/shm.rs`): never
+    // active on the host (the in-kernel copy answers)
+    pub mod shm {
+        pub fn active() -> bool {
+            false
+        }
+        pub fn shmat(_id: i32, _addr: u64, _flags: u64) -> i64 {
+            -38
+        }
+        pub fn shmdt(_addr: u64) -> i64 {
+            -38
+        }
+        pub fn on_fork(_parent: u64, _child: u64) {}
+        pub fn forget(_pid: u64) {}
+    }
+    // wave10 G8-2 end
     // wave9 G6b-1 begin: *stub* the kernel's events for vfs-server's inotify/fanotify
     // (`lx::notifyfwd`). wave9 G9-C: the kernel's own instances are gone, so the tests'
     // switches (`INOTIFY_ON`, `FANOTIFY_ON`) now say what vfs-server wants, and the events

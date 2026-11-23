@@ -122,6 +122,8 @@ fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
         LX_NOTE_TIMER => {
             ipcsvc::timer(a);
         }
+        // wave10 G8-2: a System V shared memory attachment went
+        LX_NOTE_SHM => sysv::on_shm_note(a, b, _c),
         _ => {}
     }
 }
@@ -135,6 +137,10 @@ pub fn on_closed(slot: u32, kind: u32) {
 fn serve(c: &LxCall, page: *mut u8) -> Answer {
     svcrt::notes::drain_to(c.note_seq);
     let cx = Cx::from_call(c, page);
+    // wave10 G8-2: direct calls (the info call of /proc/sysvipc/*)
+    if c.nr == LX_DCALL_NR {
+        return (sysv::dcall(&cx), 0);
+    }
     let r = ipcsvc::dispatch(&cx).unwrap_or((ENOSYS, 0));
     obj::flush();
     r

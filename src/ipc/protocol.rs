@@ -2837,3 +2837,61 @@ pub struct LxTmemAttr {
 /// the rest of the last one (tmpfs truncation).
 pub const LX_MEM_TRUNC: u64 = 10;
 // wave9 GM end
+
+// wave10 G8-2 begin: System V shared memory in lx-ipc (`lx::shm`; lx-ipc `sysv.rs`)
+/// `SYS_LX_OBJ` op of the IPC service's host: `(sub-op, b, c)`, sub-ops `LX_SHM_*`. The
+/// kernel keeps the attachments of the segments (it maps them, and fork, exec and exit
+/// change them) and what they decide (`shm_nattch`, `shm_atime`, `shm_dtime`, `shm_lpid`);
+/// the service keeps the segments.
+pub const LX_OBJ_SHM: u64 = 79;
+/// `(id)`: how many attachments segment `id` has.
+pub const LX_SHM_NATTCH: u64 = 1;
+/// `(buf, n)`: `buf` holds `n` [`LxShmStat`]; the service fills `id`, the kernel the rest.
+pub const LX_SHM_STAT: u64 = 2;
+/// `()`: the service starts without segments (a first start, or the restart ladder dropped
+/// its kept state): the attachments the kernel has stop counting for any id.
+pub const LX_SHM_RESET: u64 = 3;
+/// `(tgid)`: the IPC namespace id of process `tgid` (`/proc/sysvipc/*` for a reader).
+pub const LX_SHM_IPCNS: u64 = 4;
+/// `(id)`: the service removed segment `id` (`IPC_RMID`): returns its attachment count;
+/// when that is not 0, the last attachment going is told ([`LX_NOTE_SHM`]).
+pub const LX_SHM_RMID: u64 = 5;
+/// `(id)`: segment `id` is gone in the service: the kernel forgets what it knew of it.
+pub const LX_SHM_FORGET: u64 = 6;
+/// One segment's attachment facts ([`LX_SHM_STAT`]).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct LxShmStat {
+    /// The segment (filled by the service).
+    pub id: i64,
+    /// Attachments.
+    pub nattch: u64,
+    /// The last attach, seconds since 1970 (0: never).
+    pub atime: i64,
+    /// The last detach (0: never).
+    pub dtime: i64,
+    /// The process of the last attach or detach.
+    pub lpid: u64,
+}
+/// Notification to the IPC host: the last attachment of removed segment `a` went (process
+/// `b`): the segment can go.
+pub const LX_NOTE_SHM: u64 = 13;
+/// [`LX_MEM_ANON`] flag: the object may be up to [`LX_MEM_BIG_MAX`] (sparse: pages are
+/// allocated when touched).
+pub const LX_MEM_BIG: u64 = 2;
+/// Largest object with [`LX_MEM_BIG`] (System V's `SHMMAX`).
+pub const LX_MEM_BIG_MAX: u64 = 1 << 40;
+/// Kept-object key of System V segment `id` in the IPC service (keys 1 and 2 are its
+/// records and arena).
+pub const fn lx_shm_key(id: i32) -> u64 {
+    0x1_0000_0000 | id as u32 as u64
+}
+/// Direct-call op of the IPC service (the info call of `/proc/sysvipc/*`): input `[kind,
+/// cursor, ipc_ns]` (u64 each; kind 0 shm, 1 sem, 2 msg; cursor 0 = with the header line),
+/// output: whole lines of the reader's IPC namespace; the result is the length, and the
+/// next cursor is written as the output's first 8 bytes (0: that was all).
+pub const LX_IPC_OP_SYSVIPC: u64 = 32;
+/// Redirect target of the IPC service's answer to `shmat`: `redir_obj` = the segment's kept
+/// object key ([`lx_shm_key`]); the kernel maps that object into the caller (not a service).
+pub const LX_REDIR_SHM: SvcId = 0xFD;
+// wave10 G8-2 end

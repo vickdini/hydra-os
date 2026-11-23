@@ -417,6 +417,8 @@ fn dcall_serve(cx: &Cx) -> (i64, u64) {
             }
         }
         LX_DCALL_OP_WHO => (cx.c.tgid as i64, 0),
+        // wave10 G8-2: the IPC service's info call when it is co-located here (`lx.ipc=linux`)
+        LX_IPC_OP_SYSVIPC => (crate::sysv::dcall(cx), 0),
         _ => (EINVAL, 0),
     }
 }
