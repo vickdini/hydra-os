@@ -29,6 +29,7 @@ pub mod cursor; // wave7 G7-7: the shared offset of by-path descriptors
 pub mod fd;
 pub mod gpt;
 pub mod pipe;
+pub mod tmem; // wave9 GM: tmpfs data in memory
 pub mod zfs;
 
 pub use client::ZfsClient;

@@ -52,6 +52,8 @@ mod locks;
 mod recover;
 // wave7 G7-6 end
 mod perm;
+// wave9 G6b-3: Landlock and ABAC for forwarded callers
+mod policy;
 mod walk;
 // wave9 G6b-1: inotify and fanotify
 mod notify;
@@ -62,6 +64,8 @@ mod xpath;
 mod zfs;
 // wave9 G6b-2: FUSE served here
 mod fuse;
+// wave9 GM: in-memory tmpfs files (sizes and times from the kernel)
+mod tmem;
 
 /// The kernel's protocol (message codes, `LxCall`, service ids).
 pub use hydra_rt::protocol as proto;
@@ -236,6 +240,7 @@ fn take_notes(seq: u64) {
         let dropped = unsafe { (*((ring as *const u64).add(2) as *const AtomicU64)).load(Ordering::Acquire) };
         if dropped != *seen {
             CACHE.forget_all();
+            policy::names_changed(0); // wave9 G6b-3
             // wave7 G7-3: lost namespace notes (wave7 G7-6: compared with the kernel's list of
             // live namespaces, instead of forgetting every table but the initial one; after
             // the notes still in the ring are taken, so none older than the list comes after)
@@ -292,6 +297,7 @@ fn on_note(kind: u64, a: u64, b: u64, c: u64) {
         return;
     }
     if kind == LX_NOTE_FSCHANGE {
+        policy::names_changed(a); // wave9 G6b-3
         if a == 0 {
             // wave7 G7-2: 0 = names and attributes anywhere (link counts change with names)
             CACHE.forget_all();

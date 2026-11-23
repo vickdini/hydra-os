@@ -977,6 +977,19 @@ open files; the kernel keeps the descriptor table as a table of handles (`src/lx
   `LX_FH_CHROOT` and `LX_FH_REROOT` (for 7-3's `chroot`/`pivot_root`).
 - Tests: host-t30 `lx::fileh` (25), `tests/host-w7-37` (result layouts, decisions); the QEMU
   suite with vfs-server serving.
+- **Landlock and ABAC (wave 9, Group 6b-3).** vfs-server checks both for the calls it serves
+  (`vfs-server/src/policy/`), so `kernel_mask` no longer keeps open, access, the attribute
+  changes, mkdir, symlink, unlink, rename and the mount calls of such callers (mknod, link, the
+  xattr calls, utime(s), `execve`'s front half and socket nodes still go to the kernel).
+  *Landlock:* the kernel keeps the rulesets and domains; each domain has an id that is never
+  reused (`LxCall::ll_dom`), and vfs-server keeps a copy per id, fetched once with
+  `LX_FH_LANDLOCK` (76). The checks use the pool's `..` chain above the object, as the
+  kernel's: vfs-server takes it from parent hints its walks leave (each confirmed by the name
+  cache) or from zfs-server. A landlocked open that walks into `/proc`, `/sys`, `/dev` or a FUSE
+  mount is the kernel's (its chain is by name there). Truncation refused at the open travels
+  with the handle (`LX_FH_NOTRUNC`, bit 30 of the handle flags), so `ftruncate` refuses it.
+  *ABAC:* asked of the kernel (`LX_FH_ABAC`, 77; see `docs/abac.md`). A vfs-server restart
+  loses only copies, which are fetched again. `lx.policy=kernel` restores the old routing.
 
 ## Mount tables for the file service (wave 7, Group 7-7)
 

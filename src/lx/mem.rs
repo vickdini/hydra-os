@@ -396,6 +396,12 @@ pub fn sys_mem(op: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
             Some(svc) => kept_keys(svc, a, b, c),
             None => EPERM,
         },
+        // wave9 GM: frees an anonymous object's pages past a size (tmpfs truncation)
+        crate::ipc::protocol::LX_MEM_TRUNC => match entry(ep, a as u32) {
+            Some(e) if !e.dma => e.obj.truncate(b).map_or_else(|e| e, |()| 0),
+            Some(_) => EINVAL,
+            None => EBADF,
+        },
         _ => EINVAL,
     }
 }

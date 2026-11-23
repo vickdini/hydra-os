@@ -134,6 +134,15 @@ pub trait Backend {
     fn acl(&self, n: Node) -> Result<Option<Vec<u8>>, i64>;
     /// The mount tables.
     fn mounts(&self) -> &dyn Mounts;
+    // wave9 G6b-3 begin
+    /// A walk found `child` by `name` in `dir` (Landlock's parent hints; nothing by default).
+    fn found(&self, _dir: Node, _name: &[u8], _child: Node) {}
+    /// Whether the access policies let `cx` search directory `dir` (asked, as by the
+    /// kernel's walk, only for directories not everyone may search; yes by default).
+    fn may_search_policy(&self, _cx: &Ctx, _dir: &Attr) -> Result<bool, i64> {
+        Ok(true)
+    }
+    // wave9 G6b-3 end
 }
 
 /// Where a relative path starts.
@@ -261,6 +270,11 @@ fn search_known(be: &dyn Backend, cx: &Ctx, dir: Node, known: Option<&(Node, Att
     }
     let acl = if perm::needs_acl(cx, &a, MAY_EXEC) { be.acl(dir)? } else { None };
     if perm::may(cx, &a, acl.as_deref(), MAY_EXEC) {
+        // wave9 G6b-3: the access policies may take it away (as the kernel's `may_search`:
+        // directories not everyone may search)
+        if a.mode & 0o111 != 0o111 && !be.may_search_policy(cx, &a)? {
+            return Err(EACCES);
+        }
         Ok(a)
     } else {
         Err(EACCES)
@@ -374,6 +388,7 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
             }
         }
         let next = be.lookup(cur, &comp)?;
+        be.found(cur, &comp, next); // wave9 G6b-3
         let is_last = pending.is_empty();
         let attr = be.getattr(next)?;
         if attr.kind() == DnodeType::Symlink && (!is_last || follow_last) {
@@ -498,7 +513,10 @@ pub fn walk_parent(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8]) -> Res
         None
     } else {
         match be.lookup(dir, name) {
-            Ok(n) => Some(n),
+            Ok(n) => {
+                be.found(dir, name, n); // wave9 G6b-3
+                Some(n)
+            }
             Err(ENOENT) => None,
             Err(e) => return Err(e),
         }

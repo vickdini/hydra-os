@@ -2,14 +2,16 @@
 //! `vfs::open_path`, its pool part): the walk, the type and permission checks
 //! ([`super::rules`]), and a handle made in the kernel (`LX_FH_INSTALL`). Everything else
 //! goes to the kernel before anything has changed: creating and truncating opens, `O_PATH`,
-//! `O_TMPFILE`, devices, FIFOs, sockets, and callers with Landlock, fanotify or ABAC rules.
+//! `O_TMPFILE`, devices, FIFOs, sockets, and callers with fanotify marks. (wave9 G6b-3:
+//! Landlock and ABAC are checked here, `crate::policy`.)
 
 use hydra_rt::svcrt::Cx;
 use hydra_rt::sys;
 
 use super::ctxt;
 use super::rules::{self, KERNEL, O_CREAT, O_EXCL, O_NOFOLLOW};
-use crate::proto::{LxFhDesc, LX_FH_INSTALL, LX_FS_ABAC, LX_FS_FANOTIFY, LX_FS_LANDLOCK};
+use crate::policy::{self, ll};
+use crate::proto::{LxFhDesc, LX_FH_INSTALL, LX_FH_NOTRUNC, LX_FS_FANOTIFY};
 
 const EEXIST: i64 = -17;
 const EACCES: i64 = -13;
@@ -50,12 +52,14 @@ pub fn open(cx: &Cx) -> Result<i64, i64> {
 fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
 // wave7 G7-5 end
     let c = &cx.c;
-    ctxt::check(c, LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_ABAC)?;
+    // (wave9 G6b-3: Landlock and ABAC are checked here)
+    ctxt::check(c, LX_FS_FANOTIFY)?;
     // wave9 G6b-1: with vfs-server's fanotify groups the kernel opens (FAN_OPEN and the
     // permission events are made there, with the kernel's path)
     if crate::notify::fan_any() {
         return Err(KERNEL);
     }
+    let dom = policy::domain(c)?;
     let a = cx.args;
     let (dirfd, path_ptr, flags) = if cx.nr == 2 { (-100i32, a[0], a[1] as u32) } else { (a[0] as i32, a[1], a[2] as u32) };
     if !rules::servable(flags) {
@@ -85,8 +89,14 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
             _ => rules::MAY_READ | rules::MAY_WRITE,
         };
         let acl = ctxt::acl_of(n, &attr)?;
-        if !ctxt::may_access(who, &attr, acl.as_deref(), c.euid, c.egid, want) {
+        if !ctxt::allowed(who, &attr, acl.as_deref(), c.euid, c.egid, want, &path)? {
             return Err(EACCES);
+        }
+        // wave9 G6b-3: Landlock
+        if let Some(d) = &dom {
+            if policy::refused_on(d, c.id, n, false, ll::open_rights(flags, false))? != 0 {
+                return Err(EACCES);
+            }
         }
         *fifo = n.ino;
         return Err(FIFO);
@@ -99,12 +109,34 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     let want = rules::decide(attr.mode, flags)?;
 
     let acl = ctxt::acl_of(n, &attr)?;
-    if !ctxt::may_access(who, &attr, acl.as_deref(), c.euid, c.egid, want) {
+    if !ctxt::allowed(who, &attr, acl.as_deref(), c.euid, c.egid, want, &path)? {
         return Err(EACCES);
     }
-    let d = rules::handle_desc(c, n.ino, n.mnt, attr.is_dir(), flags, &path, dirfd)?;
+    // wave9 G6b-3 begin: Landlock, as the kernel's open: the open's rights, and TRUNCATE
+    // for every file (a later ftruncate on the handle depends on it)
+    let mut notrunc = false;
+    if let Some(d) = &dom {
+        // (a FUSE file: the kernel's, with its lexical chain)
+        if crate::fuse::wire::split(n.ino).is_some() {
+            return Err(KERNEL);
+        }
+        let is_dir = attr.is_dir();
+        let want = ll::open_rights(flags, is_dir);
+        let extra = if is_dir { 0 } else { ll::TRUNCATE };
+        let refused = policy::refused_on(d, c.id, n, is_dir, want | extra)?;
+        if refused & want != 0 {
+            return Err(EACCES);
+        }
+        notrunc = refused & ll::TRUNCATE != 0;
+    }
+    // wave9 G6b-3 end
+    let mut d = rules::handle_desc(c, n.ino, n.mnt, attr.is_dir(), flags, &path, dirfd)?;
+    if notrunc {
+        d.flags |= LX_FH_NOTRUNC; // wave9 G6b-3
+    }
     // wave9 GP2: the kernel takes the handle with the answer (no LX_FH_INSTALL round): not
-    // for FUSE files (counted here), flags beyond the plain ones, or a call run again
+    // for FUSE files (counted here), flags beyond the plain ones (6b-3's NOTRUNC), or a call
+    // run again
     if c.flags & crate::proto::LX_CALL_FHANSWER != 0 && !cx.page().is_null() && n.ino != 0 && n.ino < 1 << 45 && crate::fuse::wire::split(n.ino).is_none() && d.flags & !rules::FH_PLAIN == 0 {
         *fifo = n.ino | (n.mnt as u64) << 45 | (attr.is_dir() as u64) << 61;
         return Err(FHANSWER);

@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w9_6b3"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group 6b-3's host unit tests: vfs-server's Landlock decisions on a copy of a domain (userland/drivers/vfs-server/src/policy/ll.rs)"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

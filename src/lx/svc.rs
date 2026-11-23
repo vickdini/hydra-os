@@ -96,6 +96,7 @@ pub fn init(words: &[u8]) -> bool {
         SVC[id as usize].endpoint.store(ep, Ordering::Release);
     }
     let mut all_kernel = false;
+    let mut tmpfs_pool = false; // wave9 GM
     for w in words.split(|c| matches!(c, b'+' | b',' | b';' | b' ' | b'\n' | b'\r' | b'\t' | 0)) {
         let w = w.strip_prefix(b"lx.").unwrap_or(w);
         let w = w.strip_prefix(b"lx=").map_or(w, |rest| if rest == b"kernel" { b"kernel".as_slice() } else { w });
@@ -119,6 +120,18 @@ pub fn init(words: &[u8]) -> bool {
             continue;
         }
         // wave9 G6b-4 end
+        // wave9 G6b-3 begin: `lx.policy=kernel`: Landlock and ABAC callers' calls stay the kernel's
+        if w == b"policy=kernel" {
+            super::fileh::POLICY_KERNEL.store(true, Ordering::Relaxed);
+            continue;
+        }
+        // wave9 G6b-3 end
+        // wave9 GM begin: `lx.tmpfs=pool`: tmpfs and /dev/shm files keep their data in the pool
+        if w == b"tmpfs=pool" {
+            tmpfs_pool = true;
+            continue;
+        }
+        // wave9 GM end
         let Some(eq) = w.iter().position(|&c| c == b'=') else { continue };
         let (name, val) = (&w[..eq], &w[eq + 1..]);
         let Some(id) = LXS_NAMES.iter().position(|n| n.as_bytes() == name) else { continue };
@@ -136,6 +149,10 @@ pub fn init(words: &[u8]) -> bool {
         let ep = SVC[id].endpoint.load(Ordering::Acquire);
         SVC[id].host.store(if ep == 0 { 0 } else { home_of(ep) }, Ordering::Release);
     }
+    // wave9 GM begin: tmpfs data in memory while the file service is forwarded
+    let vfs_kernel = SVC[crate::ipc::protocol::LXS_VFS as usize].mode.load(Ordering::Acquire) == SvcMode::Kernel as u8;
+    crate::fs::tmem::ENABLED.store(!all_kernel && !vfs_kernel && !tmpfs_pool, Ordering::Relaxed);
+    // wave9 GM end
     all_kernel
 }
 

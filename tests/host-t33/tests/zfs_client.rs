@@ -789,3 +789,37 @@ fn boot_file_import_skips_unchanged_files() {
     ZfsClient::import_boot_files(Vec::new());
     assert!(fake::klog_take().contains("(0 manifest entries before)"));
 }
+
+// wave9 GM: an in-memory tmpfs file (`fs::tmem`; no frames here: the writes carry no data)
+#[test]
+fn in_memory_file_write_drops_set_id_bits_and_keeps_the_pool_empty() {
+    use hydra_hosttests_t33::fs::tmem;
+    let _g = serial();
+    let d = fakefs::test_dir("tmem");
+    let f = with_fs(|fs| {
+        let f = fs.put(d, "shm", b"");
+        let n = fs.nodes.get_mut(&f).unwrap();
+        n.attr.mode = 0o106777;
+        n.attr.gid = 50;
+        f
+    });
+    tmem::make(f, 4242);
+    fake::CAPS.set(Some(0));
+    fake::CREDS.set((1000, 1000));
+    let writes = ops(FS_WRITE);
+    assert_eq!(srv(|s| s.write(f, 0, b"")), Ok(0));
+    assert_eq!(ops(FS_WRITE), writes, "the data stays in memory");
+    assert_eq!(srv(|s| s.getattr(f)).unwrap().mode & 0o7777, 0o777, "a writer without CAP_FSETID drops the set-ID bits");
+    // With CAP_FSETID the bits stay
+    with_fs(|fs| fs.nodes.get_mut(&f).unwrap().attr.mode = 0o104777);
+    zfs::forget_all_attrs();
+    fake::CAPS.set(Some(1 << 4));
+    srv(|s| s.write(f, 0, b"")).unwrap();
+    assert_eq!(srv(|s| s.getattr(f)).unwrap().mode & 0o7777, 0o4777);
+    // A truncation with another change: the size is the object's, the mode the pool's
+    let a = srv(|s| s.setattr(f, SetAttr { size: Some(9000), mode: Some(0o644), ..Default::default() })).unwrap();
+    assert_eq!((a.size, a.mode & 0o7777), (9000, 0o644));
+    assert_eq!(with_fs(|fs| fs.nodes.get(&f).unwrap().attr.size), 0, "the pool object stays empty");
+    tmem::forget(f);
+    tmem::drop_instance(4242);
+}

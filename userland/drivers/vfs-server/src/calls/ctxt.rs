@@ -38,6 +38,10 @@ pub struct Walker {
     /// The caller's effective user (FUSE mounts without `allow_other` are their owner's).
     pub euid: u32,
     // wave9 G6b-2 end
+    /// wave9 G6b-3: the caller is landlocked (its walks leave parent hints).
+    pub ll: bool,
+    /// wave9 G6b-3: the call (its walk's last step is remembered for it).
+    pub req: u64,
 }
 
 impl Walker {
@@ -80,12 +84,26 @@ impl Backend for Walker {
     fn mounts(&self) -> &dyn Mounts {
         &*self.view
     }
+    // wave9 G6b-3 begin
+    fn found(&self, dir: Node, name: &[u8], child: Node) {
+        if self.ll {
+            crate::policy::hint(self.req, dir, name, child);
+        }
+    }
+    fn may_search_policy(&self, cx: &Ctx, dir: &Attr) -> Result<bool, i64> {
+        // (root is not restricted: the kernel's `may_search` returns before for euid 0)
+        if cx.uid == 0 {
+            return Ok(true);
+        }
+        crate::policy::abac(cx, dir, perm::MAY_EXEC, false, b"")
+    }
+    // wave9 G6b-3 end
 }
 
 /// The walker of call `c`: the copy of its caller's mount table at least as new as the
 /// call (`LxCall::mnt_gen`).
 pub fn walker(c: &LxCall) -> Result<Walker, i64> {
-    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)?, fuse: crate::fuse::rerunnable(c.nr), euid: c.euid })
+    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)?, fuse: crate::fuse::rerunnable(c.nr) && !(c.ll_dom != 0 && matches!(c.nr, 2 | 257)), euid: c.euid, ll: c.ll_dom != 0, req: c.id })
 }
 
 /// The caller's root in table `v`: inode `c.root` (0: the pool's root, or in another
@@ -284,6 +302,20 @@ pub fn may_access(who: &Ctx, attr: &Attr, acl: Option<&[u8]>, uid: u32, gid: u32
     let by_acl = if uid == 0 { None } else { acl.and_then(|a| perm::acl_check(&as_ids, attr, a, want)) };
     super::rules::may_access(attr.mode, attr.uid, attr.gid, uid, want, by_acl, |g| as_ids.in_group(g))
 }
+
+// wave9 G6b-3 begin
+/// [`may_access`], then the access policies, which may only take rights away (the kernel's
+/// `vfs::may_access`; not for user 0); `path`: the path the caller named (audit).
+pub fn allowed(who: &Ctx, attr: &Attr, acl: Option<&[u8]>, uid: u32, gid: u32, want: u32, path: &[u8]) -> Result<bool, i64> {
+    if !may_access(who, attr, acl, uid, gid, want) {
+        return Ok(false);
+    }
+    if uid == 0 {
+        return Ok(true);
+    }
+    crate::policy::abac(who, attr, want, false, path)
+}
+// wave9 G6b-3 end
 
 /// The access ACL of `n` when its attributes say it may have one (an ACL that cannot be
 /// read fails the call: the mode bits alone could allow what it denies — 7-1's a78655f).

@@ -451,6 +451,10 @@ pub mod memory {
             pub fn phys_base(&self) -> Option<u64> {
                 self.base
             }
+            /// *stub* `LX_MEM_TRUNC` (wave9 GM): no pages here; the size checks only.
+            pub fn truncate(&self, size: u64) -> Result<(), i64> {
+                if self.base.is_some() || size > self.pages * 4096 { Err(-22) } else { Ok(()) }
+            }
             pub fn resident(&self) -> u64 {
                 self.resident.load(core::sync::atomic::Ordering::Relaxed)
             }
@@ -472,6 +476,10 @@ pub mod memory {
 }
 
 pub mod fs {
+    /// wave9 GM: *stub* of `src/fs/tmem.rs`
+    pub mod tmem {
+        include!("../../tmem_stub.rs");
+    }
     use alloc::string::String;
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -509,6 +517,8 @@ pub mod fs {
         pub foreign: Option<(u64, u64, usize)>,
         /// wave9 G6b-1: a fanotify event's descriptor (no events).
         pub nonotify: bool,
+        /// wave9 G6b-3: Landlock refused truncating it at the open.
+        pub no_truncate: bool,
     }
     impl Vnode {
         /// *stub* `OpenFile::new` (the open reference is recorded).
@@ -974,6 +984,19 @@ pub mod compat {
             pub fn active() -> bool {
                 crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 8 != 0
             }
+            // wave9 G6b-3 begin: *stub* app rules: never here
+            pub fn apps_active() -> bool {
+                false
+            }
+            /// *stub* the caller has a subject unless switch 32 is set
+            pub fn applies_to_current() -> bool {
+                crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 32 == 0
+            }
+            /// *stub* Refused for inode 666 only.
+            pub fn check_for(_tid: u64, ino: u64, _gen: u64, _mode: u32, _want: u32, _delete: bool, _path: Option<&str>) -> bool {
+                ino != 666
+            }
+            // wave9 G6b-3 end
         }
         /// *stub* wave7 G7-7: the mount tables' generations and the file service's view
         /// (`fake::MNT_TABLES`: `(ns, generation, root mount, mounts)`; the initial namespace
@@ -1032,6 +1055,18 @@ pub mod compat {
             pub fn check_port_of(_tid: u64, _port: u16, _want: u64) -> Result<(), i64> {
                 crate::fake::rec(|r| match r.landlock { Some(e) => Err(e), None => Ok(()) })
             }
+            // wave9 G6b-3 begin: *stub* domain 7 while landlocked
+            pub fn domain_id() -> u64 {
+                if active() {
+                    7
+                } else {
+                    0
+                }
+            }
+            pub fn serialized_of(_tid: u64) -> Option<alloc::vec::Vec<u8>> {
+                None
+            }
+            // wave9 G6b-3 end
         }
 
         pub mod fs {

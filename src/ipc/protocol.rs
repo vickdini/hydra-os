@@ -895,6 +895,11 @@ pub struct LxCall {
     /// at least this new. 0: the initial namespace without mounts.
     pub mnt_gen: u64,
     // wave7 G7-7 end
+    // wave9 G6b-3 begin: Landlock in the file service. Appended.
+    /// The caller's Landlock domain ([`LX_FH_LANDLOCK`] gives the file service a copy by
+    /// this id); 0: the caller is not landlocked. Ids are never reused.
+    pub ll_dom: u64,
+    // wave9 G6b-3 end
 }
 
 impl LxCall {
@@ -953,6 +958,7 @@ impl LxCall {
         fs_flags: 0,
         // wave7 G7-2 end
         mnt_gen: 0, // wave7 G7-7
+        ll_dom: 0,  // wave9 G6b-3
     };
 }
 
@@ -2614,6 +2620,63 @@ pub const LX_TTY_NOTMINE: i64 = -4111;
 pub const LX_OBJ_PROCID: u64 = 75;
 // wave9 G7a end
 
+// wave9 G6b-3 begin: Landlock and ABAC checks in the file service
+/// `SYS_LX_OBJ` op (the file service's host only): `LX_FH_LANDLOCK(req, buf, cap)` writes
+/// the Landlock domain of request `req`'s caller to `buf`: [`LxLlHead`], then per layer a
+/// [`LxLlLayer`] followed by its `n` rules as `(inode, rights)` pairs of `u64`. Returns the
+/// bytes written; `ENOENT` if the caller is not landlocked, `E2BIG` if `cap` is too small.
+pub const LX_FH_LANDLOCK: u64 = 76;
+/// `SYS_LX_OBJ` op (the file service's host only): `LX_FH_ABAC(req, desc)`: may request
+/// `req`'s caller access the object [`LxAbacDesc`] `desc` describes under the access
+/// policies (the kernel's evaluator, caches and audit ring, as the caller)? 0: yes;
+/// `EACCES`: no.
+pub const LX_FH_ABAC: u64 = 77;
+/// [`LxFhDesc::flags`] and [`LxCall::fh_flags`]: Landlock refused `TRUNCATE` when the
+/// handle was opened (`ftruncate` answers `EACCES`).
+pub const LX_FH_NOTRUNC: u32 = 1 << 30;
+
+/// The head of an [`LX_FH_LANDLOCK`] answer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LxLlHead {
+    /// The domain's id ([`LxCall::ll_dom`]).
+    pub id: u64,
+    /// How many layers follow.
+    pub layers: u64,
+}
+
+/// One layer of an [`LX_FH_LANDLOCK`] answer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LxLlLayer {
+    /// The file-system rights the layer handles.
+    pub fs: u64,
+    /// How many `(inode, rights)` rules follow.
+    pub n: u64,
+}
+
+/// The object of an [`LX_FH_ABAC`] question.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LxAbacDesc {
+    /// Its inode.
+    pub ino: u64,
+    /// Its generation (the label cache's key).
+    pub gen: u64,
+    /// Its mode (type bits: a folder's `x` goes with its read right).
+    pub mode: u32,
+    /// `r` 4, `w` 2, `x` 1; or [`LX_ABAC_DELETE`].
+    pub want: u32,
+    /// The path the caller named (for the audit record; may be 0).
+    pub path: u64,
+    /// Its length.
+    pub path_len: u64,
+}
+
+/// [`LxAbacDesc::want`]: the delete right (unlink, rmdir, moving out of the folder).
+pub const LX_ABAC_DELETE: u32 = 0x100;
+// wave9 G6b-3 end
+
 
 // wave9 G6b-2 begin: FUSE served by vfs-server
 /// Kernel call to vfs-server (Group 6b-2): an operation on a FUSE inode of vfs-server's
@@ -2746,3 +2809,31 @@ pub const fn notify_hash(ino: u64) -> usize {
 /// fanotify event's descriptor).
 pub const LX_FH_NONOTIFY: u32 = 1 << 31;
 // wave9 G6b-1 end
+
+// wave9 GM begin: tmpfs data in memory (`fs::tmem`)
+/// `SYS_LX_OBJ` op of the file service's host: `(sub-op, a, b)`, sub-ops `LX_TMEM_*`.
+pub const LX_FH_TMEM: u64 = 78;
+/// `(ino, *LxTmemAttr)`: an in-memory tmpfs file's size, blocks and data time; `-ENOENT`
+/// if `ino` is not one.
+pub const LX_TMEM_ATTR: u64 = 1;
+/// `(tmpfs id, bytes)`: the instance's `size=` (0: the default, half of the memory).
+pub const LX_TMEM_LIMIT: u64 = 2;
+/// `(tmpfs id, *[limit, used, files])`: an instance's use (bytes, bytes, count).
+pub const LX_TMEM_USAGE: u64 = 3;
+/// What [`LX_TMEM_ATTR`] answers.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct LxTmemAttr {
+    /// Size in bytes.
+    pub size: u64,
+    /// 512-byte blocks it holds.
+    pub blocks: u64,
+    /// The last data change (ns since the epoch; 0: none since its times were set).
+    pub mtime_ns: u64,
+    /// Its tmpfs id (0: a `/dev/shm` file).
+    pub inst: u64,
+}
+/// `LX_MEM` op: `(handle, size)`: frees an anonymous object's pages past `size` and zeroes
+/// the rest of the last one (tmpfs truncation).
+pub const LX_MEM_TRUNC: u64 = 10;
+// wave9 GM end
