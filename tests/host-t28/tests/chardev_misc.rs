@@ -81,8 +81,6 @@ fn trait_defaults() {
     assert!(d.fsync().is_none());
     assert!(d.as_bpf().is_none());
     assert!(d.as_perf().is_none());
-    assert!(d.as_fuse().is_none());
-    assert!(d.as_fanotify().is_none());
     assert!(d.as_mount_obj().is_none());
     assert!(d.as_io_uring().is_none());
     assert!(d.as_landlock().is_none());
@@ -94,7 +92,7 @@ fn trait_defaults() {
 fn open_switches_on_the_major() {
     // No driver for this major
     assert!(chardev::open(makedev(250, 0), 0).is_none());
-    // 1:11 kmsg and 10:229 fuse go to their modules (stubs with recognisable errnos);
+    // 1:11 kmsg goes to its module, 10:229 fuse to vfs-server (stubs with recognisable errnos);
     // 1:3 (/dev/null) and 10:200 are not char drivers here
     assert_eq!(chardev::open(makedev(1, 11), 0).unwrap().err(), Some(-1011));
     assert!(chardev::open(makedev(1, 3), 0).is_none());

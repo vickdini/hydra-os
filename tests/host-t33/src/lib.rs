@@ -298,19 +298,26 @@ pub mod pkg;
 pub mod lx {
     pub fn note(_kind: u64, _a: u64, _b: u64, _c: u64) {}
     // wave9 G6b-1 begin: *stub* the kernel's events for vfs-server's inotify/fanotify
-    // (`lx::notifyfwd`): vfs-server wants none here
+    // (`lx::notifyfwd`). wave9 G9-C: the kernel's own instances are gone, so the tests'
+    // switches (`INOTIFY_ON`, `FANOTIFY_ON`) now say what vfs-server wants, and the events
+    // are recorded here
     pub mod notifyfwd {
+        use crate::compat::linux::{FANOTIFY_ON, INOTIFY_ON, NOTIFIED};
         pub fn want_zfs() -> bool {
-            false
+            INOTIFY_ON.get() || FANOTIFY_ON.get()
         }
         pub fn want_close_write() -> bool {
-            false
+            INOTIFY_ON.get()
         }
         pub fn want_fan() -> bool {
-            false
+            FANOTIFY_ON.get()
         }
-        pub fn zfs_event(_ino: u64, _mask: u32, _cookie: u32, _name: &[u8]) {}
-        pub fn file_event(_ino: u64, _dir: u64, _path: &str, _mask: u64, _is_dir: bool) {}
+        pub fn zfs_event(ino: u64, mask: u32, _cookie: u32, name: &[u8]) {
+            NOTIFIED.with_borrow_mut(|v| v.push(("vfs-zfs", ino, mask as u64, alloc::string::String::from_utf8_lossy(name).into_owned())));
+        }
+        pub fn file_event(ino: u64, _dir: u64, path: &str, mask: u64, _is_dir: bool) {
+            let _ = NOTIFIED.try_with(|v| v.borrow_mut().push(("fanotify", ino, mask, path.into())));
+        }
         pub fn on_open(_ino: u64, _dir: u64, _path: &str, _is_dir: bool, _exec: bool) -> Result<(), i64> {
             Ok(())
         }
@@ -328,6 +335,10 @@ pub mod lx {
         /// *stub* wave7 G7-7: the `[prof] vfs:` line.
         pub fn summary() -> alloc::string::String {
             alloc::string::String::from("vfs: host")
+        }
+        /// *stub* wave9 G9-C: the prof line of calls by number.
+        pub fn kernel_by_nr(_n: usize) -> alloc::string::String {
+            alloc::string::String::new()
         }
     }
     /// *stub* wave7 G7-7: the `[prof] execve` line.

@@ -4,17 +4,11 @@
 #![allow(dead_code, missing_docs, clippy::all)]
 
 use alloc::vec::Vec;
-use core::sync::atomic::AtomicBool;
 
 use crate::fs::zfs::fsproto::{Attr, ReaddirEntry};
 
 const ENOTCONN: i64 = -107;
 
-pub static KERNEL_ONLY: AtomicBool = AtomicBool::new(false);
-
-pub fn forwarded() -> bool {
-    false
-}
 pub fn is_remote(ino: u64) -> bool {
     ino >> 62 == 1 && (ino >> 40) & 0x8000 != 0
 }

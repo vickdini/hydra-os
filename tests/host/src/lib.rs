@@ -782,6 +782,10 @@ pub mod lx {
     }
     /// *stub* wave7 G7-7: the `[prof] vfs:` and `[prof] execve` lines.
     pub mod fileh {
+        // wave9 G9-C: *stub* the prof line of calls by number
+        pub fn kernel_by_nr(_n: usize) -> alloc::string::String {
+            alloc::string::String::new()
+        }
         pub fn summary() -> alloc::string::String {
             alloc::string::String::new()
         }

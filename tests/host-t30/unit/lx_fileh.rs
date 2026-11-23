@@ -205,11 +205,12 @@ fn the_callers_state_becomes_flags() {
     let mut c = LxCall::EMPTY;
     assert_eq!(fs_flags_global(&mut c), 0);
     crate::fake::FS_FLAGS.store(31, Ordering::Release);
-    assert_eq!(fs_flags_global(&mut c), LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_INOTIFY | LX_FS_ABAC);
+    // (wave9 G9-C: fanotify/inotify bits never: the kernel has no instances of its own)
+    assert_eq!(fs_flags_global(&mut c), LX_FS_LANDLOCK | LX_FS_ABAC);
     // wave9 G6b-3: the domain's id travels with the call; ABAC only for a caller with a subject
     assert_eq!(c.ll_dom, 7);
     crate::fake::FS_FLAGS.store(31 | 32, Ordering::Release);
-    assert_eq!(fs_flags_global(&mut c), LX_FS_LANDLOCK | LX_FS_FANOTIFY | LX_FS_INOTIFY);
+    assert_eq!(fs_flags_global(&mut c), LX_FS_LANDLOCK);
     crate::fake::FS_FLAGS.store(0, Ordering::Release);
     assert_eq!(fs_flags_global(&mut c), 0);
     assert_eq!(c.ll_dom, 0);
@@ -657,21 +658,21 @@ fn calls_the_service_would_send_back_stay_in_the_kernel() {
         n2.fetch_add(1, Ordering::AcqRel);
         (0, 0)
     }));
-    // inotify watches: a stat goes to the service, an unlink stays in the kernel
+    // (wave9 G9-C: the kernel has no inotify instances of its own any more, so a caller's
+    // unlink is never kept for them: both go to the service)
     crate::fake::FS_FLAGS.store(4, Ordering::Release);
     crate::world::bkl_enter();
     assert_eq!(forward(&frame(4, [p(), o(), 0, 0, 0, 0])), Some(0));
-    assert_eq!(forward(&frame(87, [p(), 0, 0, 0, 0, 0])), None);
+    assert_eq!(forward(&frame(87, [p(), 0, 0, 0, 0, 0])), Some(0));
     crate::world::bkl_exit();
-    assert!(fast_entry(&frame(87, [p(), 0, 0, 0, 0, 0])).is_none());
-    assert_eq!(n.load(Ordering::Acquire), 1);
-    assert_eq!(KEPT_BY[5].load(Ordering::Relaxed), 2);
+    assert_eq!(n.load(Ordering::Acquire), 2);
+    assert_eq!(KEPT_BY[5].load(Ordering::Relaxed), 0);
     // FUSE mounts of the initial namespace: the service has the table now (wave7 G7-7)
     crate::fake::FS_FLAGS.store(16, Ordering::Release);
     crate::world::bkl_enter();
     assert_eq!(forward(&frame(4, [p(), o(), 0, 0, 0, 0])), Some(0));
-    assert_eq!(n.load(Ordering::Acquire), 2);
-    assert_eq!(n.load(Ordering::Acquire), 2);
+    assert_eq!(n.load(Ordering::Acquire), 3);
+    assert!(kernel_by_nr(8).starts_with("vfs to kernel by call"));
     assert_eq!(kernel_mask(332) & LX_FS_INOTIFY, 0);
     // wave9 G6b-3: vfs-server checks Landlock and ABAC for what it serves; the rest stays
     assert_eq!(kernel_mask(257) & (LX_FS_LANDLOCK | LX_FS_ABAC), 0);

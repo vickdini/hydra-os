@@ -10,33 +10,27 @@
 //! ([`crate::fs::zfs::ZfsServer`]) sends every operation on such an inode here, and path
 //! lookups cross between the pool and FUSE mounts at mount points ([`walk`]).
 //!
-//! Open files: the daemon's file handles are kept per inode (one for reading, one for
-//! writing, one for listing) while the inode is open, and released with its last close.
-//! Attributes are not cached: every `stat` asks the daemon.
+//! Since wave 9 (Group 6b-2) vfs-server is the FUSE client: `/dev/fuse` is its object, it
+//! speaks the protocol, keeps the node tables and the daemon's handles. Its files' inode
+//! numbers carry a connection of [`super::fuse_svc`] (`FUSE_SVC_CONN` and above), and every
+//! operation on one that reaches the kernel (handle I/O, calls vfs-server sends back) is
+//! forwarded there. Wave 9's closing (Group 9-C) deleted the kernel's own client (protocol
+//! engine, node tables, its `/dev/fuse`; the switch back `lx.fuse=kernel`/`lx.vfs=kernel`).
+//! Left here: the inode numbering, the initial namespace's FUSE mount list, the walk across
+//! FUSE mounts, `mount(2)` of a vfs-server connection, and the forwarders.
 
-use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
 use spin::Mutex;
 
 use crate::fs::zfs::fsproto::{Attr, ReaddirEntry, SetAttr};
-use crate::task::wait::{QueueRef, WaitQueue, WaitSet};
 
-const ENOENT: i64 = -2;
-const EIO: i64 = -5;
 const EBADF: i64 = -9;
-const EAGAIN: i64 = -11;
-const EACCES: i64 = -13;
 const EXDEV: i64 = -18;
-const ENODEV: i64 = -19;
 const ENOTDIR: i64 = -20;
 const EINVAL: i64 = -22;
-const ENOSYS: i64 = -38;
 const ELOOP: i64 = -40;
-const EOPNOTSUPP: i64 = -95;
 const ENOTCONN: i64 = -107;
 
 /// Marks a FUSE inode (bit 63 clear: `u64::MAX` and its neighbours are Hydra's own).
@@ -46,42 +40,6 @@ const LOCAL_MASK: u64 = (1 << CONN_SHIFT) - 1;
 
 /// `/dev/fuse`.
 pub const RDEV: u64 = super::chardev::makedev(10, 229);
-
-// Opcodes
-const LOOKUP: u32 = 1;
-const GETATTR: u32 = 3;
-const SETATTR: u32 = 4;
-const READLINK: u32 = 5;
-const SYMLINK: u32 = 6;
-const MKNOD: u32 = 8;
-const MKDIR: u32 = 9;
-const UNLINK: u32 = 10;
-const RMDIR: u32 = 11;
-const RENAME: u32 = 12;
-const LINK: u32 = 13;
-const OPEN: u32 = 14;
-const READ: u32 = 15;
-const WRITE: u32 = 16;
-const STATFS: u32 = 17;
-const RELEASE: u32 = 18;
-const SETXATTR: u32 = 21;
-const GETXATTR: u32 = 22;
-const LISTXATTR: u32 = 23;
-const REMOVEXATTR: u32 = 24;
-const FLUSH: u32 = 25;
-const INIT: u32 = 26;
-const OPENDIR: u32 = 27;
-const READDIR: u32 = 28;
-const RELEASEDIR: u32 = 29;
-const CREATE: u32 = 35;
-const INTERRUPT: u32 = 36;
-const EINTR: i64 = -4;
-
-/// Protocol version offered: 7.14 (libfuse offers splice from it; it splices only what fits
-/// its pipe, and `splice` copies through `read`/`write`).
-const MINOR: u32 = 14;
-const FUSE_ATOMIC_O_TRUNC: u32 = 1 << 3;
-const FUSE_BIG_WRITES: u32 = 1 << 5;
 
 // setattr `valid` bits
 const FATTR_MODE: u32 = 1;
@@ -94,10 +52,7 @@ const FATTR_MTIME: u32 = 32;
 const S_IFMT: u32 = 0o170000;
 const S_IFLNK: u32 = 0o120000;
 const S_IFDIR: u32 = 0o040000;
-const S_IFREG: u32 = 0o100000;
 
-const IN_HEADER: usize = 40;
-const OUT_HEADER: usize = 16;
 
 /// Whether `ino` is a file of a FUSE daemon.
 pub fn is_fuse(ino: u64) -> bool {
@@ -106,448 +61,6 @@ pub fn is_fuse(ino: u64) -> bool {
 
 fn split(ino: u64) -> (u16, u64) {
     (((ino & !FUSE_BIT) >> CONN_SHIFT) as u16, ino & LOCAL_MASK)
-}
-
-fn make(conn: u16, local: u64) -> u64 {
-    FUSE_BIT | ((conn as u64) << CONN_SHIFT) | local
-}
-
-/// A node the kernel knows: the daemon's node ID, its parent (local index) and the inode
-/// number the daemon reports.
-struct Node {
-    nodeid: u64,
-    parent: u64,
-    user_ino: u64,
-    /// The name it was last looked up by.
-    name: Vec<u8>,
-    /// Its attributes while the daemon says they stay valid (until the time, in ns).
-    cached: Option<(Attr, u64)>,
-}
-
-/// The daemon's file handles of one open inode.
-#[derive(Default)]
-struct Handles {
-    read: Option<u64>,
-    write: Option<u64>,
-    dir: Option<u64>,
-    refs: u32,
-}
-
-enum Slot {
-    Waiting,
-    Done(i32, Vec<u8>),
-    /// Nobody waits (release): the reply is dropped.
-    Discard,
-}
-
-struct State {
-    queue: VecDeque<Vec<u8>>,
-    slots: BTreeMap<u64, Slot>,
-    next_unique: u64,
-    init_unique: u64,
-    initialized: bool,
-    aborted: bool,
-    max_write: u32,
-    nodes: Vec<Node>,
-    by_nodeid: BTreeMap<u64, u64>,
-    handles: BTreeMap<u64, Handles>,
-}
-
-/// One connection: a daemon and the file system it serves.
-pub struct Conn {
-    /// Connection number (in the inode numbers of its files).
-    pub id: u16,
-    st: Mutex<State>,
-    /// The daemon's readers wait here.
-    daemon_wq: Arc<WaitQueue>,
-    /// Callers waiting for replies (and for INIT) wait here.
-    reply_wq: Arc<WaitQueue>,
-    mounted: AtomicBool,
-    owner: Mutex<(u32, u32, bool)>,
-}
-
-static NEXT_CONN: AtomicU16 = AtomicU16::new(1);
-static CONNS: Mutex<BTreeMap<u16, Arc<Conn>>> = Mutex::new(BTreeMap::new());
-
-fn conn_of(ino: u64) -> Result<Arc<Conn>, i64> {
-    CONNS.lock().get(&split(ino).0).cloned().ok_or(ENOTCONN)
-}
-
-impl Conn {
-    fn new() -> Arc<Self> {
-        let mut all = CONNS.lock();
-        // A number no live connection has: the numbers wrap after 16384 opens, and an old
-        // connection's inodes must never lead to a new one's nodes
-        let id = loop {
-            let id = NEXT_CONN.fetch_add(1, Ordering::Relaxed) & 0x3FFF;
-            if !all.contains_key(&id) {
-                break id;
-            }
-        };
-        let c = Arc::new(Conn {
-            id,
-            st: Mutex::new(State {
-                queue: VecDeque::new(),
-                slots: BTreeMap::new(),
-                next_unique: 2,
-                init_unique: 0,
-                initialized: false,
-                aborted: false,
-                max_write: 4096,
-                // Index 0 unused, 1 the root (node ID 1)
-                nodes: alloc::vec![
-                    Node { nodeid: 0, parent: 0, user_ino: 0, name: Vec::new(), cached: None },
-                    Node { nodeid: 1, parent: 1, user_ino: 1, name: Vec::new(), cached: None },
-                ],
-                by_nodeid: BTreeMap::from([(1, 1)]),
-                handles: BTreeMap::new(),
-            }),
-            daemon_wq: WaitQueue::new_shared(),
-            reply_wq: WaitQueue::new_shared(),
-            mounted: AtomicBool::new(false),
-            owner: Mutex::new((0, 0, false)),
-        });
-        all.insert(id, c.clone());
-        c
-    }
-
-    /// The connection's root directory.
-    pub fn root(&self) -> u64 {
-        make(self.id, 1)
-    }
-
-    /// Queues a request; returns its unique ID.
-    fn push(&self, st: &mut State, opcode: u32, nodeid: u64, args: &[&[u8]], slot: Slot) -> u64 {
-        let unique = st.next_unique;
-        st.next_unique += 2;
-        let len = IN_HEADER + args.iter().map(|a| a.len()).sum::<usize>();
-        let (uid, gid) = crate::task::with_current_task_mut(|t| (t.euid, t.egid)).unwrap_or((0, 0));
-        let pid = super::proc::current_ids().1 as u32;
-        let mut m = Vec::with_capacity(len);
-        m.extend_from_slice(&(len as u32).to_le_bytes());
-        m.extend_from_slice(&opcode.to_le_bytes());
-        m.extend_from_slice(&unique.to_le_bytes());
-        m.extend_from_slice(&nodeid.to_le_bytes());
-        m.extend_from_slice(&uid.to_le_bytes());
-        m.extend_from_slice(&gid.to_le_bytes());
-        m.extend_from_slice(&pid.to_le_bytes());
-        m.extend_from_slice(&[0u8; 4]);
-        for a in args {
-            m.extend_from_slice(a);
-        }
-        st.queue.push_back(m);
-        st.slots.insert(unique, slot);
-        self.daemon_wq.wake_all();
-        unique
-    }
-
-    /// Sends a request and waits for the reply: its data, or the daemon's errno.
-    fn call(&self, opcode: u32, nodeid: u64, args: &[&[u8]]) -> Result<Vec<u8>, i64> {
-        let mut waits = WaitSet::new();
-        waits.add(QueueRef::Shared(self.reply_wq.clone()));
-        // Requests wait for the daemon's INIT reply
-        let unique = loop {
-            waits.register();
-            {
-                let mut st = self.st.lock();
-                if st.aborted {
-                    return Err(ENOTCONN);
-                }
-                if st.initialized {
-                    break self.push(&mut st, opcode, nodeid, args, Slot::Waiting);
-                }
-            }
-            waits.wait(None);
-        };
-        let mut interrupted = false;
-        loop {
-            waits.register();
-            // Read before taking the connection's lock (they take the process table's)
-            let killed = super::proc::sigkill_pending();
-            let signalled = !interrupted && super::proc::signal_pending();
-            {
-                let mut st = self.st.lock();
-                if matches!(st.slots.get(&unique), Some(Slot::Done(..))) {
-                    let Some(Slot::Done(err, data)) = st.slots.remove(&unique) else { unreachable!() };
-                    return if err < 0 { Err(err as i64) } else { Ok(data) };
-                }
-                if st.aborted {
-                    st.slots.remove(&unique);
-                    return Err(ENOTCONN);
-                }
-                // A signal: the daemon is told (it may answer EINTR); SIGKILL does not wait
-                if killed {
-                    st.slots.insert(unique, Slot::Discard);
-                    st.queue.retain(|m| u64::from_le_bytes(m[8..16].try_into().unwrap()) != unique);
-                    return Err(EINTR);
-                }
-                if signalled {
-                    interrupted = true;
-                    // Still queued: taken back; else the daemon gets INTERRUPT
-                    let before = st.queue.len();
-                    st.queue.retain(|m| u64::from_le_bytes(m[8..16].try_into().unwrap()) != unique);
-                    if st.queue.len() != before {
-                        st.slots.remove(&unique);
-                        return Err(EINTR);
-                    }
-                    self.push(&mut st, INTERRUPT, 0, &[&unique.to_le_bytes()], Slot::Discard);
-                }
-            }
-            waits.wait(None);
-        }
-    }
-
-    /// Sends a request without waiting for its reply.
-    fn send(&self, opcode: u32, nodeid: u64, args: &[&[u8]]) {
-        let mut st = self.st.lock();
-        if !st.aborted && st.initialized {
-            self.push(&mut st, opcode, nodeid, args, Slot::Discard);
-        }
-    }
-
-    /// Ends the connection: requests fail with `ENOTCONN`, the daemon reads `ENODEV`.
-    pub fn abort(&self) {
-        self.st.lock().aborted = true;
-        self.daemon_wq.wake_all();
-        self.reply_wq.wake_all();
-    }
-
-    /// Mounted: the daemon gets INIT.
-    pub fn start(&self, uid: u32, gid: u32, allow_other: bool) {
-        *self.owner.lock() = (uid, gid, allow_other);
-        self.mounted.store(true, Ordering::Release);
-        let mut init = Vec::new();
-        for v in [7u32, MINOR, 128 * 1024, FUSE_ATOMIC_O_TRUNC | FUSE_BIG_WRITES] {
-            init.extend_from_slice(&v.to_le_bytes());
-        }
-        let mut st = self.st.lock();
-        let u = self.push(&mut st, INIT, 0, &[&init], Slot::Discard);
-        st.init_unique = u;
-    }
-
-    /// The daemon's node ID of local node `local`.
-    fn nodeid(&self, local: u64) -> Result<u64, i64> {
-        self.st.lock().nodes.get(local as usize).map(|n| n.nodeid).filter(|&n| n != 0).ok_or(ENOENT)
-    }
-
-    /// The local node of the daemon's `nodeid` (a new one if unknown), under `parent`.
-    fn intern(&self, nodeid: u64, parent: u64, user_ino: u64, name: &[u8]) -> u64 {
-        let mut st = self.st.lock();
-        if let Some(&l) = st.by_nodeid.get(&nodeid) {
-            let n = &mut st.nodes[l as usize];
-            if l != 1 {
-                n.parent = parent;
-                n.name = name.to_vec();
-            }
-            n.user_ino = user_ino;
-            return l;
-        }
-        let l = st.nodes.len() as u64;
-        st.nodes.push(Node { nodeid, parent, user_ino, name: name.to_vec(), cached: None });
-        st.by_nodeid.insert(nodeid, l);
-        l
-    }
-
-    /// Keeps `attr` of local node `local` for `secs` s and `nsecs` ns (the daemon's
-    /// `attr_valid`; 0: not at all).
-    fn cache(&self, local: u64, attr: Attr, secs: u64, nsecs: u32) {
-        let mut st = self.st.lock();
-        let Some(n) = st.nodes.get_mut(local as usize) else { return };
-        let valid = secs.min(3600) * 1_000_000_000 + nsecs as u64;
-        n.cached = (valid > 0).then(|| (attr, crate::arch::pit::now_ns() + valid));
-    }
-
-    /// The kept attributes of local node `local`, if still valid.
-    fn cached(&self, local: u64) -> Option<Attr> {
-        let st = self.st.lock();
-        let (a, until) = st.nodes.get(local as usize)?.cached?;
-        (crate::arch::pit::now_ns() < until).then_some(a)
-    }
-
-    /// Forgets the kept attributes of local node `local`, or of every node.
-    fn uncache(&self, local: Option<u64>) {
-        let mut st = self.st.lock();
-        match local {
-            Some(l) => {
-                if let Some(n) = st.nodes.get_mut(l as usize) {
-                    n.cached = None;
-                }
-            }
-            None => st.nodes.iter_mut().for_each(|n| n.cached = None),
-        }
-    }
-
-    /// Whether the caller may use the file system: its owner, or anyone with `allow_other`.
-    fn permitted(&self) -> Result<(), i64> {
-        let (uid, _, other) = *self.owner.lock();
-        let euid = crate::task::with_current_task_mut(|t| t.euid).unwrap_or(0);
-        if other || euid == uid { Ok(()) } else { Err(EACCES) }
-    }
-}
-
-// ----------------------------------------------------------------------
-// The device
-// ----------------------------------------------------------------------
-
-/// An open `/dev/fuse`: the daemon's end of a connection.
-pub struct FuseDev {
-    /// The connection.
-    pub conn: Arc<Conn>,
-    nonblock: AtomicBool,
-}
-
-impl Drop for FuseDev {
-    fn drop(&mut self) {
-        // The daemon is gone: its file system answers ENOTCONN, and the connection leaves
-        // the table (its number may be given again; its inodes find nothing)
-        self.conn.abort();
-        let mut all = CONNS.lock();
-        if all.get(&self.conn.id).is_some_and(|c| Arc::ptr_eq(c, &self.conn)) {
-            all.remove(&self.conn.id);
-        }
-    }
-}
-
-/// `open("/dev/fuse")`.
-pub fn open(flags: u32) -> Result<Arc<dyn super::chardev::CharDevice>, i64> {
-    Ok(Arc::new(FuseDev { conn: Conn::new(), nonblock: AtomicBool::new(flags & 0o4000 != 0) }))
-}
-
-impl FuseDev {
-    fn read_request(&self, buf: &mut [u8]) -> i64 {
-        let c = &self.conn;
-        let mut waits = WaitSet::new();
-        waits.add(QueueRef::Shared(c.daemon_wq.clone()));
-        loop {
-            waits.register();
-            {
-                let mut st = c.st.lock();
-                if st.aborted {
-                    return ENODEV;
-                }
-                if let Some(m) = st.queue.front() {
-                    if m.len() > buf.len() {
-                        return EINVAL;
-                    }
-                    let m = st.queue.pop_front().unwrap();
-                    buf[..m.len()].copy_from_slice(&m);
-                    return m.len() as i64;
-                }
-            }
-            if self.nonblock.load(Ordering::Relaxed) {
-                return EAGAIN;
-            }
-            if super::proc::signal_pending() {
-                return super::proc::ERESTARTSYS;
-            }
-            waits.wait(None);
-        }
-    }
-
-    fn write_reply(&self, data: &[u8]) -> i64 {
-        if data.len() < OUT_HEADER {
-            return EINVAL;
-        }
-        let len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-        let err = i32::from_le_bytes(data[4..8].try_into().unwrap());
-        let unique = u64::from_le_bytes(data[8..16].try_into().unwrap());
-        if len != data.len() {
-            return EINVAL;
-        }
-        // A notification (its code in the error field): cache invalidation
-        if unique == 0 {
-            // FUSE_NOTIFY_INVAL_INODE: that node's attributes; others: all (conservative)
-            let node = (err == 2).then(|| u64_at(&data[OUT_HEADER..], 0));
-            let c = &self.conn;
-            let local = node.and_then(|n| c.st.lock().by_nodeid.get(&n).copied());
-            match (node, local) {
-                (Some(_), Some(l)) => c.uncache(Some(l)),
-                (Some(_), None) => {}
-                _ => c.uncache(None),
-            }
-            return len as i64;
-        }
-        if err > 0 || err < -4095 {
-            return EINVAL;
-        }
-        let c = &self.conn;
-        let mut st = c.st.lock();
-        if st.aborted {
-            return ENODEV;
-        }
-        let body = data[OUT_HEADER..].to_vec();
-        if unique == st.init_unique && !st.initialized {
-            st.slots.remove(&unique);
-            if err != 0 || body.len() < 8 {
-                drop(st);
-                c.abort();
-                return len as i64;
-            }
-            let major = u32::from_le_bytes(body[0..4].try_into().unwrap());
-            if major != 7 {
-                drop(st);
-                c.abort();
-                return len as i64;
-            }
-            if body.len() >= 24 {
-                let mw = u32::from_le_bytes(body[20..24].try_into().unwrap());
-                st.max_write = mw.clamp(4096, 128 * 1024);
-            }
-            st.initialized = true;
-            drop(st);
-            c.reply_wq.wake_all();
-            return len as i64;
-        }
-        match st.slots.get(&unique) {
-            Some(Slot::Waiting) => {
-                st.slots.insert(unique, Slot::Done(err, body));
-                drop(st);
-                c.reply_wq.wake_all();
-            }
-            Some(Slot::Discard) => {
-                st.slots.remove(&unique);
-            }
-            _ => return ENOENT,
-        }
-        len as i64
-    }
-}
-
-impl super::chardev::CharDevice for FuseDev {
-    fn read(&self, buf: &mut [u8]) -> i64 {
-        self.read_request(buf)
-    }
-    fn read_unlocked(&self, buf: &mut [u8]) -> Option<i64> {
-        Some(self.read_request(buf))
-    }
-    fn write(&self, data: &[u8]) -> i64 {
-        self.write_reply(data)
-    }
-    fn poll_events(&self) -> u32 {
-        let st = self.conn.st.lock();
-        if st.aborted {
-            return 0x4 | 0x8; // POLLOUT | POLLERR
-        }
-        if st.queue.is_empty() { 0x4 } else { 0x1 | 0x4 }
-    }
-    fn add_wait_queues(&self, waits: &mut WaitSet) {
-        waits.add(QueueRef::Shared(self.conn.daemon_wq.clone()));
-    }
-    fn rdev(&self) -> u64 {
-        RDEV
-    }
-    fn path(&self) -> String {
-        String::from("/dev/fuse")
-    }
-    fn set_nonblock(&self, on: bool) {
-        self.nonblock.store(on, Ordering::Relaxed);
-    }
-    fn nonblock(&self) -> bool {
-        self.nonblock.load(Ordering::Relaxed)
-    }
-    fn as_fuse(&self) -> Option<Arc<Conn>> {
-        Some(self.conn.clone())
-    }
 }
 
 // ----------------------------------------------------------------------
@@ -559,8 +72,6 @@ impl super::chardev::CharDevice for FuseDev {
 pub struct Ns0Mount {
     /// The directory mounted on.
     pub mountpoint: u64,
-    /// The connection (`None`: one of vfs-server's, wave9 G6b-2).
-    pub conn: Option<Arc<Conn>>,
     /// The mount's root inode.
     pub root: u64,
     /// Mount point path.
@@ -611,13 +122,10 @@ pub fn ns0_add(m: Ns0Mount) {
 pub fn ns0_remove(root: u64) -> bool {
     let mut l = NS0.lock();
     let Some(i) = l.iter().position(|m| m.root == root) else { return false };
-    let m = l.remove(i);
+    l.remove(i);
     drop(l);
     super::mount::bump(0); // wave7 G7-7: vfs-server's copy follows
-    match &m.conn {
-        Some(c) => c.abort(),
-        None => super::fuse_svc::abort(split(root).0), // wave9 G6b-2
-    }
+    super::fuse_svc::abort(split(root).0); // wave9 G6b-2
     true
 }
 
@@ -645,14 +153,7 @@ pub fn name_of(ino: u64) -> Option<(u64, Vec<u8>)> {
     if super::fuse_svc::is_remote(ino) {
         return super::fuse_svc::name_of(ino); // wave9 G6b-2
     }
-    let (c, l) = split(ino);
-    if l == 1 {
-        return None;
-    }
-    let conn = CONNS.lock().get(&c).cloned()?;
-    let st = conn.st.lock();
-    let n = st.nodes.get(l as usize)?;
-    Some((make(c, n.parent), n.name.clone()))
+    None
 }
 
 /// The mount point of the initial namespace's FUSE mount whose root is `ino`.
@@ -670,8 +171,7 @@ pub fn user_ino(ino: u64) -> u64 {
     if super::fuse_svc::is_remote(ino) {
         return super::fuse_svc::user_ino(ino); // wave9 G6b-2
     }
-    let (c, l) = split(ino);
-    CONNS.lock().get(&c).and_then(|c| c.st.lock().nodes.get(l as usize).map(|n| n.user_ino)).unwrap_or(l)
+    split(ino).1
 }
 
 // ----------------------------------------------------------------------
@@ -768,13 +268,14 @@ pub fn walk(cur: u64, mnt: usize, rest: &[u8], follow: bool, mounts: &[(u64, u64
 }
 
 fn parent(ino: u64) -> Result<u64, i64> {
-    if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::parent(ino); // wave9 G6b-2
-    }
-    let (c, l) = split(ino);
-    let conn = conn_of(ino)?;
-    let p = conn.st.lock().nodes.get(l as usize).map(|n| n.parent).ok_or(ENOENT)?;
-    Ok(make(c, p))
+    remote(ino)?;
+    super::fuse_svc::parent(ino) // wave9 G6b-2
+}
+
+/// `ENOTCONN` for a FUSE inode that is not of a vfs-server connection (wave9 G9-C: the
+/// kernel's own client is gone, so no such inode is handed out any more).
+fn remote(ino: u64) -> Result<(), i64> {
+    if super::fuse_svc::is_remote(ino) { Ok(()) } else { Err(ENOTCONN) }
 }
 
 // ----------------------------------------------------------------------
@@ -807,61 +308,10 @@ pub(super) fn attr_of(ino: u64, b: &[u8]) -> Attr {
     }
 }
 
-fn cstr(name: &[u8]) -> Vec<u8> {
-    let mut v = name.to_vec();
-    v.push(0);
-    v
-}
-
-fn le(vals: &[u64], widths: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for (v, w) in vals.iter().zip(widths) {
-        if *w == 4 {
-            out.extend_from_slice(&(*v as u32).to_le_bytes());
-        } else {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-    }
-    out
-}
-
-/// A connection, the caller allowed on it, and the node ID of `ino`.
-fn target(ino: u64) -> Result<(Arc<Conn>, u64), i64> {
-    let c = conn_of(ino)?;
-    c.permitted()?;
-    let n = c.nodeid(split(ino).1)?;
-    Ok((c, n))
-}
-
-/// A `fuse_entry_out` reply under directory `dir`: the new inode and its attributes.
-fn entry(c: &Conn, dir: u64, name: &[u8], r: &[u8]) -> Result<(u64, Attr), i64> {
-    let nodeid = u64_at(r, 0);
-    if nodeid == 0 || r.len() < 40 + 88 {
-        return Err(ENOENT);
-    }
-    let a = &r[40..];
-    let l = c.intern(nodeid, split(dir).1, u64_at(a, 0), name);
-    let ino = make(c.id, l);
-    let attr = attr_of(ino, a);
-    c.cache(l, attr, u64_at(r, 24), u32_at(r, 36));
-    Ok((ino, attr))
-}
-
 /// Looks `name` up in FUSE directory `dir`: the inode and its attributes.
 pub fn lookup_attr(dir: u64, name: &[u8]) -> Result<(u64, Attr), i64> {
-    if super::fuse_svc::is_remote(dir) {
-        return super::fuse_svc::lookup_attr(dir, name); // wave9 G6b-2
-    }
-    if name == b".." {
-        let p = parent(dir)?;
-        return Ok((p, getattr(p)?));
-    }
-    if name == b"." || name.is_empty() {
-        return Ok((dir, getattr(dir)?));
-    }
-    let (c, n) = target(dir)?;
-    let r = c.call(LOOKUP, n, &[&cstr(name)])?;
-    entry(&c, dir, name, &r)
+    remote(dir)?;
+    super::fuse_svc::lookup_attr(dir, name) // wave9 G6b-2
 }
 
 /// Looks `name` up in FUSE directory `dir`.
@@ -871,41 +321,14 @@ pub fn lookup(dir: u64, name: &[u8]) -> Result<u64, i64> {
 
 /// Attributes of FUSE inode `ino`.
 pub fn getattr(ino: u64) -> Result<Attr, i64> {
-    if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::getattr(ino); // wave9 G6b-2
-    }
-    let (c, n) = target(ino)?;
-    let l = split(ino).1;
-    if let Some(a) = c.cached(l) {
-        return Ok(a);
-    }
-    let r = c.call(GETATTR, n, &[&[0u8; 16]])?;
-    if r.len() < 16 + 88 {
-        return Err(EIO);
-    }
-    if let Some(node) = c.st.lock().nodes.get_mut(l as usize) {
-        node.user_ino = u64_at(&r, 16);
-    }
-    let attr = attr_of(ino, &r[16..]);
-    c.cache(l, attr, u64_at(&r, 0), u32_at(&r, 8));
-    Ok(attr)
+    remote(ino)?;
+    super::fuse_svc::getattr(ino) // wave9 G6b-2
 }
 
 /// Changes attributes of FUSE inode `ino`; returns the new ones.
 pub fn setattr(ino: u64, set: SetAttr) -> Result<Attr, i64> {
-    if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::setattr(ino, &setattr_in(set)); // wave9 G6b-2
-    }
-    let (c, n) = target(ino)?;
-    let a = setattr_in(set);
-    c.uncache(Some(split(ino).1));
-    let r = c.call(SETATTR, n, &[&a])?;
-    if r.len() < 16 + 88 {
-        return getattr(ino);
-    }
-    let attr = attr_of(ino, &r[16..]);
-    c.cache(split(ino).1, attr, u64_at(&r, 0), u32_at(&r, 8));
-    Ok(attr)
+    remote(ino)?;
+    super::fuse_svc::setattr(ino, &setattr_in(set)) // wave9 G6b-2
 }
 
 /// `struct fuse_setattr_in` for `set`.
@@ -957,124 +380,26 @@ fn setattr_in(set: SetAttr) -> Vec<u8> {
 
 /// Target of FUSE symbolic link `ino`.
 pub fn readlink(ino: u64) -> Result<Vec<u8>, i64> {
-    if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::readlink(ino); // wave9 G6b-2
-    }
-    // Not a link: EINVAL without asking the daemon (realpath asks of every component)
-    if getattr(ino)?.mode & S_IFMT != S_IFLNK {
-        return Err(EINVAL);
-    }
-    let (c, n) = target(ino)?;
-    c.call(READLINK, n, &[])
-}
-
-/// Kind of handle an operation needs.
-#[derive(Clone, Copy, PartialEq)]
-enum Want {
-    Read,
-    Write,
-    Dir,
-}
-
-/// The daemon's handle of `ino` for `want`, opening one if there is none.
-fn handle(c: &Conn, ino: u64, n: u64, want: Want) -> Result<u64, i64> {
-    let l = split(ino).1;
-    {
-        let st = c.st.lock();
-        if let Some(h) = st.handles.get(&l) {
-            let got = match want {
-                Want::Read => h.read,
-                Want::Write => h.write,
-                Want::Dir => h.dir,
-            };
-            if let Some(fh) = got {
-                return Ok(fh);
-            }
-        }
-    }
-    let (op, flags): (u32, &[u32]) = match want {
-        Want::Read => (OPEN, &[0]),
-        // O_RDWR, else O_WRONLY
-        Want::Write => (OPEN, &[2, 1]),
-        Want::Dir => (OPENDIR, &[0o200000]),
-    };
-    let mut last = EACCES;
-    for &f in flags {
-        match c.call(op, n, &[&le(&[f as u64, 0], &[4, 4])]) {
-            Ok(r) => {
-                let fh = u64_at(&r, 0);
-                let mut st = c.st.lock();
-                let h = st.handles.entry(l).or_default();
-                match want {
-                    Want::Read => h.read = Some(fh),
-                    Want::Write => h.write = Some(fh),
-                    Want::Dir => h.dir = Some(fh),
-                }
-                return Ok(fh);
-            }
-            Err(e) => last = e,
-        }
-    }
-    Err(last)
+    remote(ino)?;
+    super::fuse_svc::readlink(ino) // wave9 G6b-2
 }
 
 /// Reads `ino` at `offset` into `buf`.
 pub fn read(ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
-    if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::read(ino, offset, buf); // wave9 G6b-2
-    }
-    let (c, n) = target(ino)?;
-    let fh = handle(&c, ino, n, Want::Read)?;
-    let chunk = 128 * 1024;
-    let mut done = 0;
-    while done < buf.len() {
-        let want = (buf.len() - done).min(chunk);
-        let a = le(&[fh, offset + done as u64, want as u64, 0, 0, 0, 0], &[8, 8, 4, 4, 8, 4, 4]);
-        let r = c.call(READ, n, &[&a])?;
-        let got = r.len().min(want);
-        buf[done..done + got].copy_from_slice(&r[..got]);
-        done += got;
-        if got < want {
-            break;
-        }
-    }
-    Ok(done)
+    remote(ino)?;
+    super::fuse_svc::read(ino, offset, buf) // wave9 G6b-2
 }
 
 /// Writes `data` to `ino` at `offset`.
 pub fn write(ino: u64, offset: u64, data: &[u8]) -> Result<usize, i64> {
-    if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::write(ino, offset, data); // wave9 G6b-2
-    }
-    let (c, n) = target(ino)?;
-    // Size and times change (forgotten again when done: a stat meanwhile kept the old)
-    let _fresh = Fresh(&c, Some(split(ino).1));
-    let fh = handle(&c, ino, n, Want::Write)?;
-    let max = c.st.lock().max_write as usize;
-    let mut done = 0;
-    while done < data.len() {
-        let part = &data[done..(done + max).min(data.len())];
-        let a = le(&[fh, offset + done as u64, part.len() as u64, 0, 0, 0, 0], &[8, 8, 4, 4, 8, 4, 4]);
-        let r = c.call(WRITE, n, &[&a, part])?;
-        let w = (u32_at(&r, 0) as usize).min(part.len());
-        done += w;
-        if w < part.len() {
-            break;
-        }
-    }
-    Ok(done)
+    remote(ino)?;
+    super::fuse_svc::write(ino, offset, data) // wave9 G6b-2
 }
 
 /// Up to `max` entries of directory `dir` from `cookie` (the daemon's offset) on.
 pub fn readdir(dir: u64, cookie: u64, max: usize) -> Result<Vec<ReaddirEntry>, i64> {
-    if super::fuse_svc::is_remote(dir) {
-        return super::fuse_svc::readdir(dir, cookie, max); // wave9 G6b-2
-    }
-    let (c, n) = target(dir)?;
-    let fh = handle(&c, dir, n, Want::Dir)?;
-    let a = le(&[fh, cookie, 16384, 0, 0, 0, 0], &[8, 8, 4, 4, 8, 4, 4]);
-    let r = c.call(READDIR, n, &[&a])?;
-    Ok(dirents(&r, max))
+    remote(dir)?;
+    super::fuse_svc::readdir(dir, cookie, max) // wave9 G6b-2
 }
 
 /// The daemon's `fuse_dirent` records `r` as entries (at most `max`).
@@ -1098,60 +423,26 @@ pub(super) fn dirents(r: &[u8], max: usize) -> Vec<ReaddirEntry> {
 /// A file created in `dir`: the daemon's `create` (keeping the handle for writing), or
 /// `mknod` when it has none.
 pub fn create(dir: u64, name: &[u8], perm: u32) -> Result<u64, i64> {
-    if super::fuse_svc::is_remote(dir) {
-        return super::fuse_svc::create(dir, name, perm); // wave9 G6b-2
-    }
-    let (c, n) = target(dir)?;
-    let _fresh = Fresh(&c, None);
-    // O_CREAT | O_EXCL | O_RDWR
-    let a = le(&[0o302, (S_IFREG | (perm & 0o7777)) as u64, 0, 0], &[4, 4, 4, 4]);
-    match c.call(CREATE, n, &[&a, &cstr(name)]) {
-        Ok(r) => {
-            let (ino, _) = entry(&c, dir, name, &r)?;
-            if r.len() >= 128 + 16 {
-                let fh = u64_at(&r, 128);
-                c.st.lock().handles.entry(split(ino).1).or_default().write = Some(fh);
-            }
-            Ok(ino)
-        }
-        Err(ENOSYS) => mknod(dir, name, S_IFREG | (perm & 0o7777), 0),
-        Err(e) => Err(e),
-    }
+    remote(dir)?;
+    super::fuse_svc::create(dir, name, perm) // wave9 G6b-2
 }
 
 /// A node made in `dir`.
 pub fn mknod(dir: u64, name: &[u8], mode: u32, rdev: u64) -> Result<u64, i64> {
-    if super::fuse_svc::is_remote(dir) {
-        return super::fuse_svc::mknod(dir, name, mode, rdev); // wave9 G6b-2
-    }
-    let (c, n) = target(dir)?;
-    let _fresh = Fresh(&c, None);
-    let a = le(&[mode as u64, rdev & 0xFFFF_FFFF, 0, 0], &[4, 4, 4, 4]);
-    let r = c.call(MKNOD, n, &[&a, &cstr(name)])?;
-    entry(&c, dir, name, &r).map(|e| e.0)
+    remote(dir)?;
+    super::fuse_svc::mknod(dir, name, mode, rdev) // wave9 G6b-2
 }
 
 /// A directory made in `dir`.
 pub fn mkdir(dir: u64, name: &[u8], perm: u32) -> Result<u64, i64> {
-    if super::fuse_svc::is_remote(dir) {
-        return super::fuse_svc::mkdir(dir, name, perm); // wave9 G6b-2
-    }
-    let (c, n) = target(dir)?;
-    let _fresh = Fresh(&c, None);
-    let a = le(&[(perm & 0o7777) as u64, 0], &[4, 4]);
-    let r = c.call(MKDIR, n, &[&a, &cstr(name)])?;
-    entry(&c, dir, name, &r).map(|e| e.0)
+    remote(dir)?;
+    super::fuse_svc::mkdir(dir, name, perm) // wave9 G6b-2
 }
 
 /// A symbolic link made in `dir`.
 pub fn symlink(dir: u64, name: &[u8], to: &[u8]) -> Result<u64, i64> {
-    if super::fuse_svc::is_remote(dir) {
-        return super::fuse_svc::symlink(dir, name, to); // wave9 G6b-2
-    }
-    let (c, n) = target(dir)?;
-    let _fresh = Fresh(&c, None);
-    let r = c.call(SYMLINK, n, &[&cstr(name), &cstr(to)])?;
-    entry(&c, dir, name, &r).map(|e| e.0)
+    remote(dir)?;
+    super::fuse_svc::symlink(dir, name, to) // wave9 G6b-2
 }
 
 /// A hard link to `ino` made in `dir` (same file system only).
@@ -1159,34 +450,19 @@ pub fn link(ino: u64, dir: u64, name: &[u8]) -> Result<(), i64> {
     if super::fuse_svc::is_remote(ino) && super::fuse_svc::is_remote(dir) {
         return super::fuse_svc::link(ino, dir, name); // wave9 G6b-2
     }
-    if !is_fuse(ino) || !is_fuse(dir) || split(ino).0 != split(dir).0 {
-        return Err(EXDEV);
-    }
-    let (c, n) = target(dir)?;
-    let _fresh = Fresh(&c, None);
-    let old = c.nodeid(split(ino).1)?;
-    let r = c.call(LINK, n, &[&old.to_le_bytes(), &cstr(name)])?;
-    entry(&c, dir, name, &r).map(|_| ())
+    Err(EXDEV)
 }
 
 /// Removes `name` from `dir`.
 pub fn unlink(dir: u64, name: &[u8]) -> Result<(), i64> {
-    if super::fuse_svc::is_remote(dir) {
-        return super::fuse_svc::unlink(dir, name); // wave9 G6b-2
-    }
-    let (c, n) = target(dir)?;
-    let _fresh = Fresh(&c, None);
-    c.call(UNLINK, n, &[&cstr(name)]).map(|_| ())
+    remote(dir)?;
+    super::fuse_svc::unlink(dir, name) // wave9 G6b-2
 }
 
 /// Removes directory `name` from `dir`.
 pub fn rmdir(dir: u64, name: &[u8]) -> Result<(), i64> {
-    if super::fuse_svc::is_remote(dir) {
-        return super::fuse_svc::rmdir(dir, name); // wave9 G6b-2
-    }
-    let (c, n) = target(dir)?;
-    let _fresh = Fresh(&c, None);
-    c.call(RMDIR, n, &[&cstr(name)]).map(|_| ())
+    remote(dir)?;
+    super::fuse_svc::rmdir(dir, name) // wave9 G6b-2
 }
 
 /// Renames within one FUSE file system.
@@ -1194,78 +470,38 @@ pub fn rename(sdir: u64, sname: &[u8], ddir: u64, dname: &[u8]) -> Result<(), i6
     if super::fuse_svc::is_remote(sdir) && super::fuse_svc::is_remote(ddir) {
         return super::fuse_svc::rename(sdir, sname, ddir, dname); // wave9 G6b-2
     }
-    if !is_fuse(sdir) || !is_fuse(ddir) || split(sdir).0 != split(ddir).0 {
-        return Err(EXDEV);
-    }
-    let (c, n) = target(sdir)?;
-    let _fresh = Fresh(&c, None);
-    let nd = c.nodeid(split(ddir).1)?;
-    c.call(RENAME, n, &[&nd.to_le_bytes(), &cstr(sname), &cstr(dname)]).map(|_| ())
-}
-
-/// Forgets kept attributes when dropped (after an operation that changes them): of one
-/// node, or of every node (names created, removed or moved change directories and links).
-struct Fresh<'a>(&'a Conn, Option<u64>);
-
-impl Drop for Fresh<'_> {
-    fn drop(&mut self) {
-        self.0.uncache(self.1);
-    }
-}
-
-fn xattr_err(e: i64) -> i64 {
-    if e == ENOSYS { EOPNOTSUPP } else { e }
+    Err(EXDEV)
 }
 
 /// Extended attribute `name` of `ino`.
 pub fn getxattr(ino: u64, name: &[u8]) -> Result<Vec<u8>, i64> {
-    if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::getxattr(ino, name); // wave9 G6b-2
-    }
-    let (c, n) = target(ino)?;
-    c.call(GETXATTR, n, &[&le(&[65536, 0], &[4, 4]), &cstr(name)]).map_err(xattr_err)
+    remote(ino)?;
+    super::fuse_svc::getxattr(ino, name) // wave9 G6b-2
 }
 
 /// Names of `ino`'s extended attributes.
 pub fn listxattr(ino: u64) -> Result<Vec<u8>, i64> {
-    if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::listxattr(ino); // wave9 G6b-2
-    }
-    let (c, n) = target(ino)?;
-    c.call(LISTXATTR, n, &[&le(&[65536, 0], &[4, 4])]).map_err(xattr_err)
+    remote(ino)?;
+    super::fuse_svc::listxattr(ino) // wave9 G6b-2
 }
 
 /// Sets extended attribute `name` of `ino`.
 pub fn setxattr(ino: u64, name: &[u8], value: &[u8], flags: u32) -> Result<(), i64> {
-    if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::setxattr(ino, name, value, flags); // wave9 G6b-2
-    }
-    let (c, n) = target(ino)?;
-    c.call(SETXATTR, n, &[&le(&[value.len() as u64, flags as u64], &[4, 4]), &cstr(name), value]).map(|_| ()).map_err(xattr_err)
+    remote(ino)?;
+    super::fuse_svc::setxattr(ino, name, value, flags) // wave9 G6b-2
 }
 
 /// Removes extended attribute `name` of `ino`.
 pub fn removexattr(ino: u64, name: &[u8]) -> Result<(), i64> {
-    if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::removexattr(ino, name); // wave9 G6b-2
-    }
-    let (c, n) = target(ino)?;
-    c.call(REMOVEXATTR, n, &[&cstr(name)]).map(|_| ()).map_err(xattr_err)
+    remote(ino)?;
+    super::fuse_svc::removexattr(ino, name) // wave9 G6b-2
 }
 
 /// The file system `ino` is in as `statfs` reports it (`struct statfs`, 120 bytes); a
 /// daemon without `statfs` gets Linux's defaults.
 pub fn statfs(ino: u64) -> Result<[u8; 120], i64> {
-    if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::statfs(ino); // wave9 G6b-2
-    }
-    let (c, n) = target(ino)?;
-    let r = match c.call(STATFS, n, &[]) {
-        Ok(r) => r,
-        Err(ENOSYS) => Vec::new(),
-        Err(e) => return Err(e),
-    };
-    Ok(statfs_of(ino, &r))
+    remote(ino)?;
+    super::fuse_svc::statfs(ino) // wave9 G6b-2
 }
 
 /// `struct statfs` of `ino`'s file system from the daemon's `fuse_statfs_out` `r` (empty:
@@ -1297,10 +533,7 @@ pub(super) fn statfs_of(ino: u64, r: &[u8]) -> [u8; 120] {
 /// A descriptor opened `ino`.
 pub fn open_ref(ino: u64) {
     if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::open_ref(ino); // wave9 G6b-2
-    }
-    if let Ok(c) = conn_of(ino) {
-        c.st.lock().handles.entry(split(ino).1).or_default().refs += 1;
+        super::fuse_svc::open_ref(ino); // wave9 G6b-2
     }
 }
 
@@ -1308,30 +541,7 @@ pub fn open_ref(ino: u64) {
 /// waiting for the daemon).
 pub fn release(ino: u64) {
     if super::fuse_svc::is_remote(ino) {
-        return super::fuse_svc::release(ino); // wave9 G6b-2
-    }
-    let Ok(c) = conn_of(ino) else { return };
-    let l = split(ino).1;
-    let gone = {
-        let mut st = c.st.lock();
-        let Some(h) = st.handles.get_mut(&l) else { return };
-        h.refs = h.refs.saturating_sub(1);
-        if h.refs > 0 {
-            return;
-        }
-        st.handles.remove(&l)
-    };
-    let Some(h) = gone else { return };
-    let Ok(n) = c.nodeid(l) else { return };
-    if let Some(fh) = h.write {
-        c.send(FLUSH, n, &[&le(&[fh, 0, 0, 0], &[8, 4, 4, 8])]);
-        c.send(RELEASE, n, &[&le(&[fh, 1, 0, 0], &[8, 4, 4, 8])]);
-    }
-    if let Some(fh) = h.read {
-        c.send(RELEASE, n, &[&le(&[fh, 0, 0, 0], &[8, 4, 4, 8])]);
-    }
-    if let Some(fh) = h.dir {
-        c.send(RELEASEDIR, n, &[&le(&[fh, 0, 0, 0], &[8, 4, 4, 8])]);
+        super::fuse_svc::release(ino); // wave9 G6b-2
     }
 }
 
@@ -1360,29 +570,21 @@ fn options(data: &str) -> Result<(i32, u32, u32, u32, bool), i64> {
 }
 
 /// The connection behind descriptor `fd` (an open `/dev/fuse`).
-fn conn_of_fd(fd: i32) -> Result<Arc<Conn>, i64> {
-    let d = crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
-        Some(crate::fs::FileDescriptor::Device(d)) => Some(d.clone()),
-        _ => None,
-    })
-    .ok_or(EBADF)?;
-    d.as_fuse().ok_or(EINVAL)
-}
-
 // wave9 G6b-2 begin
 /// The slot of descriptor `fd` when it is an open `/dev/fuse` of vfs-server's (`None`: some
 /// other descriptor, the kernel's own client decides).
-fn remote_slot_of_fd(fd: i32) -> Result<Option<u64>, i64> {
+fn remote_slot_of_fd(fd: i32) -> Result<u64, i64> {
     let d = crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
         Some(crate::fs::FileDescriptor::Device(d)) => Some(d.clone()),
         _ => None,
     })
     .ok_or(EBADF)?;
-    let Some(o) = d.as_server() else { return Ok(None) };
+    // (wave9 G9-C: only vfs-server's `/dev/fuse`; the kernel's own is gone)
+    let Some(o) = d.as_server() else { return Err(EINVAL) };
     if o.kind() != crate::ipc::protocol::LX_OBJ_KIND_FUSE {
         return Err(EINVAL);
     }
-    o.slot().map(|s| Some(s as u64)).ok_or(EBADF)
+    o.slot().map(|s| s as u64).ok_or(EBADF)
 }
 // wave9 G6b-2 end
 
@@ -1398,21 +600,8 @@ pub fn mount(path: &str, mountpoint: u64, fstype: &str, source: &str, flags: u64
     if let Err(e) = slot {
         crate::kprintln!("[fuse] mount: fd {} is not a /dev/fuse: {}", fd, e);
     }
-    let (conn, root) = match slot? {
-        Some(slot) => {
-            let id = super::fuse_svc::mount(slot, uid, gid, other)?;
-            (None, super::fuse_svc::root_of(id))
-        }
-        None => {
-            let c = conn_of_fd(fd)?;
-            if c.mounted.load(Ordering::Acquire) {
-                return Err(EINVAL);
-            }
-            c.start(uid, gid, other);
-            let r = c.root();
-            (Some(c), r)
-        }
-    };
+    let id = super::fuse_svc::mount(slot?, uid, gid, other)?;
+    let root = super::fuse_svc::root_of(id);
     if ns0 {
         let mut opts = String::from(if flags & 1 != 0 { "ro" } else { "rw" });
         for (bit, name) in [(2u64, "nosuid"), (4, "nodev"), (8, "noexec")] {
@@ -1425,7 +614,7 @@ pub fn mount(path: &str, mountpoint: u64, fstype: &str, source: &str, flags: u64
         if other {
             opts.push_str(",allow_other");
         }
-        ns0_add(Ns0Mount { mountpoint, conn, root, path: String::from(path), fstype: String::from(fstype), source: String::from(source), opts });
+        ns0_add(Ns0Mount { mountpoint, root, path: String::from(path), fstype: String::from(fstype), source: String::from(source), opts });
     }
     Ok(root)
 }

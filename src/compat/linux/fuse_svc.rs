@@ -27,11 +27,6 @@ pub static CALLS: AtomicU64 = AtomicU64::new(0);
 
 const EIO: i64 = -5;
 
-/// Whether new `/dev/fuse` opens go to vfs-server.
-pub fn forwarded() -> bool {
-    true
-}
-
 /// Whether `ino` is a file of one of vfs-server's FUSE connections.
 pub fn is_remote(ino: u64) -> bool {
     is_fuse(ino) && remote_conn(((ino >> 40) & 0xFFFF) as u16)

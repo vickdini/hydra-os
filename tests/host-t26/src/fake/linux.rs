@@ -115,9 +115,6 @@ pub mod chardev {
         fn fsync(&self) -> Option<i64> {
             None
         }
-        fn as_fuse(&self) -> Option<Arc<crate::compat::linux::fuse::Conn>> {
-            None
-        }
         fn as_mount_obj(&self) -> Option<&crate::compat::linux::mount::MountObj> {
             None
         }
@@ -137,9 +134,6 @@ pub mod chardev {
     }
 
     pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
-        if rdev == crate::compat::linux::fuse::RDEV {
-            return Some(crate::compat::linux::fuse::open(flags));
-        }
         let path = OPENABLE.with_borrow(|o| o.iter().find(|(r, _)| *r == rdev).map(|(_, p)| p.clone()))?;
         let d: Arc<dyn CharDevice> = Arc::new(TestDev::new(&path, rdev));
         Some(Ok(d))
