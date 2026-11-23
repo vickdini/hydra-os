@@ -73,6 +73,10 @@ pub mod ipc {
 }
 
 pub mod fs {
+    /// wave9 GM: *stub* of `src/fs/tmem.rs`
+    pub mod tmem {
+        include!("../../tmem_stub.rs");
+    }
     #[path = "../../../../src/fs/pipe.rs"]
     pub mod pipe;
     #[path = "../../../../src/fs/gpt.rs"]

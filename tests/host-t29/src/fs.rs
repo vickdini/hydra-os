@@ -284,3 +284,9 @@ pub mod zfs {
     }
     pub use types::{DnodeType, ZFS_BLOCK_SIZE};
 }
+
+/// wave9 GM: *stub* of `src/fs/tmem.rs`
+pub mod tmem {
+    include!("../../tmem_stub.rs");
+        include!("../../tmem_stub_map.rs");
+}

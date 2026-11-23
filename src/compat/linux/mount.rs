@@ -370,6 +370,18 @@ pub fn last_is_tmpfs() -> bool {
     id != 0 && id == current_ns_id() && table(id).and_then(|t| t.lock().get(mnt).map(|m| matches!(m.kind, Kind::Tree { tmpfs: Some(_) }))).unwrap_or(false)
 }
 
+// wave9 GM begin
+/// The tmpfs id of the mount the calling thread's last lookup ended in, if a tmpfs (where a
+/// file the kernel makes keeps its data in memory: `fs::tmem`).
+pub fn last_tmpfs() -> Option<u32> {
+    let (_, mnt, id) = NOTES.lock().get(&tid()).copied()?;
+    if id == 0 || id != current_ns_id() {
+        return None;
+    }
+    table(id).and_then(|t| t.lock().get(mnt).and_then(|m| if let Kind::Tree { tmpfs: Some(n) } = m.kind { Some(n) } else { None }))
+}
+// wave9 GM end
+
 /// Where Hydra serves the files of a named file system type.
 fn serves_of(fstype: &str) -> Option<&'static str> {
     match fstype {
@@ -558,6 +570,7 @@ fn release_tmpfs(t: u32) {
         remove_contents(s, dir, 0)?;
         s.rmdir(parent, name.as_bytes())
     });
+    crate::fs::tmem::drop_instance(t); // wave9 GM
 }
 
 /// Parses `mode=`, `uid=` and `gid=` from tmpfs mount data. The root belongs to the
@@ -936,7 +949,11 @@ fn mount_core(ns: &Arc<Mutex<MountNs>>, src: Option<(i64, Vec<u8>)>, target: (St
             let n = NEXT_TMPFS.fetch_add(1, Ordering::Relaxed);
             let made = tmpfs_dir().and_then(|dir| crate::fs::zfs::with_server(|s| s.mkdir(dir, alloc::format!("{}", n).as_bytes(), mode, uid, gid)));
             match made {
-                Ok(ino) => (Kind::Tree { tmpfs: Some(n) }, ino),
+                Ok(ino) => {
+                    // wave9 GM: `size=` limits its in-memory files
+                    crate::fs::tmem::set_limit(n, data.as_deref().and_then(crate::fs::tmem::parse_size).unwrap_or(0));
+                    (Kind::Tree { tmpfs: Some(n) }, ino)
+                }
                 Err(e) => return e,
             }
         }

@@ -1564,6 +1564,7 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
                 let (perm, plan) = super::acl::create_mode(parent, mode & 0o7777, umask(), false);
                 created = true;
                 let ino = crate::fs::zfs::with_server(|s| s.create(parent, &name, perm, c.euid, c.egid))?;
+                crate::fs::tmem::created(parent, ino, super::mount::last_tmpfs()); // wave9 GM
                 super::acl::inherit(ino, plan);
                 ino
             }
@@ -3821,6 +3822,10 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 }
                 super::landlock::check_dir(dir, super::landlock::make_right(mode & S_IFMT))?;
                 let ino = zfs(|s| s.mknod(dir, name, mode, dev, c.euid, c.egid))?;
+                // wave9 GM: a regular file made by mknod is a file like any other
+                if mode & S_IFMT == S_IFREG || mode & S_IFMT == 0 {
+                    crate::fs::tmem::created(dir, ino, super::mount::last_tmpfs());
+                }
                 super::acl::inherit(ino, plan);
                 Ok(0)
             })

@@ -638,15 +638,23 @@ impl ZfsServer {
             self.window = None;
             return fuse::getattr(ino);
         }
-        if let Some(a) = cached_attr(ino) {
+        // wave9 GM: an in-memory tmpfs file shows its object's size, blocks and data times
+        let mem = crate::fs::tmem::get(ino);
+        if let Some(mut a) = cached_attr(ino) {
+            if let Some(t) = &mem {
+                t.overlay(&mut a);
+            }
             return Ok(a);
         }
         let gen = attr_gen();
         let (_, len) = self.request(FS_GETATTR, |w| {
             w.u64(ino);
         })?;
-        let a = Reader::new(self.reply(len)).attr();
+        let mut a = Reader::new(self.reply(len)).attr();
         cache_attr(ino, a, gen);
+        if let Some(t) = &mem {
+            t.overlay(&mut a);
+        }
         Ok(a)
     }
 
@@ -672,14 +680,32 @@ impl ZfsServer {
                 set.mode = Some(m);
             }
         }
+        // wave9 GM begin: an in-memory tmpfs file: the size is its object's (the pool object
+        // stays empty), data times set here become the file's again
+        let mem = crate::fs::tmem::get(ino);
+        if let Some(t) = &mem {
+            if let Some(size) = set.size.take() {
+                t.truncate(size)?;
+            }
+            if set.mtime.is_some() {
+                t.times_set();
+            }
+            if set.mode.is_none() && set.uid.is_none() && set.gid.is_none() && set.atime.is_none() && set.mtime.is_none() && !set.kill_suid {
+                return self.getattr(ino);
+            }
+        }
+        // wave9 GM end
         let changed = Changed(ino);
         let (_, len) = self.request(FS_SETATTR, |w| {
             w.u64(ino);
             w.setattr(&set);
         })?;
-        let a = Reader::new(self.reply(len)).attr();
+        let mut a = Reader::new(self.reply(len)).attr();
         drop(changed);
         cache_attr(ino, a, attr_gen());
+        if let Some(t) = &mem {
+            t.overlay(&mut a); // wave9 GM
+        }
         // The page cache: pages past a new size go
         if let Some(size) = set.size {
             crate::compat::linux::mm::cache_truncated(ino, size);
@@ -701,6 +727,10 @@ impl ZfsServer {
         if fuse::is_fuse(ino) {
             self.window = None;
             return fuse::read(ino, offset, buf);
+        }
+        // wave9 GM: an in-memory tmpfs file
+        if let Some(t) = crate::fs::tmem::get(ino) {
+            return Ok(t.read(offset, buf));
         }
         let mut done = 0;
         while done < buf.len() {
@@ -734,6 +764,11 @@ impl ZfsServer {
         if fuse::is_fuse(ino) {
             self.window = None;
             return fuse::write(ino, offset, data);
+        }
+        // wave9 GM: an in-memory tmpfs file (vfs-server asks the kernel for its size and
+        // times, so no change note)
+        if let Some(t) = crate::fs::tmem::get(ino) {
+            return t.write(Some(offset), data);
         }
         let _changed = Changed(ino);
         let mut done = 0;
@@ -1003,6 +1038,10 @@ impl ZfsServer {
             self.window = None;
             return fuse::link(ino, dir, name);
         }
+        // wave9 GM: a /dev/shm file's data cannot follow a name elsewhere
+        if !crate::fs::tmem::may_move(ino, dir) {
+            return Err(-18); // EXDEV
+        }
         let r = self.request(FS_LINK, |w| {
             w.u64(ino);
             w.u64(dir);
@@ -1047,9 +1086,23 @@ impl ZfsServer {
         // The page cache no longer keeps the file (and its space) alive
         if let (Ok(()), Some(ino)) = (&r, gone) {
             crate::compat::linux::mm::cache_forget(ino);
+            self.tmem_unlinked(ino); // wave9 GM
         }
         r
     }
+
+    // wave9 GM begin
+    /// An in-memory tmpfs file lost a name: it goes when it has none left and is not open
+    /// (else at its last close).
+    fn tmem_unlinked(&mut self, ino: u64) {
+        if crate::fs::tmem::get(ino).is_none() {
+            return;
+        }
+        let linked = matches!(self.getattr(ino), Ok(a) if a.nlink > 0);
+        let open = x86_64::instructions::interrupts::without_interrupts(|| OPEN_REFS.lock().contains_key(&ino));
+        crate::fs::tmem::unlinked(ino, linked, open);
+    }
+    // wave9 GM end
 
     /// Removes empty directory `name` from `dir`.
     ///
@@ -1100,6 +1153,10 @@ impl ZfsServer {
         // A file the rename replaces
         let replaced = self.lookup(ddir, dname).ok();
         let moved = self.lookup(sdir, sname).ok();
+        // wave9 GM: a /dev/shm file's data cannot follow a name elsewhere
+        if moved.is_some_and(|m| !crate::fs::tmem::may_move(m, ddir)) {
+            return Err(-18); // EXDEV
+        }
         let r = self.request(FS_RENAME, |w| {
             w.u64(sdir);
             w.bytes(sname);
@@ -1115,6 +1172,9 @@ impl ZfsServer {
         }
         if let (Ok(()), Some(ino)) = (&r, replaced) {
             crate::compat::linux::mm::cache_forget(ino);
+            if Some(ino) != moved {
+                self.tmem_unlinked(ino); // wave9 GM
+            }
         }
         r
     }
@@ -1215,6 +1275,7 @@ impl ZfsServer {
             let _ = self.request(FS_RELEASE, |w| {
                 w.u64(ino);
             });
+            crate::fs::tmem::released(ino); // wave9 GM
         }
     }
 

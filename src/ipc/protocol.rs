@@ -2679,3 +2679,30 @@ pub const FUSE_OP_MOUNT: u64 = 24;
 /// `(connection)`: unmounted -> 0 (the daemon reads ENODEV).
 pub const FUSE_OP_ABORT: u64 = 25;
 // wave9 G6b-2 end
+// wave9 GM begin: tmpfs data in memory (`fs::tmem`)
+/// `SYS_LX_OBJ` op of the file service's host: `(sub-op, a, b)`, sub-ops `LX_TMEM_*`.
+pub const LX_FH_TMEM: u64 = 78;
+/// `(ino, *LxTmemAttr)`: an in-memory tmpfs file's size, blocks and data time; `-ENOENT`
+/// if `ino` is not one.
+pub const LX_TMEM_ATTR: u64 = 1;
+/// `(tmpfs id, bytes)`: the instance's `size=` (0: the default, half of the memory).
+pub const LX_TMEM_LIMIT: u64 = 2;
+/// `(tmpfs id, *[limit, used, files])`: an instance's use (bytes, bytes, count).
+pub const LX_TMEM_USAGE: u64 = 3;
+/// What [`LX_TMEM_ATTR`] answers.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct LxTmemAttr {
+    /// Size in bytes.
+    pub size: u64,
+    /// 512-byte blocks it holds.
+    pub blocks: u64,
+    /// The last data change (ns since the epoch; 0: none since its times were set).
+    pub mtime_ns: u64,
+    /// Its tmpfs id (0: a `/dev/shm` file).
+    pub inst: u64,
+}
+/// `LX_MEM` op: `(handle, size)`: frees an anonymous object's pages past `size` and zeroes
+/// the rest of the last one (tmpfs truncation).
+pub const LX_MEM_TRUNC: u64 = 10;
+// wave9 GM end

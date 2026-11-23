@@ -69,6 +69,10 @@ pub struct Loc {
 pub trait Env {
     /// A new tmpfs tree (root mode, owner): `(tmpfs id, root object)`.
     fn make_tmpfs(&mut self, mode: u32, uid: u32, gid: u32) -> Result<(u32, u64), i64>;
+    // wave9 GM begin
+    /// The new tmpfs `n`'s mount data (its `size=` limits its in-memory files).
+    fn tmpfs_data(&mut self, _n: u32, _data: Option<&str>) {}
+    // wave9 GM end
 }
 
 /// What a change did that the caller completes: after a `pivot_root`, the processes of the
@@ -267,6 +271,7 @@ pub fn mount(t: &mut MntTable, src: Result<&Loc, i64>, target: &Loc, fs: Option<
         "tmpfs" | "ramfs" => {
             let (mode, uid, gid) = tmpfs_options(data, ids.0, ids.1);
             let (n, root) = env.make_tmpfs(mode, uid, gid)?;
+            env.tmpfs_data(n, data); // wave9 GM
             t.push(new_mount(target.mnt, target, root, MK_TREE, n, per, fs, source_name, None));
         }
         // (binds of the system's `/sys` and `/dev`: the kernel's, it walks the system root)

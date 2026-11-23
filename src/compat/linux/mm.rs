@@ -326,6 +326,10 @@ pub fn cache_flush() {
 
 /// Reads file `ino` at `offset` through the page cache (Linux's `read` of a regular file).
 pub fn cached_read(ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
+    // wave9 GM: an in-memory tmpfs file is its own page cache
+    if let Some(t) = crate::fs::tmem::get(ino) {
+        return Ok(t.read(offset, buf));
+    }
     let size = ZfsClient::getattr(ino)?.size;
     if offset >= size || buf.is_empty() {
         return Ok(0);
@@ -538,8 +542,24 @@ pub fn inode_source(ino: u64) -> Result<crate::task::exec::ElfSource, i64> {
     let mut head = alloc::vec![0u8; len.min(64 * 1024) as usize];
     let n = ZfsClient::read_at(ino, 0, &mut head)?;
     head.truncate(n);
-    Ok(crate::task::exec::ElfSource { head, len, obj: inode_object(ino) })
+    // wave9 GM: an in-memory tmpfs file runs from its own object
+    let obj: Arc<dyn MappedObject> = match crate::fs::tmem::get(ino) {
+        Some(t) => t,
+        None => inode_object(ino),
+    };
+    Ok(crate::task::exec::ElfSource { head, len, obj })
 }
+
+// wave9 GM begin
+/// What a mapping of file `ino` maps: an in-memory tmpfs file's own object (its pages are
+/// the file's: every mapper and `read`/`write` share them), else the file's page cache.
+fn file_object(ino: u64) -> Arc<dyn MappedObject> {
+    match crate::fs::tmem::get(ino) {
+        Some(t) => t,
+        None => Arc::new(MapHandle::new(inode_object(ino))),
+    }
+}
+// wave9 GM end
 
 /// Returns the running task's address space, if it has one.
 ///
@@ -593,14 +613,14 @@ fn fd_object(fd: usize, pgoff: u64, args: &[u64; 6]) -> Result<(Arc<dyn MappedOb
             if !readable {
                 return Err(-EACCES);
             }
-            Ok((Arc::new(MapHandle::new(inode_object(ino))), if writable { 0 } else { -EACCES }, pgoff))
+            Ok((file_object(ino), if writable { 0 } else { -EACCES }, pgoff))
         }
         crate::fs::FileDescriptor::File { path, readable, writable, .. } => {
             if !readable {
                 return Err(-EACCES);
             }
             let ino = ZfsClient::resolve(0, path.as_bytes(), true).map_err(|_| -ENODEV)?;
-            Ok((Arc::new(MapHandle::new(inode_object(ino))), if writable { 0 } else { -EACCES }, pgoff))
+            Ok((file_object(ino), if writable { 0 } else { -EACCES }, pgoff))
         }
         // wave6 G23 begin: a service's object: the service names one of its memory
         // objects and where in it the mapping starts (`crate::lx::mem::server_mmap`)

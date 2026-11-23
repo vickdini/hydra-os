@@ -164,6 +164,11 @@ impl ktab::Env for SysEnv {
         self.made = Some((n, r.value, dir));
         Ok((n, r.value))
     }
+    // wave9 GM begin
+    fn tmpfs_data(&mut self, n: u32, data: Option<&str>) {
+        crate::tmem::set_limit(n, data);
+    }
+    // wave9 GM end
 }
 
 impl SysEnv {

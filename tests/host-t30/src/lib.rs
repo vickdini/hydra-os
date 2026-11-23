@@ -472,6 +472,10 @@ pub mod memory {
 }
 
 pub mod fs {
+    /// wave9 GM: *stub* of `src/fs/tmem.rs`
+    pub mod tmem {
+        include!("../../tmem_stub.rs");
+    }
     use alloc::string::String;
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
