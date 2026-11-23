@@ -895,6 +895,11 @@ pub struct LxCall {
     /// at least this new. 0: the initial namespace without mounts.
     pub mnt_gen: u64,
     // wave7 G7-7 end
+    // wave9 G6b-3 begin: Landlock in the file service. Appended.
+    /// The caller's Landlock domain ([`LX_FH_LANDLOCK`] gives the file service a copy by
+    /// this id); 0: the caller is not landlocked. Ids are never reused.
+    pub ll_dom: u64,
+    // wave9 G6b-3 end
 }
 
 impl LxCall {
@@ -953,6 +958,7 @@ impl LxCall {
         fs_flags: 0,
         // wave7 G7-2 end
         mnt_gen: 0, // wave7 G7-7
+        ll_dom: 0,  // wave9 G6b-3
     };
 }
 
@@ -2603,6 +2609,63 @@ pub const LX_TTY_NOTMINE: i64 = -4111;
 /// yet (`EINVAL`).
 pub const LX_OBJ_PROCID: u64 = 75;
 // wave9 G7a end
+
+// wave9 G6b-3 begin: Landlock and ABAC checks in the file service
+/// `SYS_LX_OBJ` op (the file service's host only): `LX_FH_LANDLOCK(req, buf, cap)` writes
+/// the Landlock domain of request `req`'s caller to `buf`: [`LxLlHead`], then per layer a
+/// [`LxLlLayer`] followed by its `n` rules as `(inode, rights)` pairs of `u64`. Returns the
+/// bytes written; `ENOENT` if the caller is not landlocked, `E2BIG` if `cap` is too small.
+pub const LX_FH_LANDLOCK: u64 = 76;
+/// `SYS_LX_OBJ` op (the file service's host only): `LX_FH_ABAC(req, desc)`: may request
+/// `req`'s caller access the object [`LxAbacDesc`] `desc` describes under the access
+/// policies (the kernel's evaluator, caches and audit ring, as the caller)? 0: yes;
+/// `EACCES`: no.
+pub const LX_FH_ABAC: u64 = 77;
+/// [`LxFhDesc::flags`] and [`LxCall::fh_flags`]: Landlock refused `TRUNCATE` when the
+/// handle was opened (`ftruncate` answers `EACCES`).
+pub const LX_FH_NOTRUNC: u32 = 1 << 30;
+
+/// The head of an [`LX_FH_LANDLOCK`] answer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LxLlHead {
+    /// The domain's id ([`LxCall::ll_dom`]).
+    pub id: u64,
+    /// How many layers follow.
+    pub layers: u64,
+}
+
+/// One layer of an [`LX_FH_LANDLOCK`] answer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LxLlLayer {
+    /// The file-system rights the layer handles.
+    pub fs: u64,
+    /// How many `(inode, rights)` rules follow.
+    pub n: u64,
+}
+
+/// The object of an [`LX_FH_ABAC`] question.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LxAbacDesc {
+    /// Its inode.
+    pub ino: u64,
+    /// Its generation (the label cache's key).
+    pub gen: u64,
+    /// Its mode (type bits: a folder's `x` goes with its read right).
+    pub mode: u32,
+    /// `r` 4, `w` 2, `x` 1; or [`LX_ABAC_DELETE`].
+    pub want: u32,
+    /// The path the caller named (for the audit record; may be 0).
+    pub path: u64,
+    /// Its length.
+    pub path_len: u64,
+}
+
+/// [`LxAbacDesc::want`]: the delete right (unlink, rmdir, moving out of the folder).
+pub const LX_ABAC_DELETE: u32 = 0x100;
+// wave9 G6b-3 end
 
 
 // wave9 G6b-2 begin: FUSE served by vfs-server

@@ -206,3 +206,44 @@ fn ports_of_this_and_other_threads_and_the_layer_limit() {
     assert_eq!(restrict(rs), -7);
     let _ = Arc::new(0);
 }
+
+// wave9 G6b-3: domains by id and their serialized copies for the file service
+fn u64s(b: &[u8]) -> Vec<u64> {
+    b.chunks(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect()
+}
+
+#[test]
+fn domains_have_ids_and_serialize_for_the_file_service() {
+    let _g = serial();
+    let d = fakefs::test_dir("ll-ids");
+    let sub = with_fs(|fs| fs.mkdir_p(d, "sub"));
+    let tid = fake::IDS.get().0;
+    assert_eq!(landlock::domain_id(), 0);
+    assert!(landlock::serialized_of(tid).is_none() || !landlock::active());
+    let rs = ruleset(READ_FILE | WRITE_FILE, 0);
+    assert_eq!(path_rule(rs, READ_FILE, open_dir(sub, "/ll-ids/sub")), 0);
+    assert_eq!(path_rule(rs, WRITE_FILE, open_dir(d, "/ll-ids")), 0);
+    landlocked();
+    assert_eq!(restrict(rs), 0);
+    let id1 = landlock::domain_id();
+    assert_ne!(id1, 0);
+    let w = u64s(&landlock::serialized_of(tid).unwrap());
+    // id, 1 layer, fs, 2 rules (sorted by inode as the kernel's map)
+    assert_eq!(&w[..4], &[id1, 1, READ_FILE | WRITE_FILE, 2]);
+    let mut rules = vec![(w[4], w[5]), (w[6], w[7])];
+    rules.sort();
+    let mut want = vec![(sub, READ_FILE), (d, WRITE_FILE)];
+    want.sort();
+    assert_eq!(rules, want);
+    assert_eq!(w.len(), 8);
+    // A second layer: a new id, never an old one
+    let rs2 = ruleset(EXECUTE, 0);
+    assert_eq!(restrict(rs2), 0);
+    let id2 = landlock::domain_id();
+    assert!(id2 > id1);
+    let w = u64s(&landlock::serialized_of(tid).unwrap());
+    assert_eq!(&w[..2], &[id2, 2]);
+    assert_eq!(&w[w.len() - 2..], &[EXECUTE, 0], "the second layer: no rules");
+    // Another task (not one of the fake scheduler's): none
+    assert!(landlock::serialized_of(tid + 99_999).is_none());
+}

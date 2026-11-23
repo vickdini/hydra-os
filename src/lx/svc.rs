@@ -119,6 +119,12 @@ pub fn init(words: &[u8]) -> bool {
             continue;
         }
         // wave9 G6b-4 end
+        // wave9 G6b-3 begin: `lx.policy=kernel`: Landlock and ABAC callers' calls stay the kernel's
+        if w == b"policy=kernel" {
+            super::fileh::POLICY_KERNEL.store(true, Ordering::Relaxed);
+            continue;
+        }
+        // wave9 G6b-3 end
         let Some(eq) = w.iter().position(|&c| c == b'=') else { continue };
         let (name, val) = (&w[..eq], &w[eq + 1..]);
         let Some(id) = LXS_NAMES.iter().position(|n| n.as_bytes() == name) else { continue };

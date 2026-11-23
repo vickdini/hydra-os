@@ -365,8 +365,8 @@ pub static PRIVILEGED_TO_KERNEL: core::sync::atomic::AtomicU64 = core::sync::ato
 fn from_plan(plan: crate::lx::xexec::ExecPlan, argv: &[Vec<u8>], envp: &[Vec<u8>], flags: u64) -> Option<Result<Ready, i64>> {
     // (checks only the kernel's own lookup makes at every `#!` level: Landlock, fanotify, app
     // control; such callers get no plan, but the rules may have come meanwhile)
-    // (wave9 G6b-1: also vfs-server's fanotify groups)
-    if super::landlock::active() || super::fanotify::active() || super::abac::active() || crate::lx::notifyfwd::want_fan() {
+    // (wave9 G6b-1: also vfs-server's fanotify groups; wave9 G6b-3: and app rules alone)
+    if super::landlock::active() || super::fanotify::active() || super::abac::active() || crate::lx::notifyfwd::want_fan() || super::abac::apps_active() {
         return None;
     }
     let follow = flags & AT_SYMLINK_NOFOLLOW == 0 || !plan.prefix.is_empty();

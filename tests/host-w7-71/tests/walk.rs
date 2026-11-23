@@ -504,3 +504,73 @@ fn an_invalid_acl_is_no_acl() {
     t.fs.set_acl(d, acl(&[(0x01, 7, 0), (0x02, 0, 9), (0x04, 1, 0), (0x10, 1, 0), (0x20, 1, 0)]));
     assert_eq!(w(&t, &user_cx(9, 9), "/tmp/inv/f"), Err(EACCES));
 }
+
+// wave9 G6b-3: the walk's hooks for Landlock's parent hints and the access policies
+mod policy_hooks {
+    use super::*;
+    use hydra_hosttests_w7_71::fs::fsproto::Attr;
+    use hydra_hosttests_w7_71::walk::Backend;
+    use std::cell::RefCell;
+
+    /// The fake, recording what the walk found and refusing the policy's search of `deny`.
+    struct Hooked<'a> {
+        fs: &'a Fake,
+        seen: RefCell<Vec<(u64, Vec<u8>, u64)>>,
+        asked: RefCell<Vec<u64>>,
+        deny: u64,
+    }
+
+    impl Backend for Hooked<'_> {
+        fn lookup(&self, dir: Node, name: &[u8]) -> Result<Node, i64> {
+            self.fs.lookup(dir, name)
+        }
+        fn getattr(&self, n: Node) -> Result<Attr, i64> {
+            self.fs.getattr(n)
+        }
+        fn readlink(&self, n: Node) -> Result<Vec<u8>, i64> {
+            self.fs.readlink(n)
+        }
+        fn acl(&self, n: Node) -> Result<Option<Vec<u8>>, i64> {
+            self.fs.acl(n)
+        }
+        fn mounts(&self) -> &dyn Mounts {
+            self.fs.mounts()
+        }
+        fn found(&self, dir: Node, name: &[u8], child: Node) {
+            self.seen.borrow_mut().push((dir.ino, name.to_vec(), child.ino));
+        }
+        fn may_search_policy(&self, _cx: &Ctx, dir: &Attr) -> Result<bool, i64> {
+            self.asked.borrow_mut().push(dir.ino);
+            Ok(dir.ino != self.deny)
+        }
+    }
+
+    #[test]
+    fn the_walk_reports_what_it_found_and_asks_the_policy_for_restricted_folders() {
+        let t = tree();
+        let sec = t.fs.mkdir(ROOT, "sec", 0o750);
+        t.fs.chown(sec, 0, 1000);
+        let f = t.fs.file(sec, "f", 0o644);
+        let h = Hooked { fs: &t.fs, seen: RefCell::new(Vec::new()), asked: RefCell::new(Vec::new()), deny: 0 };
+        let u = user_cx(1000, 1000);
+        assert_eq!(found(walk::walk(&h, &u, Start::Root, b"/sec/f", 0)), Ok(f));
+        assert_eq!(*h.seen.borrow(), vec![(ROOT, b"sec".to_vec(), sec), (sec, b"f".to_vec(), f)]);
+        // Only the folder not everyone may search is asked about
+        assert_eq!(*h.asked.borrow(), vec![sec]);
+        assert_eq!(found(walk::walk(&h, &u, Start::Root, b"/usr/bin/bash", 0)), Ok(t.bash));
+        assert_eq!(*h.asked.borrow(), vec![sec], "755 folders are not asked about");
+        // The policy refuses: EACCES, as the mode bits would
+        let h2 = Hooked { fs: &t.fs, seen: RefCell::new(Vec::new()), asked: RefCell::new(Vec::new()), deny: sec };
+        assert_eq!(found(walk::walk(&h2, &u, Start::Root, b"/sec/f", 0)), Err(EACCES));
+        // Root is never asked
+        assert_eq!(found(walk::walk(&h2, &root_cx(), Start::Root, b"/sec/f", 0)), Ok(f));
+        assert_eq!(*h2.asked.borrow(), vec![sec]);
+        // The parent walk reports the last name too
+        let h3 = Hooked { fs: &t.fs, seen: RefCell::new(Vec::new()), asked: RefCell::new(Vec::new()), deny: 0 };
+        match walk::walk_parent(&h3, &u, Start::Root, b"/sec/f").unwrap() {
+            ParentWalked::Found(p) => assert_eq!(p.child.map(|n| n.ino), Some(f)),
+            _ => panic!(),
+        }
+        assert!(h3.seen.borrow().contains(&(sec, b"f".to_vec(), f)));
+    }
+}

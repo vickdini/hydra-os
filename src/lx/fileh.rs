@@ -55,6 +55,9 @@ const EBADF: i64 = -9;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 const EMFILE: i64 = -24;
+const ENOENT: i64 = -2; // wave9 G6b-3
+const E2BIG: i64 = -7; // wave9 G6b-3
+const EACCES: i64 = -13; // wave9 G6b-3
 
 const AT_FDCWD: i32 = -100;
 const O_CLOEXEC: u32 = 0o2000000;
@@ -215,7 +218,9 @@ pub fn info_of_open(f: &OpenFile) -> Option<AtInfo> {
     if f.foreign.is_some() || !plain_ino(f.ino) || f.path.ends_with("/proc") || pseudo_path(&f.path) {
         return None;
     }
-    Some(AtInfo { kind: if f.is_dir { LX_AT_DIR } else { LX_AT_FILE }, ino: f.ino, mnt: f.mnt as u32, off: f.offset, flags: f.flags })
+    // wave9 G6b-3: and whether Landlock refused truncating it at the open
+    let notrunc = if f.no_truncate { crate::ipc::protocol::LX_FH_NOTRUNC } else { 0 };
+    Some(AtInfo { kind: if f.is_dir { LX_AT_DIR } else { LX_AT_FILE }, ino: f.ino, mnt: f.mnt as u32, off: f.offset, flags: f.flags | notrunc })
 }
 
 /// What descriptor `fd` of table `t` is for a file-service call, and the open file to hold
@@ -256,16 +261,21 @@ pub(super) type Held = [Option<Arc<Mutex<OpenFile>>>; 2];
 pub(super) fn fs_flags_global(c: &mut LxCall) -> u32 {
     use crate::compat::linux as l;
     let mut f = 0;
-    if l::landlock::active() {
+    // wave9 G6b-3 begin: the domain's id, by which the service keeps a copy of it
+    c.ll_dom = l::landlock::domain_id();
+    if c.ll_dom != 0 {
         f |= LX_FS_LANDLOCK;
     }
+    // wave9 G6b-3 end
     if l::fanotify::active() {
         f |= LX_FS_FANOTIFY;
     }
     if l::inotify::active() {
         f |= LX_FS_INOTIFY;
     }
-    if l::abac::active() {
+    // wave9 G6b-3: only callers the policies apply to (a subject; the service asks the
+    // kernel for them, `LX_FH_ABAC`)
+    if (l::abac::active() || l::abac::apps_active()) && l::abac::applies_to_current() {
         f |= LX_FS_ABAC;
     }
     // wave7 G7-7 begin: the service walks with its copy of the caller's mount table (taken
@@ -398,14 +408,78 @@ pub fn kernel_mask(nr: u64) -> u32 {
             155 | 165 | 166 => LX_FS_LANDLOCK,
             _ => 0,
         }
+        & policy_mask(nr) // wave9 G6b-3
 }
+
+// wave9 G6b-3 begin: Landlock and ABAC checked by vfs-server
+/// `lx.policy=kernel`: the kernel keeps every call of a landlocked caller or one under an
+/// access policy (before wave 9; for comparisons).
+pub static POLICY_KERNEL: AtomicBool = AtomicBool::new(false);
+
+/// The bits [`kernel_mask`] keeps for call `nr`: vfs-server checks Landlock and ABAC for
+/// the calls it serves (open, access, the attribute changes, mkdir, symlink, unlink, rmdir,
+/// rename, the mount calls); the others it does not serve (mknod, link, the xattr calls,
+/// utime(s)) stay with the kernel.
+pub fn policy_mask(nr: u64) -> u32 {
+    let served = matches!(nr, 2 | 257 | 21 | 269 | 439 | 90 | 268 | 91 | 92 | 94 | 260 | 93 | 76 | 77 | 280 | 83 | 258 | 88 | 266 | 87 | 84 | 263 | 82 | 264 | 316 | 155 | 165 | 166);
+    if served && !POLICY_KERNEL.load(Ordering::Relaxed) {
+        !(LX_FS_LANDLOCK | LX_FS_ABAC)
+    } else {
+        u32::MAX
+    }
+}
+
+/// A creating open (`O_CREAT`) of a caller under Landlock or ABAC: vfs-server would send it
+/// back (the kernel makes files), so it stays here without the round trip, as before.
+fn policy_create(c: &LxCall) -> u32 {
+    const O_CREAT: u64 = 0o100;
+    let flags = match c.nr {
+        2 => c.args[1],
+        257 => c.args[2],
+        _ => return 0,
+    };
+    if flags & O_CREAT != 0 {
+        LX_FS_LANDLOCK | LX_FS_ABAC
+    } else {
+        0
+    }
+}
+
+/// [`crate::ipc::protocol::LX_FH_LANDLOCK`]: the domain of request `req`'s caller to `buf`.
+fn landlock_of(req: u64, buf: u64, cap: u64) -> i64 {
+    let Some(tid) = super::client_of(req) else { return ESRCH };
+    let Some(v) = crate::compat::linux::landlock::serialized_of(tid) else { return ENOENT };
+    if v.len() as u64 > cap {
+        return E2BIG;
+    }
+    crate::compat::linux::vfs::copy_out(buf, &v).map_or_else(|e| e, |()| v.len() as i64)
+}
+
+/// [`crate::ipc::protocol::LX_FH_ABAC`]: may request `req`'s caller access the object
+/// `desc` describes?
+fn abac_for(req: u64, desc: u64) -> i64 {
+    use crate::ipc::protocol::{LxAbacDesc, LX_ABAC_DELETE};
+    let Some(tid) = super::client_of(req) else { return ESRCH };
+    let Ok(raw) = crate::compat::linux::vfs::copy_in(desc, core::mem::size_of::<LxAbacDesc>()) else { return EFAULT };
+    // SAFETY: `raw` holds exactly one `LxAbacDesc` (plain integers)
+    let d: LxAbacDesc = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const LxAbacDesc) };
+    let path = if d.path != 0 && d.path_len > 0 && d.path_len <= 4096 { crate::compat::linux::vfs::copy_in(d.path, d.path_len as usize).ok() } else { None };
+    let path = path.as_deref().and_then(|p| core::str::from_utf8(p).ok());
+    let delete = d.want & LX_ABAC_DELETE != 0;
+    if crate::compat::linux::abac::check_for(tid, d.ino, d.gen, d.mode, d.want & 7, delete, path) {
+        0
+    } else {
+        EACCES
+    }
+}
+// wave9 G6b-3 end
 
 /// Calls the kernel kept because of each `LX_FS_*` bit (bit `i`: `KEPT_BY[i]`).
 pub static KEPT_BY: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 
 /// Whether call `c` is the kernel's at once (counted by reason).
 fn kernel_only(c: &LxCall) -> bool {
-    let hit = c.fs_flags & kernel_mask(c.nr);
+    let hit = c.fs_flags & (kernel_mask(c.nr) | policy_create(c)); // wave9 G6b-3: policy_create
     // (wave7 G7-7: mounts of a namespace's table are the service's too now; in the initial
     // namespace a root or working directory on a mount is a FUSE one)
     // (wave8 GF: the initial namespace's mounts are fixed apart from FUSE, which is the
@@ -807,6 +881,7 @@ pub fn install_in(t: &mut FdTable, d: &LxFhDesc) -> Result<usize, i64> {
         f.is_dir = d.is_dir != 0;
         // wave9 G6b-1: a fanotify event's descriptor makes no events
         f.nonotify = d.flags & crate::ipc::protocol::LX_FH_NONOTIFY != 0;
+        f.no_truncate = d.flags & crate::ipc::protocol::LX_FH_NOTRUNC != 0; // wave9 G6b-3
     }
     let fd = t.alloc_fd(FileDescriptor::Vnode(file)).map_err(|_| EMFILE)?;
     t.set_cloexec(fd, d.flags & O_CLOEXEC != 0);
@@ -962,6 +1037,11 @@ pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
         crate::ipc::protocol::LX_FH_NSLIST => nslist(a, b),
         // wave7 G7-6 end
         crate::ipc::protocol::LX_FH_MNTTAB => mnttab(a, b, c), // wave7 G7-7
+        // wave9 G6b-3 begin
+        crate::ipc::protocol::LX_FH_LANDLOCK if own(a) => landlock_of(a, b, c),
+        crate::ipc::protocol::LX_FH_ABAC if own(a) => abac_for(a, b),
+        crate::ipc::protocol::LX_FH_LANDLOCK | crate::ipc::protocol::LX_FH_ABAC => ESRCH,
+        // wave9 G6b-3 end
         // wave8 GF begin
         crate::ipc::protocol::LX_FH_MNTGET => mntget(a, b, c),
         crate::ipc::protocol::LX_FH_MNTPUT => mntput(a, b, c),

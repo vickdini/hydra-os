@@ -40,7 +40,7 @@ use crate::fs::fsproto::{FS_MKDIR, FS_RMDIR};
 use crate::ktab::{self, Loc};
 use crate::lock::YLock;
 use crate::mntrec::{self, MntTable};
-use crate::proto::{LX_FHC_NAMES, LX_FH_CHANGED, LX_FH_MNTGET, LX_FH_MNTPUT, LX_FH_REROOT, LX_FH_TMPFSID, LX_FS_LANDLOCK, LX_FS_MNTADMIN};
+use crate::proto::{LX_FHC_NAMES, LX_FH_CHANGED, LX_FH_MNTGET, LX_FH_MNTPUT, LX_FH_REROOT, LX_FH_TMPFSID, LX_FS_MNTADMIN};
 use crate::zfs;
 
 const EAGAIN: i64 = -11;
@@ -102,8 +102,11 @@ fn errno_or_kernel(e: i64) -> i64 {
 /// kernel answers).
 fn changes(cx: &Cx) -> Result<i64, i64> {
     let c = &cx.c;
-    // (a Landlock domain forbids mount changes: the kernel's rule)
-    ctxt::check(c, LX_FS_LANDLOCK)?;
+    // (a Landlock domain forbids mount changes: the kernel's rule; wave9 G6b-3: answered here)
+    ctxt::check(c, 0)?;
+    if c.ll_dom != 0 {
+        return Err(EPERM);
+    }
     // (the initial namespace: fixed layout and FUSE, the kernel's — it keeps those calls)
     if c.mnt_ns == 0 {
         return Err(calls::KERNEL);
@@ -358,7 +361,7 @@ fn chroot(cx: &Cx) -> Result<i64, i64> {
         return Err(ENOTDIR);
     }
     let acl = ctxt::acl_of(node, &attr)?;
-    if !ctxt::may_access(&who, &attr, acl.as_deref(), who.uid, who.gid, MAY_EXEC) {
+    if !ctxt::allowed(&who, &attr, acl.as_deref(), who.uid, who.gid, MAY_EXEC, &path)? { // wave9 G6b-3: and ABAC
         return Err(EACCES);
     }
     let d = LxFhDesc { ino: node.ino, mnt: 0, is_dir: 1, ..LxFhDesc::EMPTY };

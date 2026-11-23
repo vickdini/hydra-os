@@ -161,7 +161,8 @@ pub fn answer(cx: &Cx, r: Result<i64, i64>) -> Answer {
     // wave7 G7-4: a walk into `/proc` or `/sys`: linux-server serves the call
     if let Err(e) = r {
         if let Some((svc, obj, tail)) = pseudo_of(e) {
-            if pseudo_served(cx.nr) {
+            // (wave9 G6b-3: a landlocked caller's open there is the kernel's: its lexical chain)
+            if pseudo_served(cx.nr) && !(cx.c.ll_dom != 0 && matches!(cx.nr, 2 | 257)) {
                 let n = TO_PSEUDO.fetch_add(1, Ordering::Relaxed) + 1;
                 if n == 1 || (n >= 1024 && n.is_power_of_two()) {
                     hydra_rt::println!("[vfs-server] {} calls redirected to linux-server (/proc, /sys)", n);

@@ -5,7 +5,6 @@ use hydra_rt::svcrt::Cx;
 
 use super::ctxt::{self, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW};
 use super::enc;
-use crate::proto::LX_FS_ABAC;
 use crate::walk::Backend;
 
 const EINVAL: i64 = -22;
@@ -49,8 +48,8 @@ pub fn stat(cx: &Cx) -> Result<i64, i64> {
 /// flags)`.
 pub fn access(cx: &Cx) -> Result<i64, i64> {
     let c = &cx.c;
-    // (ABAC rules may take away what the modes allow: the kernel checks them)
-    ctxt::check(c, LX_FS_ABAC)?;
+    // (wave9 G6b-3: ABAC rules may take away what the modes allow: asked below)
+    ctxt::check(c, 0)?;
     let a = cx.args;
     let (path_ptr, mode, flags) = super::rules::access_args(cx.nr, &a);
     let path = ctxt::path(cx, path_ptr, false)?;
@@ -66,7 +65,7 @@ pub fn access(cx: &Cx) -> Result<i64, i64> {
     }
     let (uid, gid) = if flags & AT_EACCESS != 0 { (c.euid, c.egid) } else { (c.uid, c.gid) };
     let acl = ctxt::acl_of(n, &attr)?;
-    if ctxt::may_access(&who, &attr, acl.as_deref(), uid, gid, mode & 7) {
+    if ctxt::allowed(&who, &attr, acl.as_deref(), uid, gid, mode & 7, &path)? {
         Ok(0)
     } else {
         Err(EACCES)

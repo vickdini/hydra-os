@@ -19,7 +19,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 use super::chardev::CharDevice;
@@ -102,6 +102,8 @@ impl Layer {
 /// A thread's stack of layers.
 pub struct Domain {
     layers: Vec<Arc<Layer>>,
+    /// wave9 G6b-3: never reused (the file service keeps copies by it, `LxCall::ll_dom`).
+    id: u64,
 }
 
 /// A ruleset descriptor.
@@ -147,6 +149,43 @@ fn domain() -> Option<Arc<Domain>> {
 pub fn active() -> bool {
     domain().is_some()
 }
+
+// wave9 G6b-3 begin: the file service checks Landlock with copies of the domains
+/// The next domain id.
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The calling thread's domain id (`LxCall::ll_dom`); 0 when it is not landlocked.
+pub fn domain_id() -> u64 {
+    domain().map_or(0, |d| d.id)
+}
+
+/// The domain of task `tid` in the `LX_FH_LANDLOCK` format (`None`: not landlocked).
+pub fn serialized_of(tid: u64) -> Option<Vec<u8>> {
+    if !ANY.load(Ordering::Relaxed) {
+        return None;
+    }
+    let d = crate::task::SCHEDULER.lock().with_task_mut(crate::task::TaskId(tid), |t| t.seccomp.landlock.clone()).flatten()?;
+    Some(serialize(&d))
+}
+
+/// `d` as `LxLlHead`, then per layer `LxLlLayer` and its `(inode, rights)` rules (all
+/// little-endian `u64`s).
+fn serialize(d: &Domain) -> Vec<u8> {
+    let mut v = Vec::new();
+    let mut put = |x: u64| v.extend_from_slice(&x.to_le_bytes());
+    put(d.id);
+    put(d.layers.len() as u64);
+    for l in &d.layers {
+        put(l.fs);
+        put(l.paths.len() as u64);
+        for (&ino, &r) in &l.paths {
+            put(ino);
+            put(r);
+        }
+    }
+    v
+}
+// wave9 G6b-3 end
 
 fn u64_at(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
@@ -287,7 +326,7 @@ fn restrict_self(fd: u64, flags: u64) -> i64 {
             return E2BIG;
         }
         layers.push(layer);
-        t.seccomp.landlock = Some(Arc::new(Domain { layers }));
+        t.seccomp.landlock = Some(Arc::new(Domain { layers, id: NEXT_ID.fetch_add(1, Ordering::Relaxed) }));
         0
     })
     .unwrap_or(EPERM)

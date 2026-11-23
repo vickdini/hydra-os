@@ -4,7 +4,7 @@
 //! kernel's (`LX_FH_CHANGED`: names, attributes, the page cache).
 //!
 //! Sent to the kernel before anything changes: callers with inotify or fanotify watches
-//! (their events come from the kernel's client), Landlock or ABAC rules; a new object in a
+//! (their events come from the kernel's client); a new object in a
 //! directory with extended attributes (a default ACL would be inherited); `utimensat` with
 //! "now" (the kernel's clock).
 
@@ -16,7 +16,8 @@ use super::rules;
 use crate::cache;
 use crate::ctx::{Ctx, Node};
 use crate::fs::fsproto::{suid_killed, Attr, SetAttr, FS_MKDIR, FS_RENAME, FS_RMDIR, FS_SETATTR, FS_SYMLINK, FS_UNLINK};
-use crate::proto::{LxCall, LX_FHC_ALL_ATTRS, LX_FHC_ATTR, LX_FHC_GONE, LX_FHC_NAMES, LX_FHC_TRUNC, LX_FH_CHANGED, LX_FS_ABAC, LX_FS_FANOTIFY, LX_FS_INOTIFY, LX_FS_LANDLOCK};
+use crate::policy::{self, ll};
+use crate::proto::{LxCall, LX_FHC_ALL_ATTRS, LX_FHC_ATTR, LX_FHC_GONE, LX_FHC_NAMES, LX_FHC_TRUNC, LX_FH_CHANGED, LX_FH_NOTRUNC, LX_FS_FANOTIFY, LX_FS_INOTIFY};
 use crate::walk::{self, Backend, ParentWalked};
 use crate::zfs;
 
@@ -26,8 +27,8 @@ const ENOTDIR: i64 = -20;
 const EINVAL: i64 = -22;
 const EACCES: i64 = -13;
 
-/// What only the kernel has for a change.
-const NEED: u32 = LX_FS_INOTIFY | LX_FS_FANOTIFY | LX_FS_LANDLOCK | LX_FS_ABAC;
+/// What only the kernel has for a change (wave9 G6b-3: Landlock and ABAC are checked here).
+const NEED: u32 = LX_FS_INOTIFY | LX_FS_FANOTIFY;
 /// `CAP_FSETID`.
 const CAP_FSETID: u32 = 4;
 const AT_REMOVEDIR: u64 = 0x200;
@@ -114,6 +115,11 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
                 _ => (0, a[1], true),
             };
             let (n, at) = target(cx, &who, ptr, true, empty)?;
+            // wave9 G6b-3: an object with extended attributes may have an access ACL, which
+            // takes the new owner, mask and other bits (the kernel's `acl::on_chmod`)
+            if at.has_xattr {
+                return Err(KERNEL);
+            }
             ctxt::writable(c, n)?; // wave7 G7-7
             if !owner(&who, &at) {
                 return Err(EPERM);
@@ -149,9 +155,15 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
                 return Err(EINVAL);
             }
             let (n, at) = target(cx, &who, a[0], true, false)?;
+            // wave9 G6b-3: Landlock's TRUNCATE first, as the kernel
+            if let Some(d) = policy::domain(c)? {
+                if policy::refused_on(&d, c.id, n, at.is_dir(), ll::TRUNCATE)? != 0 {
+                    return Err(EACCES);
+                }
+            }
             ctxt::writable(c, n)?; // wave7 G7-7
             let acl = ctxt::acl_of(n, &at)?;
-            if !ctxt::may_access(&who, &at, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE) {
+            if !ctxt::allowed(&who, &at, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE, b"")? {
                 return Err(EPERM);
             }
             setattr(&who, n, &at, SetAttr { size: Some(a[1]), ..SetAttr::default() })
@@ -163,6 +175,10 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
             }
             if c.fh_flags & rules::O_ACCMODE == rules::O_RDONLY {
                 return Err(EINVAL);
+            }
+            // wave9 G6b-3: Landlock refused TRUNCATE when the handle was opened
+            if c.fh_flags & LX_FH_NOTRUNC != 0 {
+                return Err(EACCES);
             }
             let n = ctxt::handle(c)?;
             ctxt::writable(c, n)?; // wave7 G7-7
@@ -223,8 +239,13 @@ fn parent(c: &LxCall, who: &Ctx, path: &[u8], create: bool) -> Result<walk::Pare
             _ => {}
         }
     }
+    // wave9 G6b-3: a new object in a labelled folder under the access policies: the kernel's
+    // (it inherits the labels; deciding here too would audit twice)
+    if create && who.abac && p.dir_attr.has_xattr {
+        return Err(KERNEL);
+    }
     let acl = ctxt::acl_of(p.dir, &p.dir_attr)?;
-    if !ctxt::may_access(who, &p.dir_attr, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE | rules::MAY_EXEC) {
+    if !ctxt::allowed(who, &p.dir_attr, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE | rules::MAY_EXEC, path)? {
         return Err(EACCES);
     }
     Ok(p)
@@ -259,6 +280,10 @@ pub fn mkdir(cx: &Cx) -> Result<i64, i64> {
     let path = ctxt::path(cx, ptr, false)?;
     let who = ctxt::caller(c)?;
     let p = parent(c, &who, &path, true)?;
+    // wave9 G6b-3: Landlock
+    if let Some(d) = policy::domain(c)? {
+        policy::check_dir(&d, p.dir, ll::MAKE_DIR)?;
+    }
     // A default ACL (or ABAC labels) would be inherited: the kernel's
     if p.dir_attr.has_xattr {
         return Err(KERNEL);
@@ -287,6 +312,10 @@ pub fn symlink(cx: &Cx) -> Result<i64, i64> {
     let path = ctxt::path(cx, ptr, false)?;
     let who = ctxt::caller(c)?;
     let p = parent(c, &who, &path, true)?;
+    // wave9 G6b-3: Landlock
+    if let Some(d) = policy::domain(c)? {
+        policy::check_dir(&d, p.dir, ll::MAKE_SYM)?;
+    }
     let r = zfs::request(FS_SYMLINK, |w| {
         w.u64(p.dir.ino);
         w.bytes(&p.name);
@@ -313,10 +342,18 @@ pub fn unlink(cx: &Cx) -> Result<i64, i64> {
     let path = ctxt::path(cx, ptr, false)?;
     let who = ctxt::caller(c)?;
     let p = parent(c, &who, &path, false)?;
+    // wave9 G6b-3: Landlock (by the call: rmdir needs REMOVE_DIR, unlink REMOVE_FILE)
+    if let Some(d) = policy::domain(c)? {
+        policy::check_dir(&d, p.dir, if rmdir { ll::REMOVE_DIR } else { ll::REMOVE_FILE })?;
+    }
     let victim = p.child;
     if let Some(v) = victim {
         if sticky_denied(&p.dir_attr, v, c.euid)? {
             return Err(EPERM);
+        }
+        // wave9 G6b-3: the access policies: deleting needs the delete right on the file
+        if who.abac && c.euid != 0 && !policy::abac(&who, &ctxt::BE.getattr(v)?, 0, true, &path)? {
+            return Err(EACCES);
         }
     }
     let r = zfs::request(if rmdir { FS_RMDIR } else { FS_UNLINK }, |w| {
@@ -327,6 +364,7 @@ pub fn unlink(cx: &Cx) -> Result<i64, i64> {
     crate::notify::changed(&r, &who);
     if r.is_ok() && rmdir {
         if let Some(v) = victim {
+            policy::names_changed(v.ino); // wave9 G6b-3
             cache::CACHE.forget_object(v.ino);
         }
     }
@@ -377,13 +415,26 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
             return Err(ENOTDIR);
         }
         let acl = ctxt::acl_of(d.dir, &d.dir_attr)?;
-        if !ctxt::may_access(&who, &d.dir_attr, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE | rules::MAY_EXEC) {
+        // (wave9 G6b-3: and the access policies, as the kernel's `may_access` — review)
+        let named = if d.dir == src.dir { &op } else { &np };
+        if !ctxt::allowed(&who, &d.dir_attr, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE | rules::MAY_EXEC, named)? {
             return Err(EACCES);
         }
     }
     if let Some(s) = src.child {
         if sticky_denied(&src.dir_attr, s, c.euid)? {
             return Err(EPERM);
+        }
+        // wave9 G6b-3: the access policies: moving a file away from its folder needs the
+        // delete right
+        if who.abac && c.euid != 0 && src.dir.ino != dst.dir.ino && !policy::abac(&who, &ctxt::BE.getattr(s)?, 0, true, &op)? {
+            return Err(EACCES);
+        }
+    }
+    // wave9 G6b-3: and a file replaced
+    if let Some(d) = dst.child {
+        if who.abac && c.euid != 0 && !policy::abac(&who, &ctxt::BE.getattr(d)?, 0, true, &np)? {
+            return Err(EACCES);
         }
     }
     if let Some(d) = dst.child {
@@ -394,6 +445,17 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
             return Err(EEXIST);
         }
     }
+    // wave9 G6b-3 begin: Landlock (the kernel's check_move: remove, make, REFER)
+    if let Some(dom) = policy::domain(c)? {
+        let s = src.child.ok_or(rules::ENOENT)?;
+        let ftype = ctxt::BE.getattr(s)?.mode & rules::S_IFMT;
+        let remove_dst = match dst.child {
+            Some(d) => ll::remove_right(ctxt::BE.getattr(d)?.mode & rules::S_IFMT),
+            None => 0,
+        };
+        policy::check_move(&dom, src.dir, dst.dir, ftype, remove_dst)?;
+    }
+    // wave9 G6b-3 end
     let r = zfs::request(FS_RENAME, |w| {
         w.u64(src.dir.ino);
         w.bytes(&src.name);
@@ -405,6 +467,11 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
     let replaced = if r.is_ok() { dst.child.map(|d| d.ino).filter(|&d| Some(d) != src.child.map(|s| s.ino)) } else { None };
     if let Some(s) = src.child {
         cache::CACHE.forget_object(s.ino);
+    }
+    // wave9 G6b-3: (a directory may have moved, or been replaced)
+    policy::names_changed(src.child.map_or(0, |s| s.ino));
+    if let Some(d) = dst.child {
+        policy::names_changed(d.ino);
     }
     names_changed(&[src.dir, dst.dir], replaced);
     r.map(|_| 0)

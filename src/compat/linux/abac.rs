@@ -280,6 +280,12 @@ pub fn active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }
 
+/// wave9 G6b-3: whether a policy with app rules is loaded (app control at `execve`).
+#[inline]
+pub fn apps_active() -> bool {
+    APPS.load(Ordering::Relaxed)
+}
+
 // ----------------------------------------------------------------------
 // Enforcement
 // ----------------------------------------------------------------------
@@ -311,8 +317,52 @@ pub fn check_delete(attr: &Attr) -> bool {
 
 #[inline(never)]
 fn check_slow(attr: &Attr, want: u8) -> bool {
+    check_as(attr, want, current_subject(), None, None)
+}
+
+// wave9 G6b-3 begin: decisions for the file service's callers (`LX_FH_ABAC`)
+/// Whether the policies apply to the calling process at all (it has a subject): the file
+/// service asks the kernel only for such callers (`LX_FS_ABAC`).
+pub fn applies_to_current() -> bool {
+    current_subject() != 0
+}
+
+/// The caller of a file-service call a decision is made for (its audit record's ids).
+struct Caller {
+    pid: u64,
+    uid: u32,
+    exe: Option<String>,
+}
+
+/// `LX_FH_ABAC`: may task `tid` access the object `ino` (generation `gen`, mode `mode`) for
+/// `want` (`r` 4, `w` 2, `x` 1, or `delete`)? `path`: the path it named (audit).
+pub fn check_for(tid: u64, ino: u64, gen: u64, mode: u32, want: u32, delete: bool, path: Option<&str>) -> bool {
+    if !ACTIVE.load(Ordering::Relaxed) {
+        return true;
+    }
+    let Some((tgid, uid, euid, exe)) = crate::task::SCHEDULER.lock().with_task_mut(crate::task::TaskId(tid), |t| (t.tgid, t.uid, t.euid, t.exe.as_deref().map(String::from))) else { return true };
+    let subject = super::proc::abac_subject(tgid);
+    if subject == 0 || (delete && euid == 0) {
+        return true;
+    }
+    let attr = Attr { ino, generation: gen, mode, has_xattr: true, ..Attr::default() };
+    let want = if delete {
+        super::abac_core::D
+    } else {
+        // (as `check`: a folder's x goes with its read right)
+        let mut w = want as u8 & 7;
+        if attr.is_dir() && w & super::abac_core::X != 0 {
+            w = (w & !super::abac_core::X) | super::abac_core::R;
+        }
+        w
+    };
+    check_as(&attr, want, subject, Some(&Caller { pid: tgid, uid, exe }), path)
+}
+// wave9 G6b-3 end
+
+/// [`check_slow`] for `subject` (`caller`: `None` = the calling task).
+fn check_as(attr: &Attr, want: u8, subject: u32, caller: Option<&Caller>, path: Option<&str>) -> bool {
     CHECKS.fetch_add(1, Ordering::Relaxed);
-    let subject = current_subject();
     if subject == 0 {
         return true;
     }
@@ -333,7 +383,7 @@ fn check_slow(attr: &Attr, want: u8) -> bool {
             _ => Kind::DenyStagedAllows,
         };
         let rule = d.deciding_rule(want, ok).or_else(|| d.deciding_rule(want, !ok));
-        audit(kind, attr.ino, want, rule, None);
+        audit_as(kind, attr.ino, want, rule, path, caller);
     }
     ok
 }
@@ -468,10 +518,16 @@ fn copy_trunc<const N: usize>(dst: &mut [u8; N], src: &[u8]) -> u8 {
 }
 
 fn audit(kind: Kind, ino: u64, want: u8, rule: Option<usize>, path: Option<&str>) {
-    let pid = super::proc::current_ids().1;
-    let uid = super::vfs::creds().uid;
+    audit_as(kind, ino, want, rule, path, None)
+}
+
+/// [`audit`] for `caller` (`None`: the calling task).
+fn audit_as(kind: Kind, ino: u64, want: u8, rule: Option<usize>, path: Option<&str>, caller: Option<&Caller>) {
+    let (pid, uid, exe) = match caller {
+        Some(c) => (c.pid, c.uid, c.exe.clone()),
+        None => (super::proc::current_ids().1, super::vfs::creds().uid, crate::task::with_current_task_mut(|t| t.exe.as_deref().map(String::from)).flatten()),
+    };
     let gen = GEN.load(Ordering::Relaxed);
-    let exe = crate::task::with_current_task_mut(|t| t.exe.clone()).flatten();
     let mut rec = Record {
         time: now(),
         kind,

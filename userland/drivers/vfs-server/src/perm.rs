@@ -1,6 +1,6 @@
 //! Permission policy: mode bits, POSIX ACLs and the discretionary capabilities, as the
-//! kernel's `vfs::may_access` and `acl::check` decide them today (the ABAC and Landlock
-//! checks stay with the kernel until wave 8: a caller they restrict is sent back there).
+//! kernel's `vfs::may_access` and `acl::check` decide them today (wave9 G6b-3: Landlock and
+//! the access policies on top of these are `crate::policy`'s).
 
 use crate::ctx::{Ctx, CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH};
 use crate::fs::fsproto::Attr;

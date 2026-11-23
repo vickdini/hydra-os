@@ -470,3 +470,47 @@ team=AlsoNeverSeen").unwrap();
     assert!(other.starts_with("enforced=- "), "{other}");
     assert!(again.starts_with("enforced=r "), "{again}");
 }
+
+// wave9 G6b-3: decisions for the file service's callers (`LX_FH_ABAC`)
+#[test]
+fn decisions_for_the_file_service_callers() {
+    let _g = serial();
+    let d = fakefs::test_dir("abac-svc");
+    let tid = fake::IDS.get().0;
+    // No policy: everything passes
+    assert!(abac::check_for(tid, 1, 0, 0o100644, R as u32, false, None));
+    assert_eq!(load(POLICY), 0);
+    let ok = labelled(d, "internal", "department=Finance\nclassification=Internal\npolicy=Fin", 0o644);
+    let secret = labelled(d, "secret", "department=Finance\nclassification=Secret\npolicy=Fin", 0o644);
+    as_user(5200);
+    let tid = fake::IDS.get().0;
+    // No subject
+    assert!(!abac::applies_to_current());
+    assert!(abac::check_for(tid, secret.ino, secret.generation, secret.mode, R as u32, false, None));
+    assert_eq!(set_subject(0, "department=Finance\nclearance=Confidential"), 0);
+    assert!(abac::applies_to_current());
+    fake::EXE.with_borrow_mut(|e| *e = Some("/usr/bin/less".into()));
+    assert!(abac::check_for(tid, ok.ino, ok.generation, ok.mode, (R | W) as u32, false, None));
+    assert!(!abac::check_for(tid, secret.ino, secret.generation, secret.mode, R as u32, false, Some("/abac-svc/secret")));
+    // A folder's x is its r
+    let dir = {
+        let ino = with_fs(|fs| fs.mkdir_p(d, "hrdir"));
+        ZfsClient::setxattr(ino, LABELS, b"department=HR\nclassification=Public\npolicy=Fin", 0).unwrap();
+        ZfsClient::getattr(ino).unwrap()
+    };
+    assert!(!abac::check_for(tid, dir.ino, dir.generation, dir.mode, X as u32, false, None));
+    // Delete: refused, except to euid 0
+    assert!(!abac::check_for(tid, secret.ino, secret.generation, secret.mode, 0, true, None));
+    fake::CREDS.set((0, 0));
+    assert!(abac::check_for(tid, secret.ino, secret.generation, secret.mode, 0, true, None));
+    fake::CREDS.set((1000, 1000));
+    // The audit record is the caller's, with the path it named
+    let a = read_audit();
+    assert!(a.contains("deny pid=5200 uid=1000 want=r"), "{a}");
+    assert!(a.contains("path=/abac-svc/secret") && a.contains("exe=less"), "{a}");
+    assert!(a.contains("want=d"), "{a}");
+    // An unknown task: nothing to decide for
+    assert!(abac::check_for(tid + 77_777, secret.ino, secret.generation, secret.mode, R as u32, false, None));
+    as_admin(|| prctl(cmd::LOAD, 0, 0, 0));
+    fake::PROCS.lock().remove(&5200);
+}
