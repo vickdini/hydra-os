@@ -335,12 +335,18 @@ pub fn fcntl(fd: u64, cmd: u64, arg: u64, ofd: bool) -> i64 {
 
 /// `/proc/locks`.
 pub fn proc_locks() -> String {
+    proc_locks_view(super::ns::pid_to_caller)
+}
+
+/// wave11 GP (review 11-P 5): [`proc_locks`] with process IDs as `view` shows them (lx-proc
+/// asks for its reader's PID namespace, not for its own).
+pub fn proc_locks_view(view: impl Fn(u64) -> u64) -> String {
     let mut s = String::new();
     for (i, l) in LOCKS.lock().iter().enumerate() {
         let (class, pid) = match l.owner {
-            Owner::Posix(_) => ("POSIX ", super::ns::pid_to_caller(l.pid) as i64),
+            Owner::Posix(_) => ("POSIX ", view(l.pid) as i64),
             Owner::Ofd(_) => ("OFDLCK", -1),
-            Owner::Flock(_) => ("FLOCK ", super::ns::pid_to_caller(l.pid) as i64),
+            Owner::Flock(_) => ("FLOCK ", view(l.pid) as i64),
         };
         let end = if l.end == u64::MAX { String::from("EOF") } else { alloc::format!("{}", l.end) };
         s.push_str(&alloc::format!("{}: {} ADVISORY  {} {} 08:01:{} {} {}\n", i + 1, class, if l.write { "WRITE" } else { "READ " }, pid, l.ino, l.start, end));

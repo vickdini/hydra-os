@@ -563,6 +563,9 @@ pub(crate) fn base_dir(dirfd: i64, path: &[u8]) -> Result<(u64, String), i64> {
             // A /proc directory (Chromium walks /proc/self/fd through one)
             let pseudo_dir = crate::task::with_current_fds_mut(|fds| match fds.get(dirfd as usize) {
                 Some(FileDescriptor::File { path, .. }) if super::fs::is_proc_dir(path) => Some(path.clone()),
+                // wave11 GP: a `/proc` directory lx-proc listed (a snapshot): the calls lx-proc
+                // hands back (links followed, `..`, `net/`, writes) walk from its path
+                Some(FileDescriptor::Device(d)) => d.proc_ident().filter(|(_, mode, _)| mode & 0o170000 == 0o040000).map(|(_, _, name)| name),
                 _ => None,
             });
             match pseudo_dir {

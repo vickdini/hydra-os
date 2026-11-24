@@ -1017,6 +1017,15 @@ fn proc_dirfd_call(nr: u64, args: &[u64; 6]) -> Option<Option<i64>> {
     if path.is_empty() || path[0] == b'/' {
         return None;
     }
+    // (review 11-P 1: a caller under Landlock or ABAC takes the ordinary route: vfs-server
+    // sends the call back and the kernel's walk from the `/proc` descriptor applies the same
+    // checks as for an absolute `/proc` path)
+    {
+        use crate::compat::linux as l;
+        if l::landlock::domain_id() != 0 || ((l::abac::active() || l::abac::apps_active()) && l::abac::applies_to_current()) {
+            return None;
+        }
+    }
     let x = svc::host(svc::host_of(LXS_PROC))?;
     let mut c = LxCall::EMPTY;
     c.nr = nr;

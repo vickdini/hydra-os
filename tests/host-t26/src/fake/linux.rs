@@ -125,6 +125,9 @@ pub mod chardev {
         fn getdents64(&self, _count: usize) -> Option<Result<Vec<u8>, i64>> {
             None
         }
+        fn proc_ident(&self) -> Option<([u64; 4], u32, String)> {
+            None
+        }
     }
 
     thread_local! {

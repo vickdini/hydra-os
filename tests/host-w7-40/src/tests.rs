@@ -485,10 +485,10 @@ fn info_wave11_views() {
 fn procx_rules() {
     use crate::ipc::protocol::*;
     use crate::lx::procx::{fdinfo_flags, guarded, per_process};
-    for w in [LX_PX_FDS, LX_PX_FDLINK, LX_PX_FDINFO, LX_PX_LINK, LX_PX_AUXV] {
+    for w in [LX_PX_FDS, LX_PX_FDLINK, LX_PX_FDINFO, LX_PX_LINK, LX_PX_AUXV, LX_PX_NSINO] {
         assert!(guarded(w) && per_process(w));
     }
-    for w in [LX_PX_CGROUP, LX_PX_NSINO, LX_PX_TASKS, LX_PX_IDMAP, LX_PX_OOM] {
+    for w in [LX_PX_CGROUP, LX_PX_TASKS, LX_PX_IDMAP, LX_PX_OOM] {
         assert!(!guarded(w) && per_process(w));
     }
     for w in [LX_PX_PIDS, LX_PX_TEXT, 99] {

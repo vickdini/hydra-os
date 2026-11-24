@@ -23,7 +23,7 @@ const EINVAL: i64 = -22;
 /// Whether operation `what` reads what the `ptrace` read rule guards (Linux: `fd/`,
 /// `fdinfo/`, `exe`, `cwd`, `root`, `auxv` need `PTRACE_MODE_READ_FSCREDS`).
 pub fn guarded(what: u64) -> bool {
-    matches!(what, LX_PX_FDS | LX_PX_FDLINK | LX_PX_FDINFO | LX_PX_LINK | LX_PX_AUXV)
+    matches!(what, LX_PX_FDS | LX_PX_FDLINK | LX_PX_FDINFO | LX_PX_LINK | LX_PX_AUXV | LX_PX_NSINO)
 }
 
 /// Whether operation `what` is about one process (`pid`), not the whole system.
@@ -153,7 +153,14 @@ mod glue {
                 x.out[3] = ino;
                 x.out[4] = match pidfd {
                     // (-1 once the process has exited, as Linux reports it)
-                    Some(p) if crate::task::SCHEDULER.lock().with_process(p, |_| ()).is_some() => to_caller(p, c.init) + 1,
+                    // (review 11-P 7: a process outside the reader's PID namespace shows as 0)
+                    Some(p) if crate::task::SCHEDULER.lock().with_process(p, |_| ()).is_some() => {
+                        if visible(p, c.init, 0) || p == c.tgid {
+                            to_caller(p, c.init) + 1
+                        } else {
+                            1
+                        }
+                    }
                     Some(_) => u64::MAX,
                     None => 0,
                 };
@@ -240,7 +247,7 @@ mod glue {
                 let text = match x.arg {
                     LX_PX_T_FILESYSTEMS => lx::admin::filesystems_text(),
                     LX_PX_T_SWAPS => lx::admin::swaps_text(),
-                    LX_PX_T_LOCKS => lx::locks::proc_locks(),
+                    LX_PX_T_LOCKS => lx::locks::proc_locks_view(|p| to_caller(p, c.init)),
                     LX_PX_T_BOOTID => lx::fs::uuid_text(true),
                     LX_PX_T_UUID => lx::fs::uuid_text(false),
                     LX_PX_T_MOUNTINFO | LX_PX_T_MOUNTS => {

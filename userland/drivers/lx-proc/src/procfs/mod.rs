@@ -201,13 +201,20 @@ fn stat(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
         },
         // wave11 GP: a link belongs to its process (which must exist); an `fd/N` link to a
         // descriptor that is open
-        Target::Link(who, l) => match link_text(cx.id, who, l) {
-            Ok(_) => match task(cx.id, who, LX_INFO_TASK_NOMEM >> 32) {
+        // (review 11-P 6: `lstat` of `cwd`, `exe`, `root`, `ns/*` needs only the process, as
+        // Linux: reading the link is what the ptrace rule guards; `fd/N` must be open, and its
+        // directory is the owner's alone anyway)
+        Target::Link(who, l) => {
+            if let Link::Fd(_) = l {
+                if let Err(e) = link_text(cx.id, who, l) {
+                    return Some(e);
+                }
+            }
+            match task(cx.id, who, LX_INFO_TASK_NOMEM >> 32) {
                 Ok(i) => (i.ids[1], i.ids[4], 1),
                 Err(_) => return Some(ENOENT),
-            },
-            Err(e) => return Some(e),
-        },
+            }
+        }
         _ => match owner(cx.id, target) {
             Ok((u, g)) => (u, g, 1),
             Err(e) => return Some(e),
@@ -277,14 +284,22 @@ fn access_of(cx: &Cx, target: Target) -> i64 {
     };
     let c = &cx.c;
     // (faccessat2's AT_EACCESS: the effective ids)
-    let uid = if flags & 0x200 != 0 { c.euid } else { c.uid };
+    let mut uid = if flags & 0x200 != 0 { c.euid } else { c.uid };
+    // (review 11-P 3: in a user namespace of its own the owners come back as that namespace
+    // shows them: the caller's ids the same way)
+    if c.user_ns != 0 {
+        match task(cx.id, Who::Caller, LX_INFO_TASK_NOMEM >> 32) {
+            Ok(i) => uid = if flags & 0x200 != 0 { i.ids[1] } else { i.ids[0] },
+            Err(e) => return e,
+        }
+    }
     // The process must exist; its files and directories are its effective user's
     let (perm, owner_uid) = match target {
         Target::Dir(d) => match dir_facts(cx.id, d) {
             Ok((u, _, _)) => (d.mode(), u),
             Err(e) => return e,
         },
-        Target::SelfLink(_) => (0o555, c.euid),
+        Target::SelfLink(_) => (0o555, uid),
         Target::File(f) => match owner(cx.id, target) {
             Ok((u, _)) => (f.mode(), u),
             Err(e) => return e,
@@ -504,14 +519,22 @@ fn list(id: u64, d: Dir) -> Result<Vec<u8>, i64> {
                 names.push((alloc::format!("{}", fd), t));
             }
         }
-        Dir::Ns(w) => {
-            let out = procx(id, LX_PX_NSINO, pid_word(w), 0, &[])?.1;
-            for (k, n) in LX_PX_NS_NAMES.iter().enumerate() {
-                if out[k] != 0 {
+        Dir::Ns(w) => match procx(id, LX_PX_NSINO, pid_word(w), 0, &[]) {
+            Ok((_, out)) => {
+                for (k, n) in LX_PX_NS_NAMES.iter().enumerate() {
+                    if out[k] != 0 {
+                        push(n, text::DT_LNK);
+                    }
+                }
+            }
+            // (another user's process: the names are listed, reading them is refused)
+            Err(EACCES) => {
+                for n in ["cgroup", "ipc", "mnt", "net", "pid", "pid_for_children", "user", "uts"] {
                     push(n, text::DT_LNK);
                 }
             }
-        }
+            Err(e) => return Err(e),
+        },
         Dir::Static(i) => {
             let dirs = path::static_dirs();
             let here = dirs.get(i as usize).copied().ok_or(ENOENT)?;
@@ -590,9 +613,20 @@ fn buffer(op: u64, id: u64, pid: u64) -> Result<Vec<u8>, i64> {
 /// The resource limits of `who` (soft, hard), through the process primitives (op 75).
 fn limits(id: u64, who: Who) -> Result<[(u64, u64); text::NLIMITS], i64> {
     let mut l = [(0u64, 0u64); text::NLIMITS];
+    // (review 11-P 8: the process as the reader names it, made system-wide: in a PID
+    // namespace of its own, 1 is that namespace's init)
+    let pid = match who {
+        Who::Caller => 0,
+        Who::Pid(p) => {
+            let mut io = LxProcIo::EMPTY;
+            io.a[0] = p;
+            sys::lx_obj(LX_OBJ_PROCID, id, LXP_PID_GET, &mut io as *mut LxProcIo as u64)?;
+            io.a[0]
+        }
+    };
     for (r, v) in l.iter_mut().enumerate() {
         let mut io = LxProcIo::EMPTY;
-        io.a[0] = pid_word(who);
+        io.a[0] = pid;
         io.a[1] = r as u64;
         sys::lx_obj(LX_OBJ_PROCID, id, LXP_LIMIT_GET, &mut io as *mut LxProcIo as u64)?;
         *v = (io.a[0], io.a[1]);

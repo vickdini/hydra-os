@@ -21,6 +21,7 @@
 #include <string.h>
 #include <sys/auxv.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -221,6 +222,61 @@ static void checks(void) {
     close(pp[0]);
 }
 
+/* review 11-P 2: calls lx-proc hands back to the kernel from a /proc directory descriptor */
+static void dirfd_fallbacks(void) {
+    int pd = open("/proc", O_RDONLY | O_DIRECTORY);
+    int fdd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY);
+    CHECK(pd >= 0 && fdd >= 0, "open /proc dirs");
+    int f = open("/proc/version", O_RDONLY);
+    char n[32];
+    snprintf(n, sizeof n, "%d", f);
+    int g = openat(fdd, n, O_RDONLY); /* following fd/N from the fd/ directory */
+    CHECK(g >= 0 && read(g, buf, 5) == 5 && !memcmp(buf, "Linux", 5), "openat(fd dir, N)");
+    if (g >= 0) close(g);
+    struct stat st;
+    CHECK(fstatat(fdd, n, &st, 0) == 0 && S_ISREG(st.st_mode), "fstatat(fd dir, N) follows");
+    CHECK(faccessat(fdd, n, R_OK, 0) == 0, "faccessat(fd dir, N)");
+    CHECK(slurp_at(pd, "self/../self/comm", buf, sizeof buf) > 0, "openat(/proc, self/../self/comm)");
+    CHECK(slurp_at(pd, "net/unix", buf, sizeof buf) >= 0, "openat(/proc, net/unix)");
+    int r = openat(pd, "self/root", O_RDONLY | O_DIRECTORY);
+    CHECK(r >= 0, "openat(/proc, self/root)");
+    if (r >= 0) close(r);
+    int t = openat(pd, "thread-self/", O_RDONLY | O_DIRECTORY);
+    CHECK(t >= 0, "openat(/proc, thread-self/)");
+    if (t >= 0) close(t);
+    int w = openat(pd, "self/oom_score_adj", O_WRONLY);
+    CHECK(w >= 0 && write(w, "0", 1) == 1, "write oom_score_adj through /proc dirfd");
+    if (w >= 0) close(w);
+    close(f);
+    close(fdd);
+    close(pd);
+}
+
+/* review 11-P 1: a Landlocked process holding a /proc descriptor from before cannot read
+ * through it what it cannot read by path */
+static void landlock_dirfd(void) {
+    pid_t c = fork();
+    if (c == 0) {
+        int pd = open("/proc", O_RDONLY | O_DIRECTORY);
+        struct { unsigned long long handled; } attr = { 1ULL << 2 }; /* LANDLOCK_ACCESS_FS_READ_FILE */
+        int rs = syscall(444, &attr, sizeof attr, 0);
+        if (rs < 0) { printf("landlock: create %d: skipped\n", errno); _exit(0); }
+        prctl(38, 1, 0, 0, 0); /* PR_SET_NO_NEW_PRIVS */
+        if (syscall(446, rs, 0) != 0) { printf("landlock: restrict %d: skipped\n", errno); _exit(0); }
+        int bad = 0;
+        if (open("/proc/self/status", O_RDONLY) >= 0) { printf("landlock: path open allowed (no check here): skipped\n"); _exit(0); }
+        char p[32];
+        snprintf(p, sizeof p, "%d/environ", getppid());
+        if (openat(pd, p, O_RDONLY) >= 0) { printf("FAIL landlock: openat(/proc, pid/environ) allowed\n"); bad++; }
+        if (openat(pd, "sys/kernel/shmmax", O_RDONLY) >= 0) { printf("FAIL landlock: openat(/proc, sys/...) allowed\n"); bad++; }
+        if (openat(pd, "self/status", O_RDONLY) >= 0) { printf("FAIL landlock: openat(/proc, self/status) allowed\n"); bad++; }
+        _exit(bad);
+    }
+    int s = 0;
+    waitpid(c, &s, 0);
+    CHECK(WIFEXITED(s) && WEXITSTATUS(s) == 0, "landlock dirfd child %x", s);
+}
+
 /* in a PID namespace of its own: /proc mounted for it shows its view */
 static void pidns_checks(void) {
     if (unshare(CLONE_NEWPID | CLONE_NEWNS) != 0) {
@@ -304,6 +360,8 @@ int main(int argc, char **argv) {
     if (argc > 2 && !strcmp(argv[1], "bench")) { bench(atoi(argv[2])); return 0; }
     if (argc > 2 && !strcmp(argv[1], "hold")) { hold(atoi(argv[2])); return 0; }
     checks();
+    dirfd_fallbacks();
+    landlock_dirfd();
     if (geteuid() == 0) pidns_checks();
     else printf("pidns: not root: skipped\n");
     if (!fails) printf("PROCREST PASS\n");
