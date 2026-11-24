@@ -420,13 +420,38 @@ fn prctl_attributes_follow_fork_exec_exit() {
 
 #[test]
 fn approvals_are_taken_once_per_thread() {
-    mech::approve(7130, 103);
+    let _g = setup();
+    assert!(mech::approve(7130, 103, 0));
     assert!(!mech::take_approval(7131, 103), "another thread");
     assert!(!mech::take_approval(7130, 163), "another call: and the mark is gone");
     assert!(!mech::take_approval(7130, 103));
-    mech::approve(7130, 272);
-    mech::approve(7130, 308);
+    assert!(mech::approve(7130, 272, 0));
+    assert!(mech::approve(7130, 308, 0));
     assert!(mech::take_approval(7130, 308), "the latest mark of a thread");
     assert!(!mech::take_approval(7130, 308));
     assert!(!mech::take_approval(0, 0), "thread 0 is never approved");
+    assert!(!mech::approve(0, 103, 0));
+    // the key comes back; take_approval wants key 0
+    assert!(mech::approve(7130, 308, 77));
+    assert_eq!(mech::take_approval_mark(7130, 308), Some(77));
+    assert!(mech::approve(7130, 308, 77));
+    assert!(!mech::take_approval(7130, 308), "a bound mark is not a plain approval");
+    // cleared when the call returns or the thread ends
+    assert!(mech::approve(7130, 103, 0));
+    mech::clear_approval(7130);
+    assert!(!mech::take_approval(7130, 103));
+}
+
+#[test]
+fn a_full_approval_table_never_evicts_another_thread() {
+    let _g = setup();
+    for t in 0..mech::APPROVALS as u64 {
+        assert!(mech::approve(8000 + t, 103, 0));
+    }
+    assert!(!mech::approve(9999, 103, 0), "full: refused");
+    assert!(mech::approve(8000, 163, 0), "a thread's own slot is reused");
+    for t in 1..mech::APPROVALS as u64 {
+        assert!(mech::take_approval(8000 + t, 103), "thread {t} kept its mark");
+    }
+    assert!(mech::take_approval(8000, 163));
 }

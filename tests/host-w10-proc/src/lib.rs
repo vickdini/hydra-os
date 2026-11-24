@@ -76,6 +76,10 @@ pub struct Model {
     pub ns: BTreeMap<u64, [u64; 13]>,
     /// `LXP_APPROVE`s: (thread, call).
     pub approved: Vec<(u64, u64)>,
+    /// Their keys.
+    pub keys: Vec<u64>,
+    /// The marks' table is full (`LXP_APPROVE` answers `EAGAIN`).
+    pub full: bool,
     /// Compare-and-set sub-ops still to fail with `EAGAIN` (a race lost).
     pub races: u32,
     /// Sub-ops made, in order.
@@ -272,7 +276,11 @@ impl policy::Kernel for K {
                 0
             }
             LXP_APPROVE => {
+                if m.full {
+                    return EAGAIN;
+                }
                 m.approved.push((caller, a[0]));
+                m.keys.push(a[1]);
                 0
             }
             _ => EINVAL,

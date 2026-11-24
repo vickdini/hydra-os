@@ -168,13 +168,20 @@ fn run(client: u64, tgid: u64, sub: u64, x: &mut LxProcIo) -> i64 {
             if a[1] > 64 || a[0] > 1 {
                 return EINVAL;
             }
-            let v = alloc::string::String::from_utf8_lossy(&x.b[..a[1] as usize]).into_owned();
+            let mut v = alloc::string::String::from_utf8_lossy(&x.b[..a[1] as usize]).into_owned();
+            // (a replaced byte takes 3: the name stays within 64 bytes, cut at a character)
+            while v.len() > 64 {
+                v.pop();
+            }
             crate::compat::linux::extra::uts_set_of(tgid, a[0] == 1, v);
             0
         }
         LXP_APPROVE => {
-            mech::approve(client, a[0]);
-            0
+            if mech::approve(client, a[0], a[1]) {
+                0
+            } else {
+                -11 // EAGAIN: every slot holds another thread's mark
+            }
         }
         _ => EINVAL,
     }

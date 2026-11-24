@@ -128,6 +128,12 @@ impl Ladder {
         Decision { class: self.configured, reset_kept: false, restart: true }
     }
 
+    /// wave10 G7b-1: when the window of the next crash counts from (`None`: never
+    /// restarted), for the log line of each decision.
+    pub fn last_restart_ms(&self) -> Option<u64> {
+        self.last_restart_ms
+    }
+
     /// The new instance started at `now_ms` (the window counts from here).
     pub fn restarted(&mut self, now_ms: u64) {
         self.last_restart_ms = Some(now_ms);

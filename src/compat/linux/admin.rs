@@ -133,10 +133,12 @@ pub fn klog(args: fmt::Arguments) {
 
 /// `syslog(type, buf, len)`.
 fn syslog(kind: u64, buf: u64, len: u64) -> i64 {
+    // (wave10 G7b-1: the mark is taken first thing)
+    let approved_call = approved(103);
     let len = len as i32;
     // Everything but "how big" needs privilege (dmesg_restrict = 1)
     // (wave10 G7b-1: unless lx-proc decided and sent the call here)
-    if !approved(103) && !(capable(34) || capable(21)) {
+    if !approved_call && !(capable(34) || capable(21)) {
         return EPERM;
     }
     match kind {

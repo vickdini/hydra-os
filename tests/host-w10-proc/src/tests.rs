@@ -581,3 +581,38 @@ fn the_rules_are_the_kernels() {
     assert_eq!(rules::set_res([1, 2, 3], [rules::KEEP, 1, rules::KEEP], false), Ok([1, 1, 3]));
     assert_eq!(rules::set_limit(7, (10, 20), (10, 30), true, 25), Err(-1));
 }
+
+// ----------------------------------------------------------------------
+// Approvals are bound to what was checked (review F1, F3)
+// ----------------------------------------------------------------------
+
+#[test]
+fn approvals_carry_the_key_of_what_was_checked() {
+    let k = root();
+    let m = Memory::default();
+    // unshare: the flags
+    assert_eq!(call(&k, &m, 272, &[NEWUTS | NEWNET]), Out::Kernel);
+    // setns: target, kinds and the target's namespace ids, as the kernel computes it
+    let mut f = facts(0, 3, 0);
+    f[..8].copy_from_slice(&[11, 12, 13, 14, 15, 16, 17, 18]);
+    k.0.borrow_mut().ns_fd = Some(Ok((500, NEWUTS)));
+    k.0.borrow_mut().ns.insert(500, f);
+    assert_eq!(call(&k, &m, 308, &[3, 0]), Out::Kernel);
+    // syslog: nothing
+    assert_eq!(call(&k, &m, 103, &[10]), Out::Kernel);
+    let want = policy::rules::setns_key(500, NEWUTS, &[11, 12, 13, 14, 15, 16, 17, 18]);
+    assert_eq!(k.0.borrow().keys, vec![NEWUTS | NEWNET, want, 0]);
+    // another target, other kinds or other ids: another key (never 0)
+    assert_ne!(policy::rules::setns_key(1, NEWUTS, &[11, 12, 13, 14, 15, 16, 17, 18]), want);
+    assert_ne!(policy::rules::setns_key(500, NEWUSER, &[11, 12, 13, 14, 15, 16, 17, 18]), want);
+    assert_ne!(policy::rules::setns_key(500, NEWUTS, &[11, 12, 13, 14, 15, 16, 17, 19]), want);
+    assert_ne!(policy::rules::setns_key(0, 0, &[0; 8]), 0);
+}
+
+#[test]
+fn a_full_table_of_approvals_is_eagain_not_an_eviction() {
+    let k = root();
+    k.0.borrow_mut().full = true;
+    assert_eq!(call(&k, &Memory::default(), 272, &[NEWUTS]), Out::Ret(EAGAIN));
+    assert_eq!(call(&k, &Memory::default(), 103, &[10]), Out::Ret(EAGAIN));
+}

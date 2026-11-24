@@ -291,6 +291,16 @@ pub const MOVED_PROC: &[(u64, u32, SvcId)] = &[
     (103, 0, crate::ipc::protocol::LXS_PROC),
 ];
 
+/// A call lx-proc may approve (syslog, acct, unshare, setns) was answered without reaching
+/// the kernel's code (lx-proc refused it, or died after approving it): any mark it left for
+/// the calling thread goes.
+#[inline]
+fn proc_answered(nr: u64) {
+    if matches!(nr, 103 | 163 | 272 | 308) {
+        proc::clear_approval(crate::task::CURRENT_TID.load(Ordering::Relaxed));
+    }
+}
+
 /// The host that serves a redirect to service `s`: `/proc` (`LXS_PROC`'s file system)
 /// stays in linux-server until stage 2 (7b-2) moves it into lx-proc, while lx-proc already
 /// serves the process calls.
@@ -596,6 +606,7 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
     if r == fileh::LX_TO_KERNEL {
         return None;
     }
+    proc_answered(nr);
     Some(r)
 }
 
@@ -1964,6 +1975,7 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     if r == fileh::LX_TO_KERNEL {
         return None;
     }
+    proc_answered(nr);
     Some(Fast::Call(r))
 }
 

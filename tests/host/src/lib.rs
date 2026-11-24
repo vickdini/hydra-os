@@ -710,6 +710,7 @@ pub mod lx {
         pub mod rules;
         /// *stub* wave10 G7b-1: lx-proc's prctl records (none on the host).
         pub fn attrs_on_exit(_tgid: u64) {}
+        pub fn clear_approval(_tid: u64) {}
         pub fn attrs_on_fork(_parent_tid: u64, _parent: u64, _child: u64) {}
         pub fn attrs_on_exec(_tid: u64, _tgid: u64) {}
         /// *mirror* of the kernel's.

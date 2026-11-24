@@ -491,6 +491,58 @@ static int loop_main(int secs, int n) {
     return e ? 1 : 0;
 }
 
+
+// setns while another thread swaps the descriptor (review F1): the check and the join must
+// be of the same namespace. In a user namespace of its own (all capabilities there), with a
+// second thread, setns of its own UTS namespace is allowed; joining init's user namespace
+// is not (more than one thread; not below its own). A thread swaps descriptor 50 between
+// the two while the main thread calls setns(50, 0): the user namespace must never change.
+static volatile int swap_stop;
+static int swap_ok, swap_bad;
+static void *thr_swap(void *arg) {
+    while (!swap_stop) {
+        dup2(swap_bad, 50);
+        dup2(swap_ok, 50);
+    }
+    return NULL;
+}
+
+static void t_setns_race(void) {
+    CHECK(rsetresuid(1000, 1000, 1000) == 0, "drop root");
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%d/ns/user", getppid());
+    swap_bad = open("/proc/1/ns/user", O_RDONLY);
+    if (swap_bad < 0) swap_bad = open(path, O_RDONLY);
+    if (swap_bad < 0) {
+        printf("     (no outside user namespace file to open: skipped)\n");
+        return;
+    }
+    if (unshare(CLONE_NEWUSER) != 0) {
+        CHECK(0, "unshare(CLONE_NEWUSER)");
+        return;
+    }
+    char mine[64] = "", now[64] = "";
+    readlink("/proc/self/ns/user", mine, sizeof mine - 1);
+    swap_ok = open("/proc/self/ns/uts", O_RDONLY);
+    CHECK(swap_ok >= 0, "open own uts");
+    dup2(swap_ok, 50);
+    pthread_t t;
+    pthread_create(&t, NULL, thr_swap, NULL);
+    int joined = 0, ok = 0, refused = 0;
+    for (int i = 0; i < 3000 && !joined; i++) {
+        long r = setns(50, 0);
+        if (r == 0) ok++;
+        else refused++;
+        memset(now, 0, sizeof now);
+        readlink("/proc/self/ns/user", now, sizeof now - 1);
+        if (strcmp(now, mine)) joined = 1;
+    }
+    swap_stop = 1;
+    pthread_join(t, NULL);
+    printf("     setns race: %d allowed (own uts), %d refused, joined another user namespace: %s\n", ok, refused, joined ? "YES" : "no");
+    CHECK(!joined, "setns joined the swapped-in namespace without its checks");
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     if (argc > 2 && !strcmp(argv[1], "loop")) return loop_main(atoi(argv[2]), argc > 3 ? atoi(argv[3]) : 2);
@@ -510,6 +562,7 @@ int main(int argc, char **argv) {
     in_child("mount and net namespaces", t_mnt_net);
     in_child("unprivileged", t_unpriv);
     in_child("syslog and acct", t_admin);
+    in_child("setns descriptor race", t_setns_race);
     printf(fails ? "procid FAIL (%d)\n" : "procid PASS\n", fails);
     return fails ? 1 : 0;
 }

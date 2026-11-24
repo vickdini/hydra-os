@@ -365,18 +365,20 @@ fn plan_new(ns: &Ns, flags: u64, unshare: bool) -> alloc::vec::Vec<NsChange> {
 /// # Returns
 /// 0 on success, or a negative errno.
 pub fn sys_unshare(flags: u64) -> i64 {
+    let (tid, pid) = super::proc::current_ids();
+    // wave10 G7b-1: lx-proc decided these very flags (it ran the permission check below,
+    // then answered with a redirect to the kernel): that check is skipped. The mark is
+    // taken first, so no early return leaves it behind.
+    let approved = mech::take_approval_mark(tid, 272) == Some(flags);
     const ALLOWED: u64 = CLONE_NEW_ALL | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_VM | CLONE_THREAD | CLONE_SYSVSEM;
     if flags & !ALLOWED != 0 {
         return EINVAL;
     }
-    let (tid, pid) = super::proc::current_ids();
-    // wave10 G7b-1: lx-proc decided (it ran the checks below, then answered with a redirect
-    // to the kernel): only the mechanism runs
-    let approved = mech::take_approval(tid, 272);
     let threads = super::proc::thread_ids_of(pid).len();
     // A new user namespace (and unsharing threads, signal handlers or memory) needs a
-    // single-threaded process
-    if !approved && threads > 1 && flags & (CLONE_NEWUSER | CLONE_THREAD | CLONE_SIGHAND | CLONE_VM) != 0 {
+    // single-threaded process (wave10 G7b-1: checked here also when approved: a thread
+    // may have been made since lx-proc looked)
+    if threads > 1 && flags & (CLONE_NEWUSER | CLONE_THREAD | CLONE_SIGHAND | CLONE_VM) != 0 {
         return EINVAL;
     }
     let ns_flags = flags & CLONE_NEW_ALL;
@@ -739,17 +741,33 @@ pub fn ns_facts(target: u64, caller: u64) -> Option<[u64; 13]> {
 /// # Returns
 /// 0 on success, or a negative errno.
 pub fn sys_setns(fd: u64, nstype: u64) -> i64 {
+    // wave10 G7b-1: lx-proc's approval, taken first (no early return leaves it behind)
+    let (tid, me) = super::proc::current_ids();
+    let mark = mech::take_approval_mark(tid, 308);
     // wave10 G7b-1: the descriptor's target, shared with lx-proc's `LXP_NS_FD`
     let (target, kinds) = match crate::task::with_current_fds_mut(|fds| ns_fd_target(fds, fd, nstype)) {
         Ok(v) => v,
         Err(e) => return e,
     };
     let Some(theirs) = ns_of(target) else { return ESRCH };
-    let (tid, me) = super::proc::current_ids();
     let mine = current_ns();
-    // wave10 G7b-1: lx-proc decided (the checks below up to the PID rule): only the
-    // mechanism runs
-    let approved = mech::take_approval(tid, 308);
+    // wave10 G7b-1: lx-proc decided the checks below up to the PID rule for exactly this
+    // target, these kinds and the target's namespaces as they were (the key): only then are
+    // they skipped. A descriptor changed meanwhile (another thread's dup2) names something
+    // else, and the kernel's own checks run.
+    let ids = mech::NsIds::of(&theirs);
+    let key = mech::rules::setns_key(target, kinds, &[ids.user, ids.pid, ids.pid_for_children, ids.net, ids.mnt, ids.ipc, ids.uts, ids.cgroup]);
+    let approved = mark == Some(key);
+    // (the single-thread rule of a user namespace change is checked again: a thread may
+    // have been made since lx-proc looked)
+    let user_differs = !match (&theirs.user, &mine.user) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    };
+    if approved && kinds & CLONE_NEWUSER != 0 && user_differs && super::proc::thread_ids_of(me).len() > 1 {
+        return EINVAL;
+    }
     if kinds & CLONE_NEWUSER != 0 && !approved {
         let same = match (&theirs.user, &mine.user) {
             (None, None) => true,

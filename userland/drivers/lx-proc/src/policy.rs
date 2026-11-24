@@ -235,19 +235,21 @@ pub fn serve<K: Kernel, M: Mem>(k: &K, m: &M, c: &Call) -> Out {
         // syslog (dmesg_restrict = 1: everything needs CAP_SYSLOG or CAP_SYS_ADMIN) and
         // acct (CAP_SYS_PACCT): decided here; the log ring and the accounting file are the
         // kernel's, which runs the rest in the caller's context
-        103 => return approve_if(k, 103, c.has(CAP_SYSLOG) || c.has(CAP_SYS_ADMIN)),
-        163 => return approve_if(k, 163, c.has(CAP_SYS_PACCT)),
+        103 => return approve_if(k, 103, c.has(CAP_SYSLOG) || c.has(CAP_SYS_ADMIN), 0),
+        163 => return approve_if(k, 163, c.has(CAP_SYS_PACCT), 0),
         _ => ENOSYS,
     };
     Out::Ret(r)
 }
 
-/// `allowed`: the kernel runs call `nr` (marked approved); otherwise `EPERM`.
-fn approve_if<K: Kernel>(k: &K, nr: u64, allowed: bool) -> Out {
+/// `allowed`: the kernel runs call `nr` (marked approved, bound to `key`: what was checked,
+/// so the kernel skips its own checks only if the call still means that); otherwise
+/// `EPERM`.
+fn approve_if<K: Kernel>(k: &K, nr: u64, allowed: bool, key: u64) -> Out {
     if !allowed {
         return Out::Ret(EPERM);
     }
-    let (r, _) = op(k, LXP_APPROVE, &[nr]);
+    let (r, _) = op(k, LXP_APPROVE, &[nr, key]);
     if r < 0 {
         Out::Ret(r)
     } else {
@@ -598,7 +600,7 @@ fn unshare<K: Kernel>(k: &K, flags: u64) -> Out {
     if ns & !CLONE_NEWUSER != 0 && ns & CLONE_NEWUSER == 0 && !t.eff_has(CAP_SYS_ADMIN) {
         return Out::Ret(EPERM);
     }
-    approve_if(k, 272, true)
+    approve_if(k, 272, true, flags)
 }
 
 /// `setns(fd, nstype)`: the rules; the kernel then joins.
@@ -642,5 +644,6 @@ fn setns<K: Kernel>(k: &K, fd: u64, nstype: u64) -> Out {
     if kinds & CLONE_NEWPID != 0 && theirs[10] == 2 {
         return Out::Ret(EINVAL);
     }
-    approve_if(k, 308, true)
+    let ids: [u64; 8] = theirs[..8].try_into().unwrap();
+    approve_if(k, 308, true, rules::setns_key(target, kinds, &ids))
 }

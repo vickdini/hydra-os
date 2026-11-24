@@ -544,26 +544,65 @@ pub fn attrs_on_exit(tgid: u64) {
 // Calls lx-proc allowed, run by the kernel's code without its own check
 // ----------------------------------------------------------------------
 
-/// `(thread, call number)` lx-proc approved ([`approve`]); taken by [`take_approval`].
-static APPROVED: spin::Mutex<[(u64, u64); 16]> = spin::Mutex::new([(0, 0); 16]);
+/// Approvals in flight at once (one per thread; a thread has at most one call in flight).
+pub const APPROVALS: usize = 64;
 
-/// lx-proc allowed thread `tid`'s call `nr` (it answers with a redirect to the kernel).
-pub fn approve(tid: u64, nr: u64) {
+/// `(thread, call number, key)` lx-proc approved ([`approve`]); taken by
+/// [`take_approval_mark`], dropped by [`clear_approval`].
+static APPROVED: spin::Mutex<[(u64, u64, u64); APPROVALS]> = spin::Mutex::new([(0, 0, 0); APPROVALS]);
+
+/// lx-proc allowed thread `tid`'s call `nr`, bound to `key` (what it checked: 0 for calls
+/// bound to nothing, [`rules::setns_key`] for `setns`, the flags for `unshare`); it answers
+/// with a redirect to the kernel. `false`: the table is full (no other thread's mark is
+/// ever replaced; lx-proc answers `EAGAIN`).
+pub fn approve(tid: u64, nr: u64, key: u64) -> bool {
+    if tid == 0 {
+        return false;
+    }
     let mut a = APPROVED.lock();
-    let i = a.iter().position(|e| e.0 == tid).or_else(|| a.iter().position(|e| e.0 == 0)).unwrap_or(0);
-    a[i] = (tid, nr);
+    match a.iter().position(|e| e.0 == tid).or_else(|| a.iter().position(|e| e.0 == 0)) {
+        Some(i) => {
+            a[i] = (tid, nr, key);
+            true
+        }
+        None => false,
+    }
 }
 
-/// Whether lx-proc allowed thread `tid`'s call `nr` (once: the mark goes, as any other of
-/// that thread's).
-pub fn take_approval(tid: u64, nr: u64) -> bool {
-    let mut a = APPROVED.lock();
-    let mut ok = false;
-    for e in a.iter_mut().filter(|e| e.0 == tid && tid != 0) {
-        ok |= e.1 == nr;
-        *e = (0, 0);
+/// Takes thread `tid`'s mark (it goes in any case): the key lx-proc approved call `nr` with,
+/// `None` when it approved no such call. The kernel's code calls it first thing, then runs
+/// without its own checks only if the key matches what it is about to do.
+pub fn take_approval_mark(tid: u64, nr: u64) -> Option<u64> {
+    if tid == 0 {
+        return None;
     }
-    ok
+    let mut a = APPROVED.lock();
+    let mut got = None;
+    for e in a.iter_mut().filter(|e| e.0 == tid) {
+        if e.1 == nr {
+            got = Some(e.2);
+        }
+        *e = (0, 0, 0);
+    }
+    got
+}
+
+/// Whether lx-proc approved thread `tid`'s call `nr` (bound to nothing: key 0); the mark
+/// goes.
+pub fn take_approval(tid: u64, nr: u64) -> bool {
+    take_approval_mark(tid, nr) == Some(0)
+}
+
+/// Drops thread `tid`'s mark (its forwarded call returned without reaching the kernel's
+/// code, or the thread ended).
+pub fn clear_approval(tid: u64) {
+    if tid == 0 {
+        return;
+    }
+    let mut a = APPROVED.lock();
+    for e in a.iter_mut().filter(|e| e.0 == tid) {
+        *e = (0, 0, 0);
+    }
 }
 // wave10 G7b-1 end
 

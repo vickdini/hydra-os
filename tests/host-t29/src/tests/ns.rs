@@ -488,10 +488,17 @@ fn approved_unshare_and_setns_run_only_the_mechanism() {
     user_proc(795, 1000);
     // without CAP_SYS_ADMIN: refused, unless lx-proc decided (and marked the call)
     assert_eq!(sys_unshare(CLONE_NEWUTS), EPERM);
-    crate::lx::proc::approve(795, 272);
+    crate::lx::proc::approve(795, 272, CLONE_NEWNET);
+    assert_eq!(sys_unshare(CLONE_NEWUTS), EPERM, "approved for other flags");
+    crate::lx::proc::approve(795, 272, CLONE_NEWUTS);
     assert_eq!(sys_unshare(CLONE_NEWUTS), 0);
     assert_ne!(ns_of(795).uts, 0);
     assert_eq!(sys_unshare(CLONE_NEWNET), EPERM, "the mark was used up");
+    // the single-thread rule holds even when approved
+    add_thread(795, 797);
+    crate::lx::proc::approve(795, 272, CLONE_NEWUSER);
+    assert_eq!(sys_unshare(CLONE_NEWUSER), EINVAL);
+    remove_thread(795, 797);
     spawn_as(796, 1, 1000, 1000);
     run(796);
     caps(796, CAP_SYS_ADMIN);
@@ -499,7 +506,20 @@ fn approved_unshare_and_setns_run_only_the_mechanism() {
     run(795);
     open_ns(3, "796", "net");
     assert_eq!(sys_setns(3, 0), EPERM);
-    crate::lx::proc::approve(795, 308);
+    // approved for another target (the descriptor was swapped meanwhile): the kernel's checks
+    let key_of = |pid: u64, kinds: u64| {
+        let i = crate::lx::proc::NsIds::of(&ns_of(pid));
+        crate::lx::proc::rules::setns_key(pid, kinds, &[i.user, i.pid, i.pid_for_children, i.net, i.mnt, i.ipc, i.uts, i.cgroup])
+    };
+    crate::lx::proc::approve(795, 308, key_of(795, CLONE_NEWNET));
+    assert_eq!(sys_setns(3, 0), EPERM, "bound to another target");
+    crate::lx::proc::approve(795, 308, key_of(796, CLONE_NEWUTS));
+    assert_eq!(sys_setns(3, 0), EPERM, "bound to other kinds");
+    crate::lx::proc::approve(795, 308, key_of(796, CLONE_NEWNET));
     assert_eq!(sys_setns(3, 0), 0);
     assert_eq!(ns_of(795).net, ns_of(796).net);
+    // an early error takes the mark too
+    crate::lx::proc::approve(795, 308, 1);
+    assert_eq!(sys_setns(99, 0), EBADF);
+    assert!(crate::lx::proc::take_approval_mark(795, 308).is_none());
 }

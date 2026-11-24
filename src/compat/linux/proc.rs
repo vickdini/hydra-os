@@ -471,6 +471,8 @@ pub fn to_clock_ticks(ticks: u64) -> u64 {
 /// * `cred` - The thread's real and saved uid (a zombie's, for signal permission checks).
 pub fn thread_exited(pid: u64, tid: u64, run: u64, sys: u64, cred: (u32, u32)) {
     super::mount::forget_thread(tid);
+    // wave10 G7b-1: an approval lx-proc left for this thread goes with it
+    crate::lx::proc::clear_approval(tid);
     let mut procs = PROCS.lock();
     let (ppid, now_zombie) = match procs.get_mut(&pid) {
         Some(p) => {

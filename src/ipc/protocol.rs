@@ -2657,10 +2657,9 @@ pub const LXP_CREDS_SET: u64 = 2;
 pub const LXP_GROUPS_GET: u64 = 3;
 /// `a[0]` process (0: the caller's), `a[1]` buffer of `u32`, `a[2]` count: sets them.
 pub const LXP_GROUPS_SET: u64 = 4;
-/// `a[0]` process (0: the caller's), `a[1]` a group to probe → `a[0]` pid, `a[1]` ppid,
-/// `a[2]` pgid, `a[3]` sid, `a[4]` zombie, `a[5]` 1 if a process other than it (zombies
-/// too) is in group `pid`, `a[6]` the probed group in its session: 0 no live member, 1 yes,
-/// 2 only in other sessions. `ESRCH`: no such process.
+/// `a[0]` process (0: the caller's) → `a[0]` pid, `a[1]` ppid, `a[2]` pgid, `a[3]` sid,
+/// `a[4]` zombie, `a[5]` 1 if a process other than it (zombies too) is in group `pid`.
+/// `ESRCH`: no such process.
 pub const LXP_PGRP_GET: u64 = 5;
 /// `a[0]` process, `a[1]` its pgid and `a[2]` its sid as lx-proc saw them, `a[3]` the new
 /// pgid, `a[4]` 1: it leads a new session, `a[5]` 1: only while no other process is in
@@ -2694,8 +2693,11 @@ pub const LXP_UTS_GET: u64 = 14;
 /// `a[0]` 0: host name, 1: domain name; `a[1]` length, `b` the name: sets it in the
 /// caller's UTS namespace.
 pub const LXP_UTS_SET: u64 = 15;
-/// `a[0]` a system call number: lx-proc allowed the caller's call; it answers with a
-/// redirect to the kernel, whose code then runs only the call's mechanism (once).
+/// `a[0]` a system call number, `a[1]` the key of what lx-proc checked (0: nothing in
+/// particular; `setns`: `proc_rules::setns_key` of target, kinds and its namespace ids;
+/// `unshare`: the flags): lx-proc allowed the caller's call; it answers with a redirect to
+/// the kernel, whose code then skips its own permission checks once, and only if the call
+/// still means the same key. `EAGAIN`: the marks' table is full.
 pub const LXP_APPROVE: u64 = 16;
 /// `LXP_TASK_GET` flag: `PR_SET_KEEPCAPS`.
 pub const LXP_F_KEEPCAPS: u64 = 1;
