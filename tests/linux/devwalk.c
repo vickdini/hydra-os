@@ -302,9 +302,15 @@ static void review_walks(void) {
         if (s >= 0) close(s);
         CHECK(getcwd(cwd, sizeof cwd) && chdir("/dev/pts") == 0 && stat(num, &st) == 0 && S_ISCHR(st.st_mode), "cwd /dev/pts, stat %s", num);
         chdir(cwd);
-        CHECK(open(name, O_RDWR | O_CREAT | O_EXCL, 0600) < 0 && errno == EEXIST, "O_CREAT|O_EXCL of a slave");
-        CHECK(open("/dev/pts/9999", O_RDWR | O_CREAT, 0600) < 0 && errno == EPERM, "O_CREAT in /dev/pts");
-        CHECK(stat("/dev/pts/ptmx", &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == makedev(5, 2), "/dev/pts/ptmx");
+        // (tty-server's devpts; with the terminals in the kernel, lx=kernel, it has no
+        // /dev/pts/ptmx and the kernel's rules: not checked then)
+        if (stat("/dev/pts/ptmx", &st) == 0) {
+            CHECK(S_ISCHR(st.st_mode) && st.st_rdev == makedev(5, 2), "/dev/pts/ptmx");
+            CHECK(open(name, O_RDWR | O_CREAT | O_EXCL, 0600) < 0 && errno == EEXIST, "O_CREAT|O_EXCL of a slave");
+            CHECK(open("/dev/pts/9999", O_RDWR | O_CREAT, 0600) < 0 && errno == EPERM, "O_CREAT in /dev/pts");
+        } else {
+            printf("devpts checks skipped: the kernel's terminals (lx.tty=kernel)\n");
+        }
         if (pts >= 0) close(pts);
     }
     if (m >= 0) close(m);
