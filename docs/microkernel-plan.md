@@ -277,6 +277,25 @@ About 26–32 agent-days, eight groups.
 - **Kept (mechanism, see `docs/src/linux-server.md`):** the walk and path calls (vfs-server still sends back the kernel-kept `/proc` files, `mount`/`pivot_root` and FUSE changes), `mount.rs`, the io_uring/aio rings (decision 34), the ptrace stop mechanism, the device services' kernel side. linux-server stays (`/sys`, exec's front half, test calls), now FailObjects.
 - **Checks:** suite 100/100 forwarded, with `--lx kernel` (now only logged as ignored) and with the IOMMU; suite_loop; host crates; budget A/B against a2c070d (2 rounds alternating): every call within noise (forwarded `lx_null` 2.8 µs both, stat 4.6 vs 4.7–5.2, open+close 7.0–7.1 vs 7.3–7.9, `tcp_connect` 110 vs 108–111, fork+exec 2.05–2.17 ms vs 2.09 ms); every service killed once in one KDE session (desktop, Firefox, Dolphin, sound and Wine fine, 0 crashes). The installer test was not run: the lead runs it after the merge.
 
+### Wave 11: consolidation before other systems (approved 2026-11-24, decisions 36–38)
+
+Chosen by the user over starting FreeBSD at once: close what waves 6–10 left open, then prove it on real hardware. Up to four groups at once, Sonnet pre-merge reviews, a deploy after each stage.
+
+**Stage 1 (four groups):**
+
+| Group | Work | Agent-days |
+|---|---|---:|
+| **R** | Restart robustness: Firefox's SIGSEGV in libxul when vfs-server is killed under KDE (seen on wave 9 and 10 builds); lx-sec reads its cgroup device list back from the kernel after a reset (today `BPF_PROG_DETACH` fails after a second quick crash); the hang after repeated ptrace attach/detach/kill cycles (`ptperm bench` twice); a tty read in flight at a tty-server crash | 3–4 |
+| **F** | The last walks into vfs-server: changes inside FUSE mounts (create, mkdir, unlink, rename, setattr) and `fstatfs` on FUSE handles, `/dev/pts` listing, efivars writes, bubblewrap's device binds in its own namespace | 3–4 |
+| **P** | The `/proc` files the kernel still serves into lx-proc: `fd/`, `fdinfo/`, `exe`/`cwd`/`root` links, `mountinfo`/`mounts`, `ns/`, `cgroup`, `auxv`, `net/`, directory listings, and callers in their own PID or user namespace (ID translation); re-reading `/proc` back under budget if possible | 4–5 |
+| **H** | Real hardware, prepared: a NUC checklist and a stick built from this tree; boot-log capture without a serial port (a log file on the stick's EFI partition, or netconsole); the drivers the NUC needs (AHCI, e1000e, xHCI, HDA, IOMMU/DMAR tables of a 2014 machine) checked against QEMU's q35 models; the power path: restart with the stick pulled early (the old hang), poweroff | 2–3 |
+
+**Stage 2:** the NUC run itself (the user boots the stick and installs; H's tools collect the logs), fixes for what it finds, and **11-C closing**: delete the kernel's walk and path calls that nothing sends back any more (keeping only what boot needs before vfs-server runs) and the kernel's `/proc` copy; line counts; the final budget and kill tests; the installer test (`MODE=prompt`).
+
+Also carried, if a group has room: lx-ipc's SysV `shmget`/`IPC_STAT` cost (+4 µs; per-segment kept records instead of the whole-table rewrite), the 1-CPU forwarded signal shortfall.
+
+About 15–20 agent-days.
+
 ### Waves 5–9: the rest of the Linux layer (one-server plan, superseded after wave 5)
 
 Each wave does one or two steps of section 7.2 of the design. Two habits carry through every step:
@@ -445,6 +464,9 @@ Also 2026-11-19: a seventh, bug-fixing group joins wave 6, and wave 6 starts rig
 33. **Wave 10 starts right away** (2026-11-23).
 34. **The io_uring and aio rings stay in the kernel as mechanism** (2026-11-24, Group N's measurement): moving them into linux-server would add about +4 µs to a one-request read, fail every ring on a linux-server crash, and save only about 1,000–1,300 kernel lines. Each request is already routed to its descriptor's owner (wave 9 6b-4). 10-C drops `lx.uring=kernel` and says whether linux-server can then be retired.
 35. **The ptrace/perf permission decisions stay in lx-proc although over budget** (2026-11-24, Group 8-1): `kcmp` +3.7 µs, `process_vm_readv` +3.5, `perf_event_open` +4.1, `PTRACE_ATTACH` about +7.5 (+14 in a tight loop); the floor is the hop (~3 µs). These calls are rare (debuggers, tracers, profilers); the per-request ptrace operations stay in the kernel and are unchanged.
+36. **Wave 11 is a consolidation wave** (2026-11-24): FreeBSD waits one wave. Stage 1 R (restart robustness), F (the last walks and FUSE changes into vfs-server), P (the remaining `/proc` files into lx-proc), H (real-hardware preparation for the NUC); stage 2 the NUC run, fixes, 11-C closing. Four groups at once.
+37. **The user runs Hydra on the NUC in wave 11's stage 2** (boots the stick H prepares, installs, returns the logs).
+38. **Wave 11 starts right away** (2026-11-24).
 
 ### Still open, and when they are needed
 
