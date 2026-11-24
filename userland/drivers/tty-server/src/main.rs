@@ -360,7 +360,8 @@ fn pts_call(cx: &Cx) -> Answer {
                 _ => (EPERM, 0),
             };
         }
-        Pts::Node(i) if TTYS.lock().inst_of(i) != Some(inst) => return (ENOENT, 0),
+        // (review 4: a slave of the other view is as missing: EPERM for O_CREAT, else ENOENT)
+        Pts::Node(i) if TTYS.lock().inst_of(i).is_some_and(|x| x != inst) => return (if matches!(cx.nr, 2 | 257) && (if cx.nr == 2 { a[1] } else { a[2] }) & 0o100 != 0 { EPERM } else { ENOENT }, 0),
         Pts::Node(i) => match TTYS.lock().stat(i) {
             Some(n) => Some((i, n)),
             // (review 5: devpts makes no names: O_CREAT of a missing one is EPERM)
