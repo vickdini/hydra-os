@@ -1197,6 +1197,10 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
             }
             // wave10 GV2 begin: a device node vfs-server found: the kernel opens the device
             if s == crate::ipc::protocol::LX_REDIR_DEV {
+                // (review 4: only the file service's own answer, never after a redirect)
+                if x.id != svc::host_of(crate::ipc::protocol::LXS_VFS) || c.redirs != 0 {
+                    return EIO;
+                }
                 return fileh::dev_answer(&c, redir);
             }
             // wave10 GV2 end

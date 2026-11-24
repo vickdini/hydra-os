@@ -1632,6 +1632,11 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
         return open_fifo_kernel(ino, flags);
     }
     if ftype == S_IFCHR || ftype == 0o060000 {
+        // wave10 GV2 (review 1): no device opens on a nodev mount (a user's FUSE mount, a
+        // namespace's nodev bind or tmpfs)
+        if (super::fuse::is_fuse(ino) && super::fuse::ns0_flags_of(ino) & 4 != 0) || super::mount::last_nodev() {
+            return Err(EACCES);
+        }
         // Device control (cgroup bpf programs)
         let access = if acc != O_WRONLY { super::bpf::DEV_READ } else { 0 } | if acc != O_RDONLY { super::bpf::DEV_WRITE } else { 0 };
         let kind = if ftype == S_IFCHR { super::bpf::DEV_CHAR } else { super::bpf::DEV_BLOCK };

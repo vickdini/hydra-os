@@ -84,7 +84,7 @@ pub fn pseudo_redirect(r: &crate::walk::Redirect) -> i64 {
     use crate::proto::{LXS_LINUX, LXS_PROC, LXS_TTY, LX_VFS_PSEUDO_DEVPTS, LX_VFS_PSEUDO_PROC, LX_VFS_PSEUDO_SYS};
     let obj = r.obj & 0xFFFF_FFFF;
     // (wave10 GV2: and `/dev/pts`, the terminal service's)
-    let known = ((r.svc == LXS_PROC || r.svc == LXS_LINUX) && (obj == LX_VFS_PSEUDO_PROC || obj == LX_VFS_PSEUDO_SYS)) || (r.svc == LXS_TTY && obj == LX_VFS_PSEUDO_DEVPTS);
+    let known = ((r.svc == LXS_PROC || r.svc == LXS_LINUX) && (obj == LX_VFS_PSEUDO_PROC || obj == LX_VFS_PSEUDO_SYS)) || (r.svc == LXS_TTY && obj & 0xFF == LX_VFS_PSEUDO_DEVPTS);
     match r.tail {
         Some(t) if !PSEUDO_OFF.load(Ordering::Relaxed) && known && t < 1 << 20 => {
             (PSEUDO_TAG | (r.svc as u64) << 48 | obj << 36 | t as u64) as i64

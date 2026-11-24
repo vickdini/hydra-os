@@ -82,6 +82,9 @@ pub struct Ns0Mount {
     pub source: String,
     /// Options as `/proc/mounts` shows them.
     pub opts: String,
+    /// wave10 GV2 (review 1): `mount(2)`'s per-mount flags (`MS_RDONLY`, `MS_NOSUID`,
+    /// `MS_NODEV`, `MS_NOEXEC`), enforced: exec's nosuid/noexec, device opens' nodev.
+    pub flags: u64,
 }
 
 static NS0: Mutex<Vec<Ns0Mount>> = Mutex::new(Vec::new());
@@ -604,7 +607,7 @@ pub fn mount(path: &str, mountpoint: u64, fstype: &str, source: &str, flags: u64
     let root = super::fuse_svc::root_of(id);
     if ns0 {
         // (wave10 GV2: the options as vfs-server's mounts get them)
-        ns0_add(Ns0Mount { mountpoint, root, path: String::from(path), fstype: String::from(fstype), source: String::from(source), opts: ns0_opts(flags, (uid, gid, other)) });
+        ns0_add(Ns0Mount { mountpoint, root, path: String::from(path), fstype: String::from(fstype), source: String::from(source), opts: ns0_opts(flags, (uid, gid, other)), flags: flags & NS0_FLAGS });
     }
     Ok(root)
 }
@@ -630,7 +633,41 @@ pub fn ns0_opts(flags: u64, (uid, gid, other): (u32, u32, bool)) -> String {
 /// vfs-server mounted connection root `root` on `mountpoint` (`path`) in the initial
 /// namespace: the list follows (vfs-server's copy follows it by the generation).
 pub fn ns0_record(mountpoint: u64, root: u64, path: String, fstype: String, source: String, flags: u64, owner: (u32, u32, bool)) {
-    ns0_add(Ns0Mount { mountpoint, root, path, fstype, source, opts: ns0_opts(flags, owner) });
+    ns0_add(Ns0Mount { mountpoint, root, path, fstype, source, opts: ns0_opts(flags, owner), flags: flags & NS0_FLAGS });
+}
+
+/// The per-mount flags an initial-namespace FUSE mount keeps (`MS_RDONLY`, `MS_NOSUID`,
+/// `MS_NODEV`, `MS_NOEXEC`).
+const NS0_FLAGS: u64 = 1 | 2 | 4 | 8;
+
+/// The flags of the initial namespace's FUSE mount whose path is the longest prefix of
+/// absolute path `abs` (0: none): exec's nosuid/noexec there.
+pub fn ns0_flags_for_path(abs: &str) -> u64 {
+    let l = NS0.lock();
+    let mut best: Option<(usize, u64)> = None;
+    for m in l.iter() {
+        let p = m.path.trim_end_matches('/');
+        let inside = abs == p || abs.strip_prefix(p).is_some_and(|r| r.starts_with('/'));
+        if inside && best.map_or(true, |(n, _)| p.len() >= n) {
+            best = Some((p.len(), m.flags));
+        }
+    }
+    best.map_or(0, |b| b.1)
+}
+
+/// The flags of the initial namespace's FUSE mount FUSE inode `ino` lies in (0: none).
+pub fn ns0_flags_of(ino: u64) -> u64 {
+    if !is_fuse(ino) {
+        return 0;
+    }
+    let c = split(ino).0;
+    NS0.lock().iter().find(|m| split(m.root).0 == c).map_or(0, |m| m.flags)
+}
+
+/// `(mountpoint, root, flags)` of the initial namespace's FUSE mounts (for vfs-server's copy
+/// of the table, `mount::vfs_table`).
+pub fn ns0_list_flags() -> Vec<(u64, u64, u64)> {
+    NS0.lock().iter().map(|m| (m.mountpoint, m.root, m.flags)).collect()
 }
 
 /// vfs-server unmounted the initial namespace's FUSE mount whose root is `root` (it ended

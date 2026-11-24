@@ -17,7 +17,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sched.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -282,6 +284,91 @@ static void odd_opens(void) {
     CHECK(open(p, O_CREAT | O_DIRECTORY | O_RDONLY, 0755) < 0 && errno == EINVAL, "O_CREAT|O_DIRECTORY");
 }
 
+// Review fixes: walks that start inside /dev/pts, the cpu directory or a control group
+// directory; /dev/pts creates and ptmx
+static void review_walks(void) {
+    char cwd[256];
+    int m = open("/dev/ptmx", O_RDWR | O_NOCTTY);
+    CHECK(m >= 0 && grantpt(m) == 0 && unlockpt(m) == 0, "ptmx");
+    char *name = m >= 0 ? ptsname(m) : NULL;
+    if (name) {
+        const char *num = name + 9;
+        struct stat st;
+        int pts = open("/dev/pts", O_RDONLY | O_DIRECTORY);
+        CHECK(pts >= 0, "open /dev/pts");
+        CHECK(pts >= 0 && fstatat(pts, num, &st, 0) == 0 && S_ISCHR(st.st_mode), "fstatat(/dev/pts, %s)", num);
+        int s = pts >= 0 ? openat(pts, num, O_RDWR | O_NOCTTY) : -1;
+        CHECK(s >= 0, "openat(/dev/pts, %s)", num);
+        if (s >= 0) close(s);
+        CHECK(getcwd(cwd, sizeof cwd) && chdir("/dev/pts") == 0 && stat(num, &st) == 0 && S_ISCHR(st.st_mode), "cwd /dev/pts, stat %s", num);
+        chdir(cwd);
+        CHECK(open(name, O_RDWR | O_CREAT | O_EXCL, 0600) < 0 && errno == EEXIST, "O_CREAT|O_EXCL of a slave");
+        CHECK(open("/dev/pts/9999", O_RDWR | O_CREAT, 0600) < 0 && errno == EPERM, "O_CREAT in /dev/pts");
+        CHECK(stat("/dev/pts/ptmx", &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == makedev(5, 2), "/dev/pts/ptmx");
+        if (pts >= 0) close(pts);
+    }
+    if (m >= 0) close(m);
+    int cpu = open("/sys/devices/system/cpu", O_RDONLY | O_DIRECTORY);
+    CHECK(cpu >= 0, "open the cpu directory");
+    if (cpu >= 0) {
+        char b[32] = {0};
+        int f = openat(cpu, "online", O_RDONLY);
+        CHECK(f >= 0 && read(f, b, sizeof b - 1) > 0 && b[0] == '0', "openat(cpu, online) '%s'", b);
+        if (f >= 0) close(f);
+        close(cpu);
+    }
+    int cg = open("/sys/fs/cgroup", O_RDONLY | O_DIRECTORY);
+    CHECK(cg >= 0, "open /sys/fs/cgroup");
+    if (cg >= 0) {
+        char b[64];
+        int f = openat(cg, "cgroup.procs", O_RDONLY);
+        CHECK(f >= 0 && read(f, b, sizeof b) >= 0, "openat(cgroup, cgroup.procs)");
+        if (f >= 0) close(f);
+        close(cg);
+    }
+}
+
+// Review fixes (root): no device opens on a nodev mount; a link in a sticky directory owned
+// by someone else is not followed to create (protected_symlinks)
+static void review_root(void) {
+    pid_t p = fork();
+    if (p == 0) {
+        fails = 0;
+        const char *nd = "/tmp/devwalk.nd";
+        mkdir(nd, 0755);
+        if (unshare(CLONE_NEWNS) != 0) _exit(10);
+        mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+        if (mount("tmpfs", nd, "tmpfs", MS_NODEV, "size=1m") != 0) _exit(11);
+        if (mknod("/tmp/devwalk.nd/null", S_IFCHR | 0666, makedev(1, 3)) != 0) _exit(12);
+        int fd = open("/tmp/devwalk.nd/null", O_WRONLY);
+        if (fd >= 0 || errno != EACCES) _exit(13);
+        if (mount("tmpfs", nd, "tmpfs", MS_REMOUNT, "size=1m") == 0) {
+            fd = open("/tmp/devwalk.nd/null", O_WRONLY);
+            if (fd < 0) _exit(14);
+        }
+        _exit(0);
+    }
+    int st = 0;
+    waitpid(p, &st, 0);
+    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "nodev: step %d", WEXITSTATUS(st));
+    // protected_symlinks: root's link in /tmp, followed by nobody to create
+    unlink("/tmp/devwalk-psl");
+    unlink("/tmp/devwalk-psl-target");
+    CHECK(symlink("/tmp/devwalk-psl-target", "/tmp/devwalk-psl") == 0, "symlink in /tmp");
+    // (owned by a third user: neither the follower nor the directory's owner)
+    CHECK(lchown("/tmp/devwalk-psl", 1000, 1000) == 0, "lchown link");
+    p = fork();
+    if (p == 0) {
+        if (setresgid(65534, 65534, 65534) || setresuid(65534, 65534, 65534)) _exit(99);
+        int fd = open("/tmp/devwalk-psl", O_CREAT | O_WRONLY, 0600);
+        _exit(fd < 0 && errno == EACCES ? 0 : 1);
+    }
+    waitpid(p, &st, 0);
+    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "protected_symlinks");
+    CHECK(access("/tmp/devwalk-psl-target", F_OK) != 0, "no target made");
+    unlink("/tmp/devwalk-psl");
+}
+
 // O_CREAT through a dangling symbolic link makes its target (absolute and relative links,
 // a chain of two); O_EXCL refuses the link itself
 static void dangling(void) {
@@ -395,6 +482,8 @@ int main(int argc, char **argv) {
     shm_handles();
     cwd_checks();
     if (geteuid() == 0) nobody_cwd();
+    review_walks();
+    if (geteuid() == 0) review_root();
     odd_opens();
     dangling();
     if (fails) {

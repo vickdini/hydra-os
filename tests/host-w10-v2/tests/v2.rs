@@ -180,6 +180,7 @@ fn sysdev() -> Fake {
     let d = fs.mkdir(ROOT, "dev", 0o755);
     fs.file(d, "null", 0o666);
     fs.mkdir(d, "shm", 0o1777);
+    fs.mkdir(d, "pts", 0o755);
     let x = fs.mkdir(ROOT, "x", 0o755);
     fs.mkdir(x, "devices", 0o755);
     fs.mkdir(x, "pts", 0o755);
@@ -258,6 +259,33 @@ fn relative_walks_meet_the_served_names_too() {
     assert_eq!(boot.pseudo_at_root(0, b"dev"), None);
 }
 
+// review 3: walks that start inside /dev/pts or a control group directory
+#[test]
+fn walks_from_inside_pts_and_cgroups_meet_the_served_names() {
+    let fs = sysdev();
+    let r = Node::new(0, ROOT);
+    let pts = fs.lookup(fs.lookup(r, b"dev").unwrap(), b"pts").unwrap();
+    match go(&fs, true, Start::At(pts), "3").unwrap() {
+        Walked::Redirect(r) => assert_eq!((r.svc, r.obj, r.tail), (LXS_TTY, LX_VFS_PSEUDO_DEVPTS | served::PTS_BELOW, Some(0))),
+        _ => panic!(),
+    }
+    match go(&fs, true, Start::At(pts), "ptmx").unwrap() {
+        Walked::Redirect(r) => assert_eq!(r.svc, LXS_TTY),
+        _ => panic!(),
+    }
+    let cg = fs.lookup(fs.lookup(fs.lookup(r, b"sys").unwrap(), b"fs").unwrap(), b"cgroup").unwrap();
+    let user = fs.lookup(cg, b"user").unwrap();
+    match go(&fs, false, Start::At(user), "cgroup.procs").unwrap() {
+        Walked::Redirect(r) => assert_eq!((r.svc, r.tail), (0, Some(0))),
+        _ => panic!(),
+    }
+    // the same names elsewhere: the pool
+    let x = fs.lookup(r, b"x").unwrap();
+    assert_eq!(go(&fs, false, Start::At(x), "cgroup.procs").err(), Some(ENOENT));
+    assert_eq!(go(&fs, false, Start::At(x), "1000").err(), Some(ENOENT));
+    assert_eq!(go(&fs, false, Start::Root, "/dev/ptmx").err(), Some(ENOENT));
+}
+
 #[test]
 fn a_parent_walk_redirects_a_served_last_name() {
     let fs = sysdev();
@@ -270,9 +298,11 @@ fn a_parent_walk_redirects_a_served_last_name() {
         ParentWalked::Redirect(r) => assert_eq!((r.svc, r.tail), (LXS_TTY, Some(5))),
         _ => panic!(),
     }
-    // (cgroup.procs is matched on the whole path: a parent walk to it finds its directory;
-    // making or removing that name is the pool's ENOENT/EEXIST, rare)
-    assert!(matches!(walk::walk_parent(&be, &root(), Start::Root, b"/sys/fs/cgroup/user/cgroup.procs").unwrap(), ParentWalked::Found(_)));
+    // (review 3: cgroup.procs in any control group directory is the kernel's, as a last name too)
+    match walk::walk_parent(&be, &root(), Start::Root, b"/sys/fs/cgroup/user/cgroup.procs").unwrap() {
+        ParentWalked::Redirect(r) => assert_eq!(r.svc, 0),
+        _ => panic!(),
+    }
     assert!(matches!(walk::walk_parent(&be, &root(), Start::Root, b"/dev/newnode").unwrap(), ParentWalked::Found(_)));
 }
 
@@ -368,7 +398,8 @@ fn pts_names() {
     assert_eq!(devpts::parse(b"pts/17/"), Pts::NotDir);
     assert_eq!(devpts::parse(b"pts/17/x"), Pts::NotDir);
     assert_eq!(devpts::parse(b"pts/017"), Pts::Missing);
-    assert_eq!(devpts::parse(b"pts/ptmx"), Pts::Missing);
+    assert_eq!(devpts::parse(b"pts/ptmx"), Pts::Ptmx);
+    assert_eq!(devpts::parse(b"pts/ptmx/"), Pts::Missing);
     assert_eq!(devpts::parse(b"pts/x/y"), Pts::Missing);
     assert_eq!(devpts::parse(b"pts/99999999"), Pts::Missing);
     assert_eq!(devpts::parse(b"pts/1048576"), Pts::Missing);

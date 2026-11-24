@@ -218,10 +218,18 @@ fn ns0_mount(cx: &Cx, admin: bool) -> Result<i64, i64> {
     if (v >> 32) as u32 & 0x3FFF_FFFF != LX_OBJ_KIND_FUSE {
         return Err(EINVAL);
     }
+    // (review 6: the record holds the whole path, type and source, or the mount is refused
+    // before anything is mounted)
+    let text = track.text();
+    if text.len() > LX_FH_PATH_MAX {
+        return Err(-36); // ENAMETOOLONG
+    }
+    if fstype.len() > LX_NS0FUSE_NAME_MAX || source.len() > LX_NS0FUSE_NAME_MAX {
+        return Err(EINVAL);
+    }
     let who = crate::fuse::wire::Who { uid: c.euid, gid: c.egid, pid: c.tgid as u32 };
     let conn = crate::fuse::mount_conn(v as u32, (uid, gid, other), who)?;
     let root = crate::fuse::wire::ino(conn, 1);
-    let text = track.text();
     let mut m = LxNs0Fuse {
         req: c.id,
         mountpoint: n.ino,

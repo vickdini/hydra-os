@@ -187,6 +187,10 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     // wave9 G6b-3 end
     // wave10 GV2: the device opens in the kernel (by number: its owner makes the object)
     if device {
+        // (review 1: not on a nodev mount: a user's FUSE mount, a namespace's nodev bind)
+        if k.mount_flags(n)? & crate::kmounts::MS_NODEV != 0 {
+            return Err(EACCES);
+        }
         // (a FUSE daemon's device node: the kernel's, as before)
         if crate::fuse::wire::split(n.ino).is_some() || cx.page().is_null() {
             return Err(KERNEL);

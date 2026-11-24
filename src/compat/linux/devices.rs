@@ -504,6 +504,13 @@ fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
         t.node_mode(s, &alloc::format!("/dev/tty{}", n), super::chardev::makedev(4, n), tty, 0o620)?;
     }
     t.dir(s, "/dev/pts")?;
+    // (review 3: the cpu ranges as files too, so a walk relative to the cpu directory finds
+    // them; an absolute path is still linux-server's, which shows the same text)
+    let n = crate::arch::smp::online();
+    let range = if n > 1 { alloc::format!("0-{}\n", n - 1) } else { String::from("0\n") };
+    for f in ["online", "possible", "present"] {
+        t.file(s, &alloc::format!("/sys/devices/system/cpu/{}", f), &range)?;
+    }
     // wave10 GV2 end
     t.link(s, "/etc/mtab", "../proc/self/mounts")?;
     let path_tag: String = v.slot.chars().map(|c| if c == ':' || c == '.' { '_' } else { c }).collect();

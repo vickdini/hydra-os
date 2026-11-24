@@ -274,7 +274,7 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
     let cx = Cx::from_call(c, page);
     let r = match c.nr {
         // wave10 GV2: a path call vfs-server redirected here (`/dev/pts`)
-        _ if c.redirs > 0 && c.redir_obj & 0xFFFF_FFFF == LX_VFS_PSEUDO_DEVPTS => pts_call(&cx),
+        _ if c.redirs > 0 && c.redir_obj & 0xFF == LX_VFS_PSEUDO_DEVPTS => pts_call(&cx),
         LX_KCALL_TTY => kcall(&cx),
         0 | 19 if c.obj != LX_OBJ_NONE => obj_read(&cx),
         1 | 20 if c.obj != LX_OBJ_NONE => obj_write(&cx),
@@ -309,14 +309,56 @@ fn pts_call(cx: &Cx) -> Answer {
     };
     let Ok(p) = cx.user_cstr(path_ptr) else { return kernel() };
     let Some(tail) = p.get(cx.c.redir_tail as usize..) else { return kernel() };
-    let target = devpts::parse(tail);
+    // (review 3: a walk that started in /dev/pts: the rest is below `pts`)
+    let target = if cx.c.redir_obj & devpts::PTS_BELOW != 0 {
+        let mut t = b"pts/".to_vec();
+        t.extend_from_slice(tail);
+        devpts::parse(&t)
+    } else {
+        devpts::parse(tail)
+    };
     let node = match target {
         Pts::Kernel => return kernel(),
+        Pts::Missing if matches!(cx.nr, 2 | 257) && (if cx.nr == 2 { a[1] } else { a[2] }) & 0o100 != 0 => return (EPERM, 0),
         Pts::Missing => return (ENOENT, 0),
         Pts::NotDir => return (ENOTDIR, 0),
         Pts::Dir => None,
+        // (review 5: /dev/pts/ptmx: char 5:2, mode 0 (root opens it), inode 2)
+        Pts::Ptmx => {
+            return match cx.nr {
+                4 | 6 | 262 | 332 => {
+                    let (out, x) = match cx.nr {
+                        4 | 6 => (a[1], false),
+                        262 => (a[2], false),
+                        _ => (a[4], true),
+                    };
+                    let rdev = (5 << 8) | 2;
+                    let r = if x { cx.copy_out(out, &devpts::statx_bytes(2, 0o020000, 0, 0, rdev, 1)) } else { cx.copy_out(out, &devpts::stat_bytes(2, 0o020000, 0, 0, rdev, 1)) };
+                    (r.err().unwrap_or(0), 0)
+                }
+                2 | 257 => {
+                    let flags = if cx.nr == 2 { a[1] } else { a[2] };
+                    if flags & O_PATH != 0 {
+                        return kernel();
+                    }
+                    if flags & 0o200 != 0 && flags & 0o100 != 0 {
+                        return (-17, 0); // EEXIST
+                    }
+                    if cx.c.euid != 0 {
+                        return (EACCES, 0);
+                    }
+                    (open(cx, (5 << 8) | 2, flags, &caller(cx, true)), 0)
+                }
+                21 | 269 | 439 => (if cx.c.euid == 0 { 0 } else { EACCES }, 0),
+                89 | 267 => (-22, 0),
+                137 => (cx.copy_out(a[1], &devpts::statfs_bytes()).err().unwrap_or(0), 0),
+                _ => (EPERM, 0),
+            };
+        }
         Pts::Node(i) => match TTYS.lock().stat(i) {
             Some(n) => Some((i, n)),
+            // (review 5: devpts makes no names: O_CREAT of a missing one is EPERM)
+            None if matches!(cx.nr, 2 | 257) && (if cx.nr == 2 { a[1] } else { a[2] }) & 0o100 != 0 => return (EPERM, 0),
             None => return (ENOENT, 0),
         },
     };
@@ -354,6 +396,8 @@ fn pts_call(cx: &Cx) -> Answer {
                 None => return kernel(),
                 Some(_) if flags & O_PATH != 0 => return kernel(),
                 Some(_) if flags & O_DIRECTORY != 0 => ENOTDIR,
+                // (review 5: O_CREAT|O_EXCL of an existing slave)
+                Some(_) if flags & 0o300 == 0o300 => -17, // EEXIST
                 Some(_) => open(cx, rdev, flags, &caller(cx, true)),
             }
         }

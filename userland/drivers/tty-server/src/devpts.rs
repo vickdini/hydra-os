@@ -10,6 +10,9 @@
 //! directory inode 1), as `fstat` of a slave reports them. [`parse`] is plain code
 //! (host-tested in `tests/host-w10-v2`).
 
+/// vfs-server's redirect object bit: the tail starts below `pts` (`calls/served.rs`).
+pub const PTS_BELOW: u64 = 0x100;
+
 /// `st_dev` of devpts (the kernel's `pty::PTS_DEV`).
 pub const PTS_DEV: u64 = 0x18;
 
@@ -20,6 +23,8 @@ pub enum Pts {
     Dir,
     /// Slave `/dev/pts/N`.
     Node(u32),
+    /// `/dev/pts/ptmx` (review 5: Linux's devpts instance has one, mode 0, char 5:2).
+    Ptmx,
     /// A name that cannot exist (`ENOENT`).
     Missing,
     /// A file named as a directory (`ENOTDIR`).
@@ -37,6 +42,7 @@ pub fn parse(tail: &[u8]) -> Pts {
     }
     match &comps[1..] {
         [] => Pts::Dir,
+        [b"ptmx"] if !trailing => Pts::Ptmx,
         [n] => match number(n) {
             Some(_) if trailing => Pts::NotDir,
             Some(i) => Pts::Node(i),

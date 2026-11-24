@@ -28,10 +28,20 @@ pub enum Tree {
 }
 
 /// Whether a served name may start at component `name` (the first component below the
-/// tree's top: the walk asks only then).
+/// tree's top: the walk asks only then; review 3: and the names a walk that starts inside
+/// `/dev/pts` or a control group directory meets: a slave's number, `ptmx`, `cgroup.procs`).
 pub fn may_serve(name: &[u8]) -> bool {
-    matches!(name, b"devices" | b"firmware" | b"fs" | b"pts")
+    matches!(name, b"devices" | b"firmware" | b"fs" | b"pts" | b"ptmx" | b"cgroup.procs") || is_number(name)
 }
+
+/// Whether `name` is a decimal number (a pseudo-terminal slave's name).
+fn is_number(name: &[u8]) -> bool {
+    !name.is_empty() && name.len() <= 7 && name.iter().all(|b| b.is_ascii_digit())
+}
+
+/// [`LX_VFS_PSEUDO_DEVPTS`] with this bit: the redirect's rest starts below `pts` (a walk that
+/// started in the `/dev/pts` directory) instead of at `pts`.
+pub const PTS_BELOW: u64 = 0x100;
 
 /// The tree a served name starting at `name` is in (`name` passed [`may_serve`]).
 pub fn tree_of(name: &[u8]) -> Tree {
@@ -42,12 +52,42 @@ pub fn tree_of(name: &[u8]) -> Tree {
 /// `name` (with `rest` after it) in directory `dir`, when `dir` is the caller's root's `sys`
 /// or `dev` (looked up when such a name is met, from the caches). `open`: the call is an open.
 pub fn check(be: &dyn Backend, cx: &Ctx, dir: Node, name: &[u8], rest: &[&[u8]], open: bool) -> Option<(SvcId, u64)> {
+    // review 3: walks that start inside /dev/pts or a control group directory (a descriptor
+    // or the working directory there)
+    if name == b"cgroup.procs" {
+        return in_cgroup(be, cx, dir).then_some((0, 0));
+    }
+    if name == b"ptmx" || is_number(name) {
+        let pts = be.lookup(be.lookup(cx.root, b"dev").ok()?, b"pts").ok()?;
+        return (dir == pts).then_some((LXS_TTY, LX_VFS_PSEUDO_DEVPTS | PTS_BELOW));
+    }
     let tree = tree_of(name);
     let top: &[u8] = if tree == Tree::Dev { b"dev" } else { b"sys" };
     if be.lookup(cx.root, top).ok()? != dir {
         return None;
     }
     served(tree, name, rest, open)
+}
+
+/// Whether directory `dir` is the caller's root's `sys/fs/cgroup` or below it (climbing `..`
+/// from the caches, 32 levels at most).
+fn in_cgroup(be: &dyn Backend, cx: &Ctx, dir: Node) -> bool {
+    let cg = (|| be.lookup(be.lookup(be.lookup(cx.root, b"sys").ok()?, b"fs").ok()?, b"cgroup").ok())();
+    let Some(cg) = cg else { return false };
+    let mut d = dir;
+    for _ in 0..32 {
+        if d == cg {
+            return true;
+        }
+        if d == cx.root {
+            return false;
+        }
+        match be.lookup(d, b"..") {
+            Ok(p) if p != d => d = p,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// The service serving `name` with `rest` after it, directly below the top of `tree`:
