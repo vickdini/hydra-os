@@ -76,9 +76,9 @@ pub fn discover_with(fw: Option<&[u8]>, opts: Option<&[u8]>) {
 
 /// The boot entry's load options as lower-case ASCII (and how many bytes of it).
 fn load_options_text() -> Option<([u8; 512], usize)> {
-    let img = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()).ok()?;
-    let opts = img.load_options_as_bytes()?;
-    Some(options_text(opts))
+    // wave11 GH: the boot words (load options, \hydra\options.txt, the start menu)
+    let opts = crate::arch::bootopts::ucs2();
+    (!opts.is_empty()).then(|| options_text(&opts))
 }
 
 /// UCS-2 load options `opts` as lower-case ASCII (other characters as `?`), at most 512
@@ -100,7 +100,8 @@ pub fn options_text(opts: &[u8]) -> ([u8; 512], usize) {
 /// (Ctrl+Alt+F1).
 fn start_desktop(emergency: bool) {
     let key = crate::console::read_key().is_some();
-    let asked = crate::arch::fwcfg::read_file("opt/hydra/boot").is_some_and(|v| v.starts_with(b"shell") || v.starts_with(b"emergency"));
+    let asked = crate::arch::fwcfg::read_file("opt/hydra/boot").is_some_and(|v| v.starts_with(b"shell") || v.starts_with(b"emergency"))
+        || crate::arch::bootopts::say(&[b"nodesktop"]); // wave11 GH: start menu entry 3
     if key || asked || emergency {
         crate::video::splash::end();
         set_color(Color::LightCyan, Color::Black);

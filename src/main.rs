@@ -136,6 +136,7 @@ use crate::ipc::{Endpoint, Message};
 fn panic(_info: &PanicInfo) -> ! {
     x86_64::instructions::interrupts::disable();
     report_panic(_info);
+    crate::arch::bootlog::after_panic(); // wave11 GH: restarts to save the log (stick, disk)
     loop {
         x86_64::instructions::hlt();
     }
@@ -214,6 +215,10 @@ fn main() -> Status {
 pub fn boot() -> ! {
     arch::boottime::mark("entry (UEFI helpers)");
     uefi::helpers::init().unwrap();
+    // wave11 GH: the boot log's memory (a crashed start's log is kept for its file), then
+    // the boot words and the start menu, before anything reads them
+    arch::bootlog::early();
+    arch::bootopts::init();
     // The Hydra logo instead of boot messages, unless the boot entry asks for them
     video::splash::decide();
     // The boot processor's per-CPU data, and the kernel lock it holds while in the kernel
@@ -467,6 +472,7 @@ pub fn boot() -> ! {
     crate::arch::mouse::init();
     arch::boottime::mark("reading the boot files");
     arch::bootdisk::detect();
+    arch::bootlog::prepare_file(); // wave11 GH: \logs\bootNNN.txt on the EFI partition
     let boot_files = fs::ZfsClient::read_boot_files();
     console::set_color(Color::LightGreen, Color::Black);
     println!("[+] Boot volume: {} files staged for the pool", boot_files.len());
@@ -510,6 +516,10 @@ pub fn boot() -> ! {
     fs::firstboot::import_into_pool(); // Group G: installer first-boot settings
     arch::boottime::mark("disks");
     fs::blockdev::scan();
+    // wave11 GH: the boot log's writer (the boot disk is known now), and a restart that
+    // saves the log when the pool's disk never came
+    arch::bootlog::start_writer();
+    arch::bootlog::check_pool();
     console::set_color(Color::LightGreen, Color::Black);
     println!(
         "[+] ZFS File Server Online (Endpoint #{:#x}):",

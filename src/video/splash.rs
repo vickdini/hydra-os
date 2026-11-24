@@ -57,13 +57,11 @@ pub fn is_active() -> bool {
 /// is `debug` or `shell`. Allocates nothing (the heap is not set up yet).
 pub fn decide() {
     // The boot entry's load options (UTF-16)
-    let mut opts = None;
-    if let Ok(img) = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()) {
-        opts = img.load_options_as_bytes().map(options_text);
-    }
+    // wave11 GH: the boot words (load options, \hydra\options.txt, the start menu)
+    let opts = crate::arch::bootopts::words().text();
     let mut buf = [0u8; 16];
     let fw = crate::arch::fwcfg::read_file_into("opt/hydra/boot", &mut buf).map(|n| &buf[..n]);
-    QUIET.store(wants_splash(opts.as_ref().map(|(text, n)| &text[..*n]), fw), Ordering::Relaxed);
+    QUIET.store(wants_splash(Some(opts), fw), Ordering::Relaxed);
 }
 
 /// UCS-2 load options `opts` as lower-case ASCII (other characters as `?`), at most 256

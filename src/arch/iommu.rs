@@ -278,8 +278,8 @@ pub(crate) fn load_options_say(words: &[&[u8]]) -> bool {
 /// The image's load options (UCS-2), if it has any.
 #[cfg(target_os = "uefi")]
 fn load_options() -> Option<Vec<u8>> {
-    let img = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()).ok()?;
-    img.load_options_as_bytes().map(|o| o.to_vec())
+    // wave11 GH: the boot words (load options, \hydra\options.txt, the start menu)
+    Some(crate::arch::bootopts::ucs2())
 }
 
 /// Host build (unit tests): the test thread's load options.

@@ -29,6 +29,7 @@ impl core::fmt::Write for RawSerial {
     ///
     /// *Guaranteed to never panic under normal execution.*
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        crate::arch::bootlog::append(s.as_bytes()); // wave11 GH
         for b in s.bytes() {
             if b == b'\n' {
                 put(b'\r');

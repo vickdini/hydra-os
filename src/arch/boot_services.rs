@@ -143,6 +143,8 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     crate::arch::iommu::discover();
     // 2d. PCID's off switches
     crate::arch::pcid::discover();
+    // 2e. ACPI power-off and reset values (wave11 GH)
+    crate::arch::power::discover();
 
     // 3. Terminate UEFI Boot Services
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
