@@ -30,23 +30,27 @@ fn to_caller_renumbers_only_the_init() {
 fn may_see_follows_the_ptrace_read_rule() {
     let all = |x: u32| (x, x, x);
     // itself, always (even a service)
-    assert!(may_see(true, true, (1000, 1000), 0, all(0), all(0)));
+    assert!(may_see(true, true, (1000, 1000), 0, all(0), all(0), true));
     // a service's process: never
-    assert!(!may_see(false, true, (0, 0), CAP_SYS_PTRACE, all(0), all(0)));
+    assert!(!may_see(false, true, (0, 0), CAP_SYS_PTRACE, all(0), all(0), true));
     // same user and group in all three ids
-    assert!(may_see(false, false, (1000, 100), 0, all(1000), all(100)));
+    assert!(may_see(false, false, (1000, 100), 0, all(1000), all(100), true));
     // a set-user-ID target (euid or suid differs): no
-    assert!(!may_see(false, false, (1000, 100), 0, (1000, 0, 1000), all(100)));
-    assert!(!may_see(false, false, (1000, 100), 0, (1000, 1000, 0), all(100)));
+    assert!(!may_see(false, false, (1000, 100), 0, (1000, 0, 1000), all(100), true));
+    assert!(!may_see(false, false, (1000, 100), 0, (1000, 1000, 0), all(100), true));
     // a set-group-ID target (egid or sgid differs): no (Linux checks the groups too)
-    assert!(!may_see(false, false, (1000, 100), 0, all(1000), (100, 42, 100)));
-    assert!(!may_see(false, false, (1000, 100), 0, all(1000), (100, 100, 42)));
+    assert!(!may_see(false, false, (1000, 100), 0, all(1000), (100, 42, 100), true));
+    assert!(!may_see(false, false, (1000, 100), 0, all(1000), (100, 100, 42), true));
     // a caller of another group: no
-    assert!(!may_see(false, false, (1000, 7), 0, all(1000), all(100)));
+    assert!(!may_see(false, false, (1000, 7), 0, all(1000), all(100), true));
     // CAP_SYS_PTRACE: yes
-    assert!(may_see(false, false, (1000, 100), CAP_SYS_PTRACE, all(0), all(0)));
+    assert!(may_see(false, false, (1000, 100), CAP_SYS_PTRACE, all(0), all(0), true));
     // other capabilities do not count
-    assert!(!may_see(false, false, (1000, 100), !CAP_SYS_PTRACE, all(0), all(0)));
+    assert!(!may_see(false, false, (1000, 100), !CAP_SYS_PTRACE, all(0), all(0), true));
+    // wave10 G7b-2: a target that is not dumpable: only CAP_SYS_PTRACE (or itself)
+    assert!(!may_see(false, false, (1000, 100), 0, all(1000), all(100), false));
+    assert!(may_see(false, false, (1000, 100), CAP_SYS_PTRACE, all(1000), all(100), false));
+    assert!(may_see(true, false, (1000, 100), 0, all(1000), all(100), false));
 }
 
 #[test]
@@ -202,13 +206,103 @@ fn classify_pid_files() {
     // per-thread directories have no statm, cmdline or maps here
     assert_eq!(p("123/task/124/statm"), Target::Kernel);
     assert_eq!(p("123/task/124/cmdline"), Target::Kernel);
+    // wave10 G7b-2: environ and limits (not per thread)
+    assert_eq!(p("self/environ"), f(Who::Caller, 0, PidFile::Environ));
+    assert_eq!(p("123/limits"), f(Who::Pid(123), 0, PidFile::Limits));
+    assert_eq!(p("123/task/124/environ"), Target::Kernel);
+    assert_eq!(p("123/task/124/limits"), Target::Kernel);
+    assert_eq!(p("self/environ/"), Target::Kernel);
+}
+
+// ---------------------------------------------------------------- wave10 G7b-2
+
+#[test]
+fn classify_process_directories() {
+    use crate::pseudo::path::Dir;
+    assert_eq!(p("123"), Target::Dir(Dir::Pid(Who::Pid(123))));
+    assert_eq!(p("123/"), Target::Dir(Dir::Pid(Who::Pid(123))));
+    assert_eq!(p("self/"), Target::Dir(Dir::Pid(Who::Caller)));
+    assert_eq!(p("thread-self/"), Target::Kernel);
+    assert_eq!(p("123/task"), Target::Dir(Dir::Task(Who::Pid(123))));
+    assert_eq!(p("self/task/"), Target::Dir(Dir::Task(Who::Caller)));
+    assert_eq!(p("123/task/124"), Target::Dir(Dir::Thread(Who::Pid(123), 124)));
+    assert_eq!(p("123/task/0124"), Target::Missing);
+    assert_eq!(p("0123"), Target::Missing);
+    assert_eq!(p("0"), Target::Kernel);
+    assert_eq!(p("123/task/0"), Target::Kernel);
+    assert_eq!(p("123/task/x"), Target::Kernel);
+    assert_eq!(p("2147483648"), Target::Kernel);
+    assert_eq!(Dir::Thread(Who::Pid(5), 6).who(), Who::Pid(5));
+    assert_eq!(Dir::Task(Who::Caller).who(), Who::Caller);
+}
+
+#[test]
+fn classify_sysvipc_files() {
+    assert_eq!(p("sysvipc/shm"), Target::File(File::SysvIpc(0)));
+    assert_eq!(p("sysvipc/sem"), Target::File(File::SysvIpc(1)));
+    assert_eq!(p("sysvipc/msg"), Target::File(File::SysvIpc(2)));
+    assert_eq!(p("sysvipc"), Target::Kernel);
+    assert_eq!(p("sysvipc/"), Target::Kernel);
+    assert_eq!(p("sysvipc/shm/"), Target::Kernel);
+    assert_eq!(p("sysvipc/other"), Target::Kernel);
+}
+
+#[test]
+fn file_modes() {
+    assert_eq!(File::Uptime.mode(), 0o444);
+    assert_eq!(File::Pid { who: Who::Caller, tid: 0, file: PidFile::Environ }.mode(), 0o400);
+    assert_eq!(File::Pid { who: Who::Caller, tid: 0, file: PidFile::Limits }.mode(), 0o444);
+    assert_eq!(File::SysvIpc(0).mode(), 0o444);
+}
+
+#[test]
+fn identity_round_trips() {
+    let files = [File::Uptime, File::Loadavg, File::Stat, File::Meminfo, File::Cpuinfo, File::SysvIpc(0), File::SysvIpc(1), File::SysvIpc(2)];
+    for f in files {
+        let id = path::ident(f, 99);
+        assert_ne!(id[0], 0);
+        assert_eq!(path::of_ident(id), Some((f, 0)), "{:?}", f);
+    }
+    for pf in [PidFile::Stat, PidFile::Status, PidFile::Statm, PidFile::Comm, PidFile::Cmdline, PidFile::Maps, PidFile::Environ, PidFile::Limits] {
+        for tid in [0u64, 77] {
+            let f = File::Pid { who: Who::Pid(1234), tid, file: pf };
+            let id = path::ident(f, 555);
+            assert_eq!(id[1..], [1234, tid, 555]);
+            assert_eq!(path::of_ident(id), Some((f, 555)), "{:?}", f);
+        }
+    }
+    // fixed text is never made again
+    assert_eq!(path::ident(File::Version, 1)[0], 0);
+    assert_eq!(path::ident(File::Static(b"1
+"), 1)[0], 0);
+    assert_eq!(path::of_ident([0, 0, 0, 0]), None);
+    // codes that name nothing, and process files without a (valid) process
+    for id in [[9, 0, 0, 0], [15, 0, 0, 0], [24, 1, 0, 0], [99, 1, 0, 0], [16, 0, 0, 1], [16, 1 << 31, 0, 1], [16, 5, 1 << 31, 1]] {
+        assert_eq!(path::of_ident(id), None, "{:?}", id);
+    }
+}
+
+#[test]
+fn limits_text_matches_the_kernels_layout() {
+    let mut l = [(u64::MAX, u64::MAX); text::NLIMITS];
+    l[7] = (1024, 4096);
+    l[3] = (8 << 20, u64::MAX);
+    let t = alloc::string::String::from_utf8(text::limits(&l)).unwrap();
+    let lines: Vec<&str> = t.lines().collect();
+    assert_eq!(lines.len(), 17);
+    assert_eq!(lines[0], "Limit                     Soft Limit           Hard Limit           Units     ");
+    assert_eq!(lines[1], "Max cpu time              unlimited            unlimited            seconds   ");
+    assert_eq!(lines[4], "Max stack size            8388608              unlimited            bytes     ");
+    assert_eq!(lines[8], "Max open files            1024                 4096                 files     ");
+    assert_eq!(lines[14], "Max nice priority         unlimited            unlimited                      ");
+    assert_eq!(lines[16], "Max realtime timeout      unlimited            unlimited            us        ");
 }
 
 #[test]
 fn classify_sends_the_rest_to_the_kernel() {
     for t in [
-        "", "self", "self/", "123", "123/", "self/fd", "self/fd/3", "self/exe", "self/cwd", "self/root", "self/mountinfo", "mounts", "net/tcp", "self/fdinfo/1",
-        "self/limits", "self/auxv", "self/cgroup", "self/oom_score_adj", "self/ns/mnt", "self/uid_map", "keys", "swaps", "locks", "filesystems",
+        "", "self", "self/fd", "self/fd/3", "self/exe", "self/cwd", "self/root", "self/mountinfo", "mounts", "net/tcp", "self/fdinfo/1",
+        "self/auxv", "self/cgroup", "self/oom_score_adj", "self/ns/mnt", "self/uid_map", "keys", "swaps", "locks", "filesystems",
         "sys/kernel/random/boot_id", "sys/kernel/random/uuid", "sys/user/max_user_namespaces", "asound/cards", "0/stat", "-1/stat", "12345678901/stat",
         "12a/stat", "123/task/0/stat", "123/task/x/stat", "self/../uptime", "../etc/passwd", "uptime/", "self/stat/", "sys/kernel/nothing", "nothing",
     ] {
@@ -221,22 +315,30 @@ fn classify_sends_the_rest_to_the_kernel() {
 
 #[test]
 fn classify_sys_and_other_mounts() {
-    let s = |t: &str| classify(LX_VFS_PSEUDO_SYS, t.as_bytes());
-    assert_eq!(s("devices/system/cpu/online"), Target::File(File::CpuRange));
-    assert_eq!(s("devices/system/cpu/possible"), Target::File(File::CpuRange));
-    assert_eq!(s("devices/system/cpu/present"), Target::File(File::CpuRange));
-    assert!(File::CpuRange.in_sys());
-    assert!(!File::Uptime.in_sys());
-    assert_eq!(s("devices/system/cpu"), Target::Kernel);
-    assert_eq!(s("class/drm/card0/uevent"), Target::Kernel);
-    assert_eq!(s("fs/cgroup/cgroup.procs"), Target::Kernel);
-    assert_eq!(s("firmware/efi/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c"), Target::File(File::Efivar));
+    // wave10 G7b-2: /sys is linux-server's (`pseudo/sys.rs`); lx-proc's classify answers
+    // the kernel for every mount but /proc
+    use crate::sysfs::sys::{self, File as SysFile};
+    let s = |t: &str| sys::classify(LX_VFS_PSEUDO_SYS, t.as_bytes());
+    assert_eq!(s("devices/system/cpu/online"), Some(SysFile::CpuRange));
+    assert_eq!(s("devices/system/cpu/possible"), Some(SysFile::CpuRange));
+    assert_eq!(s("devices/system/cpu/present"), Some(SysFile::CpuRange));
+    assert_eq!(s("devices/system/cpu"), None);
+    assert_eq!(s("devices/system/cpu/online/"), None);
+    assert_eq!(s("devices/system/cpu/../cpu/online"), None);
+    assert_eq!(s("class/drm/card0/uevent"), None);
+    assert_eq!(s("fs/cgroup/cgroup.procs"), None);
+    assert_eq!(s("firmware/efi/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c"), Some(SysFile::Efivar));
+    assert_eq!(sys::classify(LX_VFS_PSEUDO_PROC, b"uptime"), None);
+    assert_eq!(sys::classify(LX_VFS_PSEUDO_SYS, b"\xff"), None);
+    assert_eq!(classify(LX_VFS_PSEUDO_SYS, b"devices/system/cpu/online"), Target::Kernel);
     // /dev and anything else: the kernel
     assert_eq!(classify(LX_VFS_PSEUDO_DEV, b"null"), Target::Kernel);
     assert_eq!(classify(LX_VFS_PSEUDO_DEVPTS, b"0"), Target::Kernel);
     assert_eq!(classify(99, b"uptime"), Target::Kernel);
     // the high half of the object (a ticket) does not matter
     assert_eq!(classify(LX_VFS_PSEUDO_PROC | 7 << 32, b"uptime"), Target::File(File::Uptime));
+    assert_eq!(sys::classify(LX_VFS_PSEUDO_SYS | 7 << 32, b"devices/system/cpu/online"), Some(SysFile::CpuRange));
+    assert_eq!(sys::ino_of(LX_VFS_PSEUDO_SYS, b"x"), path::ino_of(LX_VFS_PSEUDO_SYS, b"x"));
 }
 
 #[test]
@@ -419,8 +521,8 @@ fn cpuinfo_and_cpu_range() {
     assert_eq!(t.matches("processor\t:").count(), 4);
     assert!(t.contains("processor\t: 3\n"));
     assert!(t.contains("siblings\t: 4\n"));
-    assert_eq!(text::cpu_range(1), b"0\n");
-    assert_eq!(text::cpu_range(4), b"0-3\n");
+    assert_eq!(crate::sysfs::sys::cpu_range(1), b"0\n");
+    assert_eq!(crate::sysfs::sys::cpu_range(4), b"0-3\n");
 }
 
 #[test]
@@ -447,9 +549,9 @@ fn maps_text_matches_the_kernels_layout() {
 
 #[test]
 fn classify_efivars_files() {
-    let s = |t: &str| classify(LX_VFS_PSEUDO_SYS, t.as_bytes());
-    assert_eq!(s("firmware/efi/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c"), Target::File(File::Efivar));
-    assert!(File::Efivar.in_sys());
+    use crate::sysfs::sys::{self, File as SysFile};
+    let s = |t: &str| sys::classify(LX_VFS_PSEUDO_SYS, t.as_bytes());
+    assert_eq!(s("firmware/efi/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c"), Some(SysFile::Efivar));
     // the directory, a bad GUID, a short name, a trailing slash: the kernel
     for t in [
         "firmware/efi/efivars",
@@ -460,10 +562,10 @@ fn classify_efivars_files() {
         "firmware/efi/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c/",
         "firmware/efi/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032g8c",
     ] {
-        assert_eq!(s(t), Target::Kernel, "{}", t);
+        assert_eq!(s(t), None, "{}", t);
     }
-    assert!(path::efivar_name("X-00000000-0000-0000-0000-000000000000"));
-    assert!(!path::efivar_name("00000000-0000-0000-0000-000000000000"));
+    assert!(sys::efivar_name("X-00000000-0000-0000-0000-000000000000"));
+    assert!(!sys::efivar_name("00000000-0000-0000-0000-000000000000"));
 }
 
 #[test]
@@ -475,7 +577,7 @@ fn classify_rejects_big_ids_and_dot_endings() {
     assert_eq!(p("1/task/4294967296/stat"), Target::Kernel);
     // `/.` at the end: must be a directory (ENOTDIR for a file, the kernel's rules)
     assert_eq!(p("version/."), Target::Kernel);
-    assert_eq!(p("self/."), Target::Kernel);
+    assert_eq!(p("self/."), Target::Dir(crate::pseudo::path::Dir::Pid(Who::Caller))); // (wave10 G7b-2: a directory)
     assert_eq!(p("self/stat/."), Target::Kernel);
     assert_eq!(p("."), Target::Kernel);
     // `.` in the middle is fine
@@ -494,20 +596,26 @@ fn classify_rejects_leading_zeros() {
 #[test]
 fn access_rule_for_read_only_files_and_the_self_link() {
     use crate::pseudo::path::access_rule;
-    // F_OK, R_OK: anyone
-    assert_eq!(access_rule(0, 0, 1000, false), Ok(()));
-    assert_eq!(access_rule(4, 0, 1000, false), Ok(()));
+    // F_OK, R_OK: anyone (0444)
+    assert_eq!(access_rule(0, 0, 1000, 0o444, 0), Ok(()));
+    assert_eq!(access_rule(4, 0, 1000, 0o444, 0), Ok(()));
     // W_OK: root only (it overrides the mode bits)
-    assert_eq!(access_rule(2, 0, 1000, false), Err(-13));
-    assert_eq!(access_rule(2, 0, 0, false), Ok(()));
+    assert_eq!(access_rule(2, 0, 1000, 0o444, 1000), Err(-13));
+    assert_eq!(access_rule(2, 0, 0, 0o444, 1000), Ok(()));
     // X_OK: never on a file (no x bit; root too), fine on the directory
-    assert_eq!(access_rule(1, 0, 0, false), Err(-13));
-    assert_eq!(access_rule(1, 0, 1000, true), Ok(()));
-    assert_eq!(access_rule(5, 0, 1000, true), Ok(()));
+    assert_eq!(access_rule(1, 0, 0, 0o444, 0), Err(-13));
+    assert_eq!(access_rule(1, 0, 1000, 0o555, 0), Ok(()));
+    assert_eq!(access_rule(5, 0, 1000, 0o555, 0), Ok(()));
+    assert_eq!(access_rule(1, 0, 0, 0o555, 7), Ok(()));
+    // wave10 G7b-2: environ (0400): its owner and root read it, nobody else
+    assert_eq!(access_rule(4, 0, 1000, 0o400, 1000), Ok(()));
+    assert_eq!(access_rule(4, 0, 1001, 0o400, 1000), Err(-13));
+    assert_eq!(access_rule(0, 0, 1001, 0o400, 1000), Ok(()));
+    assert_eq!(access_rule(4, 0, 0, 0o400, 1000), Ok(()));
     // bad mode bits and faccessat2 flags
-    assert_eq!(access_rule(8, 0, 0, false), Err(-22));
-    assert_eq!(access_rule(4, 0x200 | 0x100 | 0x1000, 0, false), Ok(()));
-    assert_eq!(access_rule(4, 0x400, 0, false), Err(-22));
+    assert_eq!(access_rule(8, 0, 0, 0o444, 0), Err(-22));
+    assert_eq!(access_rule(4, 0x200 | 0x100 | 0x1000, 0, 0o444, 0), Ok(()));
+    assert_eq!(access_rule(4, 0x400, 0, 0o444, 0), Err(-22));
 }
 
 // wave10 G8-1: the read rule's capability and user-namespace inputs (review 10-81)

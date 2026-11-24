@@ -123,6 +123,9 @@ pub mod shm_table;
 // wave6 G21 begin: restart support for every service (design section 5)
 pub mod restart;
 pub mod restart_policy;
+// wave10 G7b-2 begin: kernel-held snapshots of the `/proc` files lx-proc serves
+pub mod procsnap;
+// wave10 G7b-2 end
 
 /// Whether calls to service `s` should be made: its host is online, or it is restarting and
 /// its callers wait for it (Transparent and FailObjects; never EndLinux).
@@ -394,15 +397,10 @@ fn proc_answered(nr: u64) {
     }
 }
 
-/// The host that serves a redirect to service `s`: `/proc` (`LXS_PROC`'s file system)
-/// stays in linux-server until stage 2 (7b-2) moves it into lx-proc, while lx-proc already
-/// serves the process calls.
+/// The host that serves a redirect to service `s` (wave10 G7b-2: `/proc`, `LXS_PROC`'s
+/// file system, is lx-proc's own now: no exception left).
 fn redirect_host(s: SvcId) -> SvcId {
-    if s == crate::ipc::protocol::LXS_PROC {
-        svc::host_of(LXS_LINUX)
-    } else {
-        svc::host_of(s)
-    }
+    svc::host_of(s)
 }
 // wave10 G7b-1 end
 
@@ -881,6 +879,9 @@ fn plain_svc(nr: u64, args: &[u64; 6]) -> SvcId {
         // wave9 G6b-1 begin: a fanotify permission question (`notifyfwd::on_open`)
         crate::ipc::protocol::LX_KCALL_FANPERM => crate::ipc::protocol::LXS_VFS,
         // wave9 G6b-1 end
+        // wave10 G7b-2 begin: a `/proc` snapshot made again (`procsnap`)
+        crate::ipc::protocol::LX_KCALL_PREMAKE => crate::ipc::protocol::LXS_PROC,
+        // wave10 G7b-2 end
         _ => entry_svc(entry(nr)),
     }
 }
@@ -985,6 +986,66 @@ pub fn call_obj_pseudo(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>,
     call_obj_kbuf_x(dev, nr, false, &[], out, [a, b, 0])
 }
 // wave7 G7-4 end
+
+// wave10 G7b-2 begin
+/// Kernel call `nr` (no descriptor object) with four words to the service `plain_svc` names,
+/// for the current thread, with a kernel output buffer: the call's `args` are `[w0,
+/// LX_KBUF_ADDR, room, w1, w2, w3]`, and what the service writes at `args[1]` lands in `out`
+/// (at most `LX_DATA_SIZE` bytes). `ipc_ns`: the IPC namespace the call names (`LxCall::ipc_ns`).
+/// The caller holds the kernel lock (an ordinary system call path); the service restarting
+/// is waited for as for any call. (`procsnap`'s remakes.)
+pub fn call_kbuf_plain(nr: u64, args: [u64; 4], ipc_ns: u64, out: &mut [u8]) -> i64 {
+    use crate::ipc::protocol::LX_KBUF_ADDR;
+    let s = plain_svc(nr, &[args[0], 0, 0, args[1], args[2], args[3]]);
+    let Some(x) = svc::host(svc::host_of(s)).filter(|x| host_usable(x)) else { return ENOSYS };
+    let n = out.len().min(LX_DATA_SIZE);
+    let mut c = LxCall::EMPTY;
+    c.nr = nr;
+    c.args = [args[0], LX_KBUF_ADDR, n as u64, args[1], args[2], args[3]];
+    c.svc = s as u32;
+    c.ipc_ns = ipc_ns;
+    let mut buf = copy::CopyBuf::EMPTY;
+    buf.used = n;
+    buf.hdr.out_off[1] = LX_DATA_OFF as u16;
+    buf.hdr.out_cap[1] = n as u16;
+    let mut sched = crate::task::SCHEDULER.lock();
+    let my_idx = sched.current_index();
+    let me = sched.current_task_mut(|t| {
+        c.tid = t.id.0;
+        c.tgid = t.tgid;
+        c.uid = t.uid;
+        c.euid = t.euid;
+        c.suid = t.suid;
+        c.gid = t.gid;
+        c.egid = t.egid;
+        c.sgid = t.sgid;
+        c.caps = if t.caps.in_userns { 0 } else { t.caps.effective };
+        t.id.0
+    });
+    drop(sched);
+    let Some(me) = me else { return ENOSYS };
+    let mark = restart::install_mark();
+    let mut r;
+    loop {
+        c.note_seq = x.notes_head();
+        let mut redir = (0, 0);
+        r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(x, me, my_idx, c, copy::Src::Kernel(&buf), true, Some(&mut out[..n]), &mut redir));
+        match after_restart(x, r, &c, mark) {
+            Ok(()) => continue,
+            Err(e) => r = e,
+        }
+        break;
+    }
+    if !crate::arch::smp::bkl_held() {
+        crate::arch::smp::bkl_enter();
+        crate::task::scheduler::wait_out_handoff();
+    }
+    if r == LX_REDIRECTED {
+        return EIO;
+    }
+    r
+}
+// wave10 G7b-2 end
 
 /// [`call_obj_kbuf_nr`] with arguments 3..6 (wave7 G7-4).
 fn call_obj_kbuf_x(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, nr: u64, write: bool, data: &[u8], out: &mut [u8], extra: [u64; 3]) -> i64 {
@@ -1310,7 +1371,7 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
                 // service while that one is switched back, `lx.ipc=kernel`)
                 return fileh::LX_TO_KERNEL;
             }
-            // (wave10 G7b-1: `/proc` redirects to linux-server until 7b-2)
+            // (wave10 G7b-1/G7b-2: `/proc` redirects go to lx-proc)
             let Some(nx) = svc::host(redirect_host(s)).filter(|h| host_usable(h)) else { return ENOSYS };
             if nx.id != x.id {
                 // (an object slot means nothing to another host)

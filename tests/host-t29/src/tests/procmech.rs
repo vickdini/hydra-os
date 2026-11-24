@@ -409,6 +409,11 @@ fn prctl_attributes_follow_fork_exec_exit() {
     assert_eq!(mech::comm_of(7120), None);
     assert_eq!(mech::thread_attrs(7120).pdeathsig, 9);
     assert_eq!(mech::proc_attrs(7120).dumpable, 1);
+    // wave10 G7b-2: a program that gained privileges is not dumpable
+    mech::attrs_exec_secure(7120);
+    assert_eq!(mech::proc_attrs(7120).dumpable, 0);
+    mech::attrs_on_exec(7120, 7120);
+    assert_eq!(mech::proc_attrs(7120).dumpable, 1);
     // exit: every record of the process goes
     mech::thread_attrs_set(7122, 7120, |t| t.comm = Some(name));
     mech::attrs_on_exit(7120);

@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w10_7b2"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group 7b-2 host unit tests (wave 10): the kernel-held /proc snapshot's position rules (src/lx/procsnap.rs) and the restart rule of its remake call"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

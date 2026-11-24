@@ -3,7 +3,7 @@ name = "hydra_hosttests_w10_82"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Group 8-2's host unit tests (wave 10): System V shared memory's attachment table (src/lx/shm_table.rs), lx-ipc's System V text and records (lx-ipc/src/sysvtext.rs) and the /proc/sysvipc paths (linux-server pseudo/path.rs)"
+description = "Group 8-2's host unit tests (wave 10): System V shared memory's attachment table (src/lx/shm_table.rs), lx-ipc's System V text and records (lx-ipc/src/sysvtext.rs) and the /proc/sysvipc paths (lx-proc procfs/path.rs)"
 
 # Standalone workspace: never pulled into the kernel or driver builds.
 [workspace]

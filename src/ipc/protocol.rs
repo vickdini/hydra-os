@@ -2740,6 +2740,72 @@ pub const LXP_TRACE_FACTS: u64 = 17;
 pub const LX_CALL_FACTS: u64 = 1 << 8;
 // wave10 G8-1 end
 
+// wave10 G7b-2 begin: `/proc` in lx-proc: the kernel-held snapshot of an open `/proc` file
+/// `SYS_LX_OBJ` op (the host of `LXS_PROC` only, for its own requests): `LX_OBJ_PSNAP(req,
+/// sub, *LxSnapIo)`. [`LX_PSNAP_INSTALL`]: installs a descriptor holding the text in the
+/// request's caller (its number); [`LX_PSNAP_FILL`]: the fresh text of a remake request
+/// ([`LX_KCALL_PREMAKE`]). Reads, seeks, `fstat` and close of such a descriptor are the
+/// kernel's alone (no call reaches lx-proc), so it outlives lx-proc's restarts.
+pub const LX_OBJ_PSNAP: u64 = 80;
+/// [`LX_OBJ_PSNAP`] sub-op: install a snapshot descriptor (all of [`LxSnapIo`]).
+pub const LX_PSNAP_INSTALL: u64 = 1;
+/// [`LX_OBJ_PSNAP`] sub-op: the text for a [`LX_KCALL_PREMAKE`] request (`text`, `len`).
+pub const LX_PSNAP_FILL: u64 = 2;
+/// The kernel's call to lx-proc: make a snapshot's text again (a rewind, `lseek(fd, 0,
+/// SEEK_SET)`, or a `pread` at 0, as Linux's seq_file does) for the reader: `args[0]`,
+/// `args[3..6]` the snapshot's identity ([`LxSnapIo::ident`]), `args[1]` a kernel buffer of
+/// `args[2]` bytes. lx-proc writes a text that fits there and answers its length + 1; a
+/// longer one it gives with [`LX_PSNAP_FILL`] and answers 0; or an error (`-ESRCH`: the
+/// pinned process is gone). The info primitives answer such a request with the rights of the
+/// process that opened the file, and `LxCall::ipc_ns` is the opener's IPC namespace.
+pub const LX_KCALL_PREMAKE: u64 = 0x6793;
+/// The largest snapshot text (bytes).
+pub const LX_PSNAP_MAX: usize = 16 << 20;
+/// [`LX_INFO_ARGS`]: in the `pid | len << 32` word, the process's environment instead
+/// (`/proc/<pid>/environ`; the `ptrace` read rule applies: `-EACCES`).
+pub const LX_INFO_ARGS_ENV: u64 = 1 << 31;
+
+/// What lx-proc gives with [`LX_OBJ_PSNAP`] (in its own memory).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LxSnapIo {
+    /// The text: address in lx-proc's memory, length.
+    pub text: u64,
+    /// See [`LxSnapIo::text`].
+    pub len: u64,
+    /// lx-proc's identity of the file, given back in a remake: `[file code, process,
+    /// thread, process start time]` (code 0: fixed text, never made again).
+    pub ident: [u64; 4],
+    /// `O_CLOEXEC`/`O_NONBLOCK` and the access mode (`O_ACCMODE`) of the open (a file
+    /// opened for writing, by root, answers `write` with `-EIO`, as Linux's read-only
+    /// `/proc` files).
+    pub flags: u32,
+    /// `st_mode`.
+    pub mode: u32,
+    /// `st_uid`.
+    pub uid: u32,
+    /// `st_gid`.
+    pub gid: u32,
+    /// `st_ino`.
+    pub ino: u64,
+    /// `st_dev`.
+    pub dev: u64,
+    /// `st_size` (Linux reports 0 for most `/proc` files; Hydra reports what its `stat` says).
+    pub size: u64,
+    /// Bytes of `name` used.
+    pub name_len: u32,
+    /// Unused (0).
+    pub pad: u32,
+    /// What `/proc/self/fd/N` shows.
+    pub name: [u8; LX_OBJ_NAME_MAX],
+}
+
+impl LxSnapIo {
+    /// All zero.
+    pub const EMPTY: Self = Self { text: 0, len: 0, ident: [0; 4], flags: 0, mode: 0, uid: 0, gid: 0, ino: 0, dev: 0, size: 0, name_len: 0, pad: 0, name: [0; LX_OBJ_NAME_MAX] };
+}
+// wave10 G7b-2 end
+
 // wave9 G6b-3 begin: Landlock and ABAC checks in the file service
 /// `SYS_LX_OBJ` op (the file service's host only): `LX_FH_LANDLOCK(req, buf, cap)` writes
 /// the Landlock domain of request `req`'s caller to `buf`: [`LxLlHead`], then per layer a

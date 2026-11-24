@@ -56,12 +56,14 @@ pub fn to_caller(id: u64, init: Option<u64>) -> u64 {
 /// process; with `CAP_SYS_PTRACE`; or when the caller's file-system user ID (here the
 /// effective one) is the target's real, effective and saved user ID **and** its file-system
 /// group ID the target's real, effective and saved group ID (a set-group-ID program is not
-/// readable by its user). wave10 G8-1: the one ptrace rule (`lx::ptrace_rules::may_access`,
-/// shared with lx-proc's tracing decisions and the kernel's copy; the callers here are in the
-/// first namespaces, so capabilities count over every target).
-pub fn may_see(same: bool, target_service: bool, caller: (u32, u32), caller_caps: u64, target_uids: (u32, u32, u32), target_gids: (u32, u32, u32)) -> bool {
-    // wave10 G8-1: a dumpable, capability-less target in the caller's user namespace
-    may_read(same, target_service, caller, caller_caps, target_uids, target_gids, true, TargetCaps::PLAIN)
+/// readable by its user). wave10 G7b-2: a target that is not dumpable (`PR_SET_DUMPABLE` 0,
+/// or a program that gained privileges at exec: set-ID or file capabilities) is readable
+/// only with `CAP_SYS_PTRACE`, as Linux's `__ptrace_may_access`. wave10 G8-1: the one ptrace
+/// rule (`lx::ptrace_rules::may_access`, shared with lx-proc's tracing decisions and the
+/// kernel's copy), for a capability-less target in the caller's user namespace ([`may_read`]
+/// takes those inputs too).
+pub fn may_see(same: bool, target_service: bool, caller: (u32, u32), caller_caps: u64, target_uids: (u32, u32, u32), target_gids: (u32, u32, u32), target_dumpable: bool) -> bool {
+    may_read(same, target_service, caller, caller_caps, target_uids, target_gids, target_dumpable, TargetCaps::PLAIN)
 }
 
 // wave10 G8-1 begin
@@ -271,6 +273,8 @@ pub mod glue {
         match op {
             LX_INFO_TASK => task(a, b, c),
             LX_INFO_SYS => out(a, &sys(b)),
+            // (wave10 G7b-2: the environment with `LX_INFO_ARGS_ENV` in the pid word)
+            LX_INFO_ARGS if b & crate::ipc::protocol::LX_INFO_ARGS_ENV != 0 => environ(a, b & 0x7FFF_FFFF, c, b >> 32),
             LX_INFO_ARGS => args(a, b & 0xFFFF_FFFF, c, b >> 32),
             LX_INFO_MAPS => maps(a, b & 0xFFFF_FFFF, c, b >> 32),
             LX_INFO_PIDS => pids(a, b),
@@ -303,6 +307,12 @@ pub mod glue {
     /// and PID namespace's init.
     fn caller(id: u64) -> Result<Caller, i64> {
         let client = crate::lx::client_of(id).ok_or(ESRCH)?;
+        // wave10 G7b-2: a `/proc` snapshot being made again answers with the rights of the
+        // process that opened it (as Linux checks at open), not the reader's
+        if let Some(o) = crate::lx::procsnap::glue::opener_of(client) {
+            may_query(o.init, o.in_userns, false)?;
+            return Ok(Caller { tgid: o.tgid, euid: o.euid, egid: o.egid, caps: o.caps, init: o.init });
+        }
         let (tgid, euid, egid, caps, in_userns) = crate::task::SCHEDULER
             .lock()
             .with_task_mut(TaskId(client), |t| (t.tgid, t.euid, t.egid, if t.caps.in_userns { 0 } else { t.caps.effective }, t.caps.in_userns))
@@ -467,6 +477,32 @@ pub mod glue {
         let text = lx::fs::live_cmdline(pid).unwrap_or_else(|| fallback.map(|c| c.to_vec()).unwrap_or_default());
         out_bytes(buf, len, &text)
     }
+
+    // wave10 G7b-2 begin
+    /// `LX_INFO_ARGS` with `LX_INFO_ARGS_ENV`: the environment (`/proc/<pid>/environ`), under
+    /// the `ptrace` read rule as the maps (Linux: `PTRACE_MODE_READ_FSCREDS`).
+    fn environ(id: u64, who: u64, buf: u64, len: u64) -> i64 {
+        let Caller { tgid: ctgid, euid, egid, caps, init } = match caller(id) {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
+        let pid = resolve_pid(who, ctgid, init);
+        // (wave10 G8-1: + the target's permitted capabilities)
+        let Some((uids, gids, service, perm)) =
+            crate::task::SCHEDULER.lock().with_process(pid, |t| ((t.uid, t.euid, t.suid), (t.gid, t.egid, t.sgid), t.service.is_some(), t.caps.permitted))
+        else {
+            return ESRCH;
+        };
+        if let Err(e) = may_query(init, false, service) {
+            return e;
+        }
+        // wave10 G8-1: the whole read rule: dumpable, capabilities, user namespace
+        if !may_read(pid == ctgid, service, (euid, egid), caps, uids, gids, crate::lx::proc::proc_attrs(pid).dumpable == 1, target_caps(pid, ctgid, euid, perm)) {
+            return EACCES;
+        }
+        out_bytes(buf, len, &lx::fs::live_environ(pid).unwrap_or_default())
+    }
+    // wave10 G7b-2 end
 
     /// `LX_INFO_MAPS`.
     fn maps(id: u64, who: u64, buf: u64, len: u64) -> i64 {

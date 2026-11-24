@@ -435,6 +435,7 @@ Also 2026-11-19: a seventh, bug-fixing group joins wave 6, and wave 6 starts rig
 32. **No switch back after wave 10:** 10-C deletes every remaining in-kernel copy, and `lx=kernel` with every `lx.<service>=kernel` word is ignored with a boot-log line (as `lx.vfs=kernel` in 9-C). Crashes are handled by restarts; the emergency prompt stays for broken user space.
 33. **Wave 10 starts right away** (2026-11-23).
 34. **The io_uring and aio rings stay in the kernel as mechanism** (2026-11-24, Group N's measurement): moving them into linux-server would add about +4 µs to a one-request read, fail every ring on a linux-server crash, and save only about 1,000–1,300 kernel lines. Each request is already routed to its descriptor's owner (wave 9 6b-4). 10-C drops `lx.uring=kernel` and says whether linux-server can then be retired.
+35. **The ptrace/perf permission decisions stay in lx-proc although over budget** (2026-11-24, Group 8-1): `kcmp` +3.7 µs, `process_vm_readv` +3.5, `perf_event_open` +4.1, `PTRACE_ATTACH` about +7.5 (+14 in a tight loop); the floor is the hop (~3 µs). These calls are rare (debuggers, tracers, profilers); the per-request ptrace operations stay in the kernel and are unchanged.
 
 ### Still open, and when they are needed
 

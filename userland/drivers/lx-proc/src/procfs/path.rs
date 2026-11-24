@@ -1,13 +1,13 @@
-//! Which pseudo file a redirected path names (plain Rust, host-tested in
-//! `tests/host-w7-40`).
+//! Which `/proc` file a redirected path names (plain Rust, host-tested in
+//! `tests/host-w7-40`; wave 10 Group 7b-2 moved it from linux-server to lx-proc).
 //!
-//! The file service redirects a lookup that ends under a served mount here with the mount's
+//! The file service redirects a lookup that ends under `/proc` here with the mount's
 //! object and the rest of the path (the *tail*: `self/stat` for `/proc/self/stat`).
-//! [`classify`] decides whether linux-server serves it ([`Target::File`], [`Target::SelfLink`])
+//! [`classify`] decides whether lx-proc serves it ([`Target::File`], [`Target::SelfLink`])
 //! or the kernel's in-kernel code answers ([`Target::Kernel`]): everything not listed here,
 //! `..` inside the tail, directories, and the links that lead out of `/proc`.
 
-use crate::proto::{LX_VFS_PSEUDO_PROC, LX_VFS_PSEUDO_SYS};
+use crate::proto::LX_VFS_PSEUDO_PROC;
 
 /// Whose `/proc/<pid>` entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,9 +33,13 @@ pub enum PidFile {
     Cmdline,
     /// `maps`.
     Maps,
+    /// wave10 G7b-2: `environ` (the `ptrace` read rule, mode 0400).
+    Environ,
+    /// wave10 G7b-2: `limits`.
+    Limits,
 }
 
-/// A pseudo file linux-server serves.
+/// A `/proc` file lx-proc serves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum File {
     /// Fixed text (`/proc/sys/...` limits).
@@ -52,11 +56,6 @@ pub enum File {
     Meminfo,
     /// `/proc/cpuinfo`.
     Cpuinfo,
-    /// `/sys/devices/system/cpu/{online,possible,present}`.
-    CpuRange,
-    /// `/sys/firmware/efi/efivars/<Name>-<GUID>`: a UEFI variable (the file name is the
-    /// tail's last component).
-    Efivar,
     /// wave10 G8-2: `/proc/sysvipc/{shm,sem,msg}` (0, 1, 2): the IPC service's info call.
     SysvIpc(u8),
     /// `/proc/<who>/<file>`, or `/proc/<who>/task/<tid>/<file>` (`tid` != 0).
@@ -71,9 +70,88 @@ pub enum File {
 }
 
 impl File {
-    /// The file system the file is in: `true` for `/sys`.
-    pub fn in_sys(&self) -> bool {
-        matches!(self, File::CpuRange | File::Efivar)
+    /// Its permission bits: 0444, `environ` 0400 (as Linux).
+    pub fn mode(&self) -> u32 {
+        match self {
+            File::Pid { file: PidFile::Environ, .. } => 0o400,
+            _ => 0o444,
+        }
+    }
+}
+
+// wave10 G7b-2 begin: the identity of an open file, kept by the kernel with its snapshot
+// and given back when the text is made again (`LxSnapIo::ident`)
+
+/// The per-process files in [`ident`]'s code order (code `PID_BASE + index`).
+const PID_FILES: [PidFile; 8] = [PidFile::Stat, PidFile::Status, PidFile::Statm, PidFile::Comm, PidFile::Cmdline, PidFile::Maps, PidFile::Environ, PidFile::Limits];
+/// The first per-process code.
+const PID_BASE: u64 = 16;
+
+/// The identity of `file` (opened with the process start time `start`): `[code, process,
+/// thread, start]`. Code 0 (fixed text: `/proc/sys/...`, `version`) is never made again.
+/// A process file must name its process by system-wide ID (`Who::Pid`).
+pub fn ident(file: File, start: u64) -> [u64; 4] {
+    let code = |c: u64| [c, 0, 0, 0];
+    match file {
+        File::Static(_) | File::Version => code(0),
+        File::Uptime => code(1),
+        File::Loadavg => code(2),
+        File::Stat => code(3),
+        File::Meminfo => code(4),
+        File::Cpuinfo => code(5),
+        File::SysvIpc(k) => code(6 + k as u64),
+        File::Pid { who, tid, file } => {
+            let i = PID_FILES.iter().position(|f| *f == file).unwrap_or(0) as u64;
+            let pid = match who {
+                Who::Caller => 0,
+                Who::Pid(p) => p,
+            };
+            [PID_BASE + i, pid, tid, start]
+        }
+    }
+}
+
+/// The file (and the process start time it was opened with) of identity `id` ([`ident`]);
+/// `None` for code 0 and codes that name nothing.
+pub fn of_ident(id: [u64; 4]) -> Option<(File, u64)> {
+    let f = match id[0] {
+        1 => File::Uptime,
+        2 => File::Loadavg,
+        3 => File::Stat,
+        4 => File::Meminfo,
+        5 => File::Cpuinfo,
+        6..=8 => File::SysvIpc((id[0] - 6) as u8),
+        c if (PID_BASE..PID_BASE + PID_FILES.len() as u64).contains(&c) => {
+            // (process and thread IDs travel in 32-bit halves: kept below 2^31)
+            if id[1] == 0 || id[1] > i32::MAX as u64 || id[2] > i32::MAX as u64 {
+                return None;
+            }
+            let file = PID_FILES[(c - PID_BASE) as usize];
+            return Some((File::Pid { who: Who::Pid(id[1]), tid: id[2], file }, id[3]));
+        }
+        _ => return None,
+    };
+    Some((f, 0))
+}
+// wave10 G7b-2 end
+
+/// wave10 G7b-2: a process directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dir {
+    /// `/proc/<pid>`.
+    Pid(Who),
+    /// `/proc/<pid>/task` (its link count is 2 + the threads, as Linux).
+    Task(Who),
+    /// `/proc/<pid>/task/<tid>`.
+    Thread(Who, u64),
+}
+
+impl Dir {
+    /// The process.
+    pub fn who(&self) -> Who {
+        match *self {
+            Dir::Pid(w) | Dir::Task(w) | Dir::Thread(w, _) => w,
+        }
     }
 }
 
@@ -84,6 +162,9 @@ pub enum Target {
     File(File),
     /// `/proc/self` (`false`) or `/proc/thread-self` (`true`) itself: a symbolic link.
     SelfLink(bool),
+    /// wave10 G7b-2: a process's directory (`stat` and `access` are served; listing it and
+    /// opening it are the kernel's).
+    Dir(Dir),
     /// The kernel answers.
     Kernel,
     /// Nothing there (`ENOENT`): a process or thread number with leading zeros (Linux's
@@ -139,17 +220,6 @@ pub fn components(tail: &[u8]) -> Option<alloc::vec::Vec<&str>> {
     Some(v)
 }
 
-/// Whether `name` has the shape of an efivarfs file name: `<Name>-<GUID>` (a GUID of 36
-/// characters, hex digits and dashes at 8, 13, 18, 23).
-pub fn efivar_name(name: &str) -> bool {
-    let b = name.as_bytes();
-    if b.len() < 38 || b[b.len() - 37] != b'-' {
-        return false;
-    }
-    let g = &b[b.len() - 36..];
-    g.iter().enumerate().all(|(i, &c)| if matches!(i, 8 | 13 | 18 | 23) { c == b'-' } else { c.is_ascii_hexdigit() })
-}
-
 /// A decimal number of at most 10 digits (no sign, no leading `+`) that fits in 31 bits
 /// (process and thread IDs travel in 32-bit halves of the info primitives' words).
 fn number(s: &str) -> Option<u64> {
@@ -165,24 +235,30 @@ fn zero_led(s: &str) -> bool {
     s.len() > 1 && s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// `access` of a served file (mode 0444) or, `dir`, of `/proc/self` (0555), for real or
-/// effective user `uid`: `mode` bits beyond `R_OK | W_OK | X_OK` and `faccessat2` flags beyond
-/// `AT_SYMLINK_NOFOLLOW | AT_EACCESS | AT_EMPTY_PATH` are `EINVAL`; writing is root's only
-/// (it overrides the mode bits); executing needs an `x` bit, which only directories have
-/// (root too needs one).
-pub fn access_rule(mode: u64, flags: u64, uid: u32, dir: bool) -> Result<(), i64> {
+/// `access` of a served file or directory of permission bits `perm` (0444, `environ` 0400,
+/// directories 0555) owned by `owner`, for real or effective user `uid`: `mode` bits beyond
+/// `R_OK | W_OK | X_OK` and `faccessat2` flags beyond `AT_SYMLINK_NOFOLLOW | AT_EACCESS |
+/// AT_EMPTY_PATH` are `EINVAL`; root may read and write whatever the bits say but execute
+/// only with an `x` bit; anyone else gets the owner's bits when it is the owner, the others'
+/// bits otherwise (wave10 G7b-2: `environ` is its owner's alone).
+pub fn access_rule(mode: u64, flags: u64, uid: u32, perm: u32, owner: u32) -> Result<(), i64> {
     const EINVAL: i64 = -22;
     const EACCES: i64 = -13;
     if mode & !7 != 0 || flags & !(0x100 | 0x200 | 0x1000) != 0 {
         return Err(EINVAL);
     }
-    if mode & 2 != 0 && uid != 0 {
-        return Err(EACCES);
+    let want = (mode & 7) as u32;
+    let ok = if uid == 0 {
+        want & 1 == 0 || perm & 0o111 != 0
+    } else {
+        let bits = if uid == owner { (perm >> 6) & 7 } else { perm & 7 };
+        want & !bits == 0
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(EACCES)
     }
-    if mode & 1 != 0 && !dir {
-        return Err(EACCES);
-    }
-    Ok(())
 }
 
 fn pid_file(name: &str, in_task: bool) -> Option<PidFile> {
@@ -193,27 +269,22 @@ fn pid_file(name: &str, in_task: bool) -> Option<PidFile> {
         "statm" if !in_task => PidFile::Statm,
         "cmdline" if !in_task => PidFile::Cmdline,
         "maps" if !in_task => PidFile::Maps,
+        "environ" if !in_task => PidFile::Environ,
+        "limits" if !in_task => PidFile::Limits,
         _ => return None,
     })
 }
 
-/// What `tail` names under the served mount of object `obj` (`LX_VFS_PSEUDO_*`).
-/// `trailing`: the path ended with `/` (a file then is the kernel's: `ENOTDIR` rules).
+/// What `tail` names under the `/proc` mount (object `LX_VFS_PSEUDO_PROC`; any other
+/// object: the kernel's). A path ending with `/` names a directory (a file then is the
+/// kernel's: `ENOTDIR` rules).
 pub fn classify(obj: u64, tail: &[u8]) -> Target {
     let Some(c) = components(tail) else { return Target::Kernel };
     // (a path ending in `/` or `/.` must name a directory: the kernel's rules)
     let trailing = tail.last() == Some(&b'/') || tail.ends_with(b"/.") || tail == b".";
     let file = |f: File| if trailing { Target::Kernel } else { Target::File(f) };
-    match obj & 0xFFFF_FFFF {
-        LX_VFS_PSEUDO_PROC => {}
-        LX_VFS_PSEUDO_SYS => {
-            return match c.as_slice() {
-                ["devices", "system", "cpu", "online" | "possible" | "present"] => file(File::CpuRange),
-                ["firmware", "efi", "efivars", name] if efivar_name(name) => file(File::Efivar),
-                _ => Target::Kernel,
-            };
-        }
-        _ => return Target::Kernel,
+    if obj & 0xFFFF_FFFF != LX_VFS_PSEUDO_PROC {
+        return Target::Kernel;
     }
     match c.as_slice() {
         ["version"] => file(File::Version),
@@ -230,6 +301,13 @@ pub fn classify(obj: u64, tail: &[u8]) -> Target {
         })),
         ["self"] if !trailing => Target::SelfLink(false),
         ["thread-self"] if !trailing => Target::SelfLink(true),
+        // wave10 G7b-2: a process's directory (`self/`: the caller's)
+        ["self"] => Target::Dir(Dir::Pid(Who::Caller)),
+        [n] => match number(n) {
+            Some(p) if p != 0 => Target::Dir(Dir::Pid(Who::Pid(p))),
+            _ if zero_led(n) => Target::Missing,
+            _ => Target::Kernel,
+        },
         [who, rest @ ..] if !rest.is_empty() => {
             let who = match *who {
                 "self" | "thread-self" => Who::Caller,
@@ -246,6 +324,13 @@ pub fn classify(obj: u64, tail: &[u8]) -> Target {
                 },
             };
             match rest {
+                // wave10 G7b-2: the process's thread directories
+                ["task"] => Target::Dir(Dir::Task(who)),
+                ["task", t] => match number(t) {
+                    Some(tid) if tid != 0 => Target::Dir(Dir::Thread(who, tid)),
+                    _ if zero_led(t) => Target::Missing,
+                    _ => Target::Kernel,
+                },
                 [f] => pid_file(f, false).map_or(Target::Kernel, |f| file(File::Pid { who, tid: 0, file: f })),
                 ["task", t, f] => match (number(t), pid_file(f, true)) {
                     (Some(tid), Some(f)) if tid != 0 => file(File::Pid { who, tid, file: f }),
