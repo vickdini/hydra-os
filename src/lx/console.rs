@@ -125,6 +125,21 @@ pub fn fallback_signal(printable: Option<char>) -> Option<u32> {
     }
 }
 
+// wave11 GR begin
+/// Console reads sent again to a new tty-server because the old one died serving them.
+pub static READS_RESENT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Whether a console `read` that got `r` is sent again: tty-server died while serving it
+/// (`died`: it went away between the call and the answer, which then is `EIO`, or `ENOSYS`
+/// when no instance was there to ask), at most 3 times (`tries` so far). Any other answer,
+/// and an `EIO` from a live tty-server (a hung-up terminal), is the caller's.
+pub fn read_again(r: i64, died: bool, tries: u32) -> bool {
+    const EIO: i64 = -5;
+    const ENOSYS: i64 = -38;
+    died && tries < 3 && (r == EIO || r == ENOSYS)
+}
+// wave11 GR end
+
 #[cfg(target_os = "uefi")]
 pub use kernel::*;
 
@@ -274,13 +289,26 @@ mod kernel {
         if len == 0 {
             return 0;
         }
-        // wave10 G10-C: a restarting tty-server is waited for (the restart ladder's 30 s), as
-        // every forwarded call is; EIO only when it is not coming back
-        if let Err(e) = crate::lx::restart::wait_online(svc::host_of(LXS_TTY), &online) {
-            return e;
-        }
-        let (g, sp) = attach_args();
-        let r = kcall([LX_TTY_K_READ, buf, len as u64, nonblock as u64, g, sp], 0);
+        // wave11 GR: a read tty-server was serving when it died is sent again to the new
+        // instance (at most 3 times): the dead instance's line buffer is gone either way (a
+        // line typed but not yet read is lost), but the reader goes on instead of EIO
+        let mut tries = 0;
+        let r = loop {
+            // wave10 G10-C: a restarting tty-server is waited for (the restart ladder's 30 s),
+            // as every forwarded call is; EIO only when it is not coming back
+            if let Err(e) = crate::lx::restart::wait_online(svc::host_of(LXS_TTY), &online) {
+                return e;
+            }
+            let gen = crate::lx::restart::gone_gen(svc::host_of(LXS_TTY));
+            let (g, sp) = attach_args();
+            let r = kcall([LX_TTY_K_READ, buf, len as u64, nonblock as u64, g, sp], 0);
+            if super::read_again(r, gen != crate::lx::restart::gone_gen(svc::host_of(LXS_TTY)), tries) {
+                tries += 1;
+                super::READS_RESENT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            break r;
+        };
         if r == ENOSYS {
             return EIO; // (tty-server went away meanwhile)
         }

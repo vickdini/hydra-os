@@ -381,7 +381,7 @@ fn obj_ctl_small_operations() {
         push(obj_ctl(LX_OBJ_RELAY, 1, 0, 0));
         push(obj_ctl(LX_OBJ_NETWAIT, id, 3, 0));
         push(obj_ctl(LX_OBJ_NETCANCEL, id, 0, 0));
-        // bpf device programs: in, too long, a bad pointer
+        // bpf device programs: lx-sec's alone (wave11 GR, review F5): refused here
         let prog = [1u8, 2, 3];
         push(obj_ctl(LX_OBJ_BPF_DEVICE, prog.as_ptr() as u64, 3, 0));
         push(obj_ctl(LX_OBJ_BPF_DEVICE, prog.as_ptr() as u64, (1 << 20) + 1, 0));
@@ -392,11 +392,36 @@ fn obj_ctl_small_operations() {
         0
     }));
     assert_eq!(run_ops(0, 0), 0);
-    assert_eq!(*out.lock().unwrap(), vec![0, EINVAL, EINVAL, 0, 1, 1, 2, ESRCH, 0, -13, 0, 0, 1, 3, EINVAL, EFAULT, EINVAL, ESRCH]);
+    assert_eq!(*out.lock().unwrap(), vec![0, EINVAL, EINVAL, 0, 1, 1, 2, ESRCH, 0, -13, 0, 0, 1, EPERM, EPERM, EPERM, EINVAL, ESRCH]);
     assert_eq!(crate::fake::rec(|r| r.posted.clone()), vec![(100, 100, 10, 0, 0, 0, 0)]);
-    assert_eq!(crate::fake::rec(|r| r.bpf_programs.clone()), vec![vec![1, 2, 3]]);
+    assert!(crate::fake::rec(|r| r.bpf_programs.is_empty()), "another service may not replace the list");
     // A program may not use it
     assert_eq!(obj_ctl(LX_OBJ_PROC, 100, 0, 0), EPERM);
+}
+
+// wave11 GR: lx-sec hands the device-program list over and reads it back (`c = 1`)
+#[test]
+fn bpf_device_list_is_lx_secs_and_reads_back() {
+    let sim = world();
+    let out: Out = StdArc::new(StdMutex::new(Vec::new()));
+    let o2 = out.clone();
+    let s = start(&sim, LXS_SEC, 500, 1, true, obj_handler());
+    sim.spawn(svc_task(510, 500, s.ep), move || {
+        let push = |v: i64| o2.lock().unwrap().push(v);
+        let prog = [1u8, 2, 3];
+        // in, too long, a bad pointer
+        push(obj_ctl(LX_OBJ_BPF_DEVICE, prog.as_ptr() as u64, 3, 0));
+        push(obj_ctl(LX_OBJ_BPF_DEVICE, prog.as_ptr() as u64, (1 << 20) + 1, 0));
+        push(obj_ctl(LX_OBJ_BPF_DEVICE, 0, 3, 0));
+        // read back: fits, does not fit
+        let mut back = [0u8; 8];
+        push(obj_ctl(LX_OBJ_BPF_DEVICE, back.as_mut_ptr() as u64, 8, 1));
+        push((back[..3] == [1, 2, 3]) as i64);
+        push(obj_ctl(LX_OBJ_BPF_DEVICE, back.as_mut_ptr() as u64, 2, 1));
+    });
+    sim.run_others();
+    assert_eq!(*out.lock().unwrap(), vec![3, EINVAL, EFAULT, 3, 1, -34]);
+    assert_eq!(crate::fake::rec(|r| r.bpf_programs.clone()), vec![vec![1, 2, 3]]);
 }
 
 #[test]

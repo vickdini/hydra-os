@@ -146,6 +146,23 @@ impl Ladder {
     }
 }
 
+// wave11 GR begin
+/// Whether a service's objects stay alive for its new instance to take back after crash
+/// decision `d` (design 5.2, amended in wave 11): always for a Transparent restart; also for
+/// the ladder's step from Transparent down to FailObjects (second crash within 30 s: calls in
+/// flight fail and the kept state is reset) when the service takes back objects it has no
+/// kept records for (`takes_back_unkept`: it rebuilds them empty or fails them itself).
+/// Never when the service is not restarted.
+pub fn objects_outlive(d: Decision, configured: RestartClass, takes_back_unkept: bool) -> bool {
+    d.restart
+        && match d.class {
+            RestartClass::Transparent => true,
+            RestartClass::FailObjects => takes_back_unkept && configured == RestartClass::Transparent,
+            RestartClass::EndLinux => false,
+        }
+}
+// wave11 GR end
+
 // Linux errno values (negated where returned).
 const EBADF: i64 = 9;
 const EPIPE: i64 = 32;

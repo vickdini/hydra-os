@@ -1521,7 +1521,22 @@ pub fn restart_init() -> (usize, usize) {
         Err(e) => {
             hydra_rt::println!("[vfs-server] FUSE: no kept state ({}): mounts end with a restart", e);
             EPOCH.store(1, Ordering::Relaxed);
-            return (0, 0);
+            // wave11 GR (review F1): the previous instance's /dev/fuse objects (kept alive
+            // through the ladder step, `objects_outlive`) have no connection here: they fail
+            let mut dropped = 0;
+            let mut buf = [LxSvcObj::default(); 64];
+            let mut start = 0u32;
+            while let Ok(n) = sys::lx_svc_list(&mut buf, start) {
+                if n == 0 {
+                    break;
+                }
+                for o in buf[..n].iter().filter(|o| o.kind == LX_OBJ_KIND_FUSE) {
+                    let _ = sys::lx_svc_dead(o.slot);
+                    dropped += 1;
+                }
+                start = buf[n - 1].slot + 1;
+            }
+            return (0, dropped);
         }
     };
     // SAFETY: the kernel mapped `size` bytes at `p` for this process alone

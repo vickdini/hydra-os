@@ -118,6 +118,16 @@ static RESTARTING: [AtomicBool; MAX_SVC] = [const { AtomicBool::new(false) }; MA
 static DOWN: [AtomicBool; MAX_SVC] = [const { AtomicBool::new(false) }; MAX_SVC];
 /// Per service: the callers waiting for it to be online again.
 static ONLINE_WQ: [WaitQueue; MAX_SVC] = [const { WaitQueue::new() }; MAX_SVC];
+// wave11 GR begin
+/// How many times each service went away ([`gone`]): a caller compares it before and after
+/// a call to tell "the service died under my call" from an ordinary error.
+static GONE_GEN: [AtomicU64; MAX_SVC] = [const { AtomicU64::new(0) }; MAX_SVC];
+
+/// See [`GONE_GEN`].
+pub fn gone_gen(svc: u8) -> u64 {
+    GONE_GEN[idx(svc)].load(Ordering::Acquire)
+}
+// wave11 GR end
 
 /// Calls sent again to a restarted service since boot.
 pub static RESENT: AtomicU64 = AtomicU64::new(0);
@@ -253,6 +263,7 @@ pub fn gone(svc: u8) -> Decision {
     if d.reset_kept {
         super::mem::drop_kept(svc);
     }
+    GONE_GEN[i].fetch_add(1, Ordering::AcqRel); // wave11 GR
     RESTARTING[i].store(d.restart && d.class != RestartClass::EndLinux, Ordering::Release);
     DOWN[i].store(!d.restart, Ordering::Release);
     // wave10 G7b-1: the ladder's clock beside the wall clock (the RTC), to tell a window
@@ -300,9 +311,29 @@ pub fn may_restart(svc: u8) -> bool {
 pub fn adopting(svc: u8) -> bool {
     state(|s| {
         let v = &s[idx(svc)];
-        v.adopted && v.phase == Phase::Restarting && v.last.is_some_and(|d| d.class == RestartClass::Transparent)
+        v.adopted && v.phase == Phase::Restarting && v.last.is_some_and(|d| restart_policy::objects_outlive(d, v.ladder.configured, takes_back_unkept(svc)))
     })
 }
+
+// wave11 GR begin
+/// Whether service `svc`'s new instance takes back its old objects even when the ladder
+/// reset its kept state (it rebuilds what it can and fails the rest itself, `LX_SVC_DEAD`):
+/// vfs-server (inotify instances come back empty). See
+/// [`restart_policy::objects_outlive`].
+fn takes_back_unkept(svc: u8) -> bool {
+    svc != 0 && svc == super::svc::host_of(crate::ipc::protocol::LXS_VFS)
+}
+
+/// Whether `svc`'s objects stay for its new instance to take back after the crash being
+/// handled (a Transparent restart, or vfs-server's ladder step to FailObjects): not made
+/// stale at the crash; stale at `LX_CTL_ONLINE` unless the new instance adopted them.
+pub fn objects_outlive(svc: u8) -> bool {
+    state(|s| {
+        let v = &s[idx(svc)];
+        v.last.is_some_and(|d| restart_policy::objects_outlive(d, v.ladder.configured, takes_back_unkept(svc)))
+    })
+}
+// wave11 GR end
 
 /// Service `svc`'s new instance is online (`LX_CTL_ONLINE`, after the server's online flag
 /// is set): waiting callers go on.
@@ -328,7 +359,7 @@ pub fn restarting(svc: u8) -> bool {
 
 /// Whether `svc` is being restarted Transparently: its objects stay (not stale) meanwhile.
 pub fn keeps_objects(svc: u8) -> bool {
-    restarting(svc) && state(|s| s[idx(svc)].last.is_some_and(|d| d.class == RestartClass::Transparent))
+    restarting(svc) && objects_outlive(svc) // wave11 GR (was: Transparent only)
 }
 
 /// Whether `svc` was given up: its calls fail with `EIO`.

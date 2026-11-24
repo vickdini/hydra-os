@@ -560,6 +560,19 @@ pub fn service(_sh: &mut Shell, args: &[&str]) {
                 }
             }
         }
+        // wave11 GR: `service kill NAME after S`: the kernel kills it S seconds from now (the
+        // console is free meanwhile: a kill test of a program that uses the console)
+        ("kill", Some(n)) if args.get(2) == Some(&"after") => {
+            let secs = args.get(3).and_then(|v| v.parse::<u64>().ok()).filter(|&v| v > 0);
+            let Some(secs) = secs else {
+                println!("Usage: service kill <name> [after <seconds>]");
+                return;
+            };
+            match admin_u64(ADMIN_SERVICE_CTL, [SVCCTL_KILL, secs, 0, 0], n.as_bytes()) {
+                Ok(_) => println!("[*] Service '{}' will be killed in {} s.", n, secs),
+                Err(e) => println!("[!] Failed to schedule the kill of '{}': {}", n, e.text()),
+            }
+        }
         ("kill", Some(n)) => {
             color(LIGHT_RED);
             println!("[!] Simulating fatal fault in service '{}'...", n);

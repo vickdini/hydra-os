@@ -994,6 +994,10 @@ pub mod compat {
             pub fn any_device_programs() -> bool {
                 crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 64 != 0
             }
+            /// *stub* wave11 GR: the last list handed over.
+            pub fn server_device_programs_raw() -> alloc::vec::Vec<u8> {
+                crate::fake::rec(|r| r.bpf_programs.last().cloned().unwrap_or_default())
+            }
             pub fn set_server_device_programs(raw: &[u8]) -> i64 {
                 crate::fake::rec(|r| {
                     r.bpf_programs.push(raw.to_vec());

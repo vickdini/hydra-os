@@ -69,8 +69,9 @@ fn main(args: &[&str]) {
         sys::exit_group(1);
     }
     // ... and the device programs the kernel held, handed over again right after going
-    // online (going online without adopting objects ends the old instance's list)
-    let devices = if kept::get().is_some() { bpf::restore_devices() } else { 0 };
+    // online (going online without adopting objects ends the old instance's list).
+    // wave11 GR: read back from the kernel, so also after the ladder reset the kept state
+    let devices = bpf::restore_devices();
     if keys + devices > 0 {
         println!("[lx-sec] restarted: {} keys and {} device programs kept", keys, devices);
     }

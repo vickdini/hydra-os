@@ -40,6 +40,7 @@ const EFAULT: i64 = -14;
 const EEXIST: i64 = -17;
 const EINVAL: i64 = -22;
 const ENOSPC: i64 = -28;
+const ERANGE: i64 = -34; // wave11 GR
 const ENOTSUPP: i64 = -524;
 
 // Map types
@@ -940,8 +941,17 @@ fn push_devices() -> i64 {
 /// fail `EBADF`). Returns the number of programs.
 #[allow(dead_code)] // lx-sec only (linux-server keeps nothing)
 pub fn restore_devices() -> usize {
-    let Some(k) = crate::kept::get() else { return 0 };
-    let Some(raw) = k.read(crate::kept::DEVICES) else { return 0 };
+    // wave11 GR: the list the kernel enforces is the truth (it outlives a kept state the
+    // ladder reset); the kept copy only if the kernel cannot hand it back
+    let raw = match kernel_devices() {
+        Some(r) => r,
+        None => {
+            let Some(k) = crate::kept::get() else { return 0 };
+            let Some(raw) = k.read(crate::kept::DEVICES) else { return 0 };
+            raw.to_vec()
+        }
+    };
+    let raw = &raw[..];
     let mut list = Vec::new();
     let mut at = 0usize;
     while at < raw.len() {
@@ -949,7 +959,9 @@ pub fn restore_devices() -> usize {
             Some(e) => list.push(e),
             None => {
                 hydra_rt::println!("[lx-sec] bpf: the kept device programs do not decode; not restored");
-                k.clear(crate::kept::DEVICES);
+                if let Some(k) = crate::kept::get() {
+                    k.clear(crate::kept::DEVICES);
+                }
                 return 0;
             }
         }
@@ -970,6 +982,26 @@ pub fn restore_devices() -> usize {
     }
     n
 }
+
+// wave11 GR begin
+/// The device-program list the kernel holds now (`LX_OBJ_BPF_DEVICE` with `c = 1`), as
+/// [`push_devices`] sent it; `None` if the kernel cannot say.
+#[allow(dead_code)]
+fn kernel_devices() -> Option<Vec<u8>> {
+    let mut cap = 64 * 1024;
+    loop {
+        let mut buf = alloc::vec![0u8; cap];
+        match sys::lx_obj(LX_OBJ_BPF_DEVICE, buf.as_mut_ptr() as u64, cap as u64, 1) {
+            Ok(n) => {
+                buf.truncate(n as usize);
+                return Some(buf);
+            }
+            Err(e) if e == ERANGE && cap < 1 << 20 => cap = 1 << 20,
+            Err(_) => return None,
+        }
+    }
+}
+// wave11 GR end
 
 /// One entry of the device list (`[u32 cgroup length, cgroup, u32 count, instructions]`).
 #[allow(dead_code)]

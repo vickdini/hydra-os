@@ -271,19 +271,54 @@ fn services_and_interrupt_lines() {
 #[test]
 fn service_control() {
     let _g = setup();
-    assert_eq!(system::service_ctl(SVCCTL_RESTART, "ata").ok(), Some(41));
-    assert_eq!(system::service_ctl(SVCCTL_START, "audio").ok(), Some(43));
+    assert_eq!(system::service_ctl(SVCCTL_RESTART, "ata", 0).ok(), Some(41));
+    assert_eq!(system::service_ctl(SVCCTL_START, "audio", 0).ok(), Some(43));
     // A kill runs a supervisor sweep at once (the automatic restart)
     fake::take_log();
-    assert_eq!(system::service_ctl(SVCCTL_KILL, "usb").ok(), Some(42));
+    assert_eq!(system::service_ctl(SVCCTL_KILL, "usb", 0).ok(), Some(42));
     assert_eq!(fake::take_log(), vec!["kill_service usb".to_string(), "supervisor_tick".to_string()]);
-    assert_eq!(system::service_ctl(SVCCTL_TICK, "").ok(), Some(0));
+    assert_eq!(system::service_ctl(SVCCTL_TICK, "", 0).ok(), Some(0));
     assert!(fake::logged("supervisor_tick"));
-    assert_eq!(fail(system::service_ctl(77, "x").unwrap_err()).0, EINVAL);
+    assert_eq!(fail(system::service_ctl(77, "x", 0).unwrap_err()).0, EINVAL);
     fake::with(|s| s.service_fail = Some("no such service"));
     for code in [SVCCTL_RESTART, SVCCTL_KILL, SVCCTL_START] {
-        assert_eq!(fail(system::service_ctl(code, "x").unwrap_err()), (EIO, "no such service".into()));
+        assert_eq!(fail(system::service_ctl(code, "x", 0).unwrap_err()), (EIO, "no such service".into()));
     }
+}
+
+// wave11 GR: `service kill NAME after S`: a kernel task kills it S seconds later
+#[test]
+fn service_kill_after_a_delay() {
+    let _g = setup();
+    fake::take_log();
+    fake::with(|s| s.kernel_fns.clear());
+    let svc = |name| ServiceSnapshot { task_id: Some(5), endpoint_id: 4, state: ServiceState::Running, restart_count: 0, unanswered_pings: 0, name };
+    fake::with(|s| s.services = vec![svc("usb"), svc("ata")]);
+    // (review F10) an unknown name is refused at once
+    assert_eq!(fail(system::service_ctl(SVCCTL_KILL, "nope", 2).unwrap_err()), (ENOENT, "Service not found".into()));
+    assert!(fake::take_log().is_empty(), "nothing scheduled");
+    assert_eq!(system::service_ctl(SVCCTL_KILL, "usb", 2).ok(), Some(0));
+    assert_eq!(system::service_ctl(SVCCTL_KILL, "ata", 1).ok(), Some(0));
+    assert_eq!(fake::take_log(), vec!["spawn_kernel svc-killer".to_string()], "one task for both, nothing killed yet");
+    let f = fake::with(|s| s.kernel_fns.pop()).map(|(_, f)| f).must();
+    f(); // runs until both are done, then ends
+    let log = fake::take_log();
+    let at = |w: &str| log.iter().position(|l| l == w).unwrap_or_else(|| panic!("{} not in {:?}", w, log));
+    assert!(at("kill_service ata") < at("kill_service usb"), "the earlier deadline first: {:?}", log);
+    assert!(log.iter().any(|l| l == "supervisor_tick"));
+    // a later one starts the task again
+    assert_eq!(system::service_ctl(SVCCTL_KILL, "usb", 1).ok(), Some(0));
+    assert_eq!(fake::take_log(), vec!["spawn_kernel svc-killer".to_string()]);
+    // (review F10) at most 16 wait at once
+    for _ in 1..16 {
+        assert_eq!(system::service_ctl(SVCCTL_KILL, "ata", 5).ok(), Some(0));
+    }
+    assert_eq!(fail(system::service_ctl(SVCCTL_KILL, "ata", 5).unwrap_err()).0, EIO);
+    let f = fake::with(|s| s.kernel_fns.pop()).map(|(_, f)| f).must();
+    f();
+    assert_eq!(system::service_ctl(SVCCTL_KILL, "ata", 5).ok(), Some(0), "room again once they are done");
+    let f = fake::with(|s| s.kernel_fns.pop()).map(|(_, f)| f).must();
+    f();
 }
 
 #[test]

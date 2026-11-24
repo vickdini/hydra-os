@@ -55,6 +55,8 @@ pub static BKL_EXIT_HOOK: Mutex<Option<fn()>> = Mutex::new(None);
 pub static BKL_ENTERS: AtomicUsize = AtomicUsize::new(0);
 /// `smp::kick_idle` calls.
 pub static KICK_IDLE: AtomicUsize = AtomicUsize::new(0);
+/// wave11 GR: threads with a signal pending (`compat::linux::proc::signal_pending_for`).
+pub static SIGNALLED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 /// CPUs `smp::kick_cpu` was called for.
 pub static KICKED_CPUS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 /// What `smp::kick_pending` answers.
