@@ -34,7 +34,6 @@ use crate::ipc::input_ring::{must_keep, Held, RingView};
 use crate::ipc::protocol::{
     InputRec, ENDPOINT_INPUT_SERVER, INPUT_REC_ABS, INPUT_REC_KEY, INPUT_REC_REL, INPUT_REC_RELEASE, INPUT_RING_BYTES, LXS_INPUT, LX_OBJ_INPUT_CTL, LX_OBJ_INPUT_RING, NOTIFY_INPUT,
 };
-use crate::task::wait::WaitQueue;
 
 const EPERM: i64 = -1;
 const EINTR: i64 = -4;
@@ -42,8 +41,6 @@ const ENOMEM: i64 = -12;
 const ENODEV: i64 = -19;
 const EINVAL: i64 = -22;
 
-/// Woken whenever a record is appended (the kernel's own evdev copy waits here).
-pub static INPUT_WQ: WaitQueue = WaitQueue::new();
 
 /// Input goes to the session (true) or stays with the console (false).
 static ROUTING: AtomicBool = AtomicBool::new(false);
@@ -54,8 +51,6 @@ static RING_OBJ: Mutex<Option<Arc<crate::memory::vm::MemObject>>> = Mutex::new(N
 /// Serializes producers (taken with interrupts off); holds what the producer last appended
 /// (which records must not be lost, `input_ring::must_keep`).
 static PRODUCER: Mutex<Held> = Mutex::new(Held { rel_buttons: 0, abs_buttons: 0, e0: false });
-/// Serializes the kernel copy's consumers ([`drain`]).
-static CONSUMER: Mutex<()> = Mutex::new(());
 
 /// Sets the ring up (once, at boot, before the input interrupts are enabled).
 pub fn init() {
@@ -85,10 +80,10 @@ fn ring() -> Option<RingView> {
     (va != 0).then(|| unsafe { RingView::new(va as *mut u8) })
 }
 
-/// Whether input is forwarded to the input service (not `lx=kernel` / `lx.input=kernel`).
+/// Whether input is forwarded to the input service (always since wave 10 10-C).
 #[inline]
 pub fn forwarded() -> bool {
-    !crate::lx::all_kernel() && crate::lx::svc::mode(LXS_INPUT) == crate::lx::svc::SvcMode::Forward
+    true
 }
 
 /// Sends the keyboard and pointer to the desktop session (`true`) or back to the console
@@ -126,13 +121,9 @@ fn stamp(mut r: InputRec) -> InputRec {
     r
 }
 
-/// Wakes the consumer (the service's main thread, or readers of the kernel copy).
+/// Wakes the consumer (the input service's main thread).
 fn wake() {
-    if forwarded() {
-        crate::ipc::service::notify(ENDPOINT_INPUT_SERVER, NOTIFY_INPUT);
-    } else {
-        INPUT_WQ.wake_all();
-    }
+    crate::ipc::service::notify(ENDPOINT_INPUT_SERVER, NOTIFY_INPUT);
 }
 
 /// Appends `r` (stamped now, under the producer lock, so records are in time order) if
@@ -180,20 +171,6 @@ pub fn pending() -> bool {
     ring().is_some_and(|r| r.pending())
 }
 
-/// Takes every waiting record, oldest first (the kernel's own consumer, `evdev.rs`; never
-/// while the input service consumes). Returns how many were taken.
-pub fn drain(f: impl FnMut(InputRec)) -> usize {
-    if forwarded() {
-        return 0;
-    }
-    let _g = CONSUMER.lock();
-    ring().map_or(0, |r| r.take(f))
-}
-
-/// `(appended, taken, dropped)` so far.
-pub fn counters() -> (u64, u64, u64) {
-    ring().map_or((0, 0, 0), |r| r.counters())
-}
 
 /// `SYS_LX_OBJ` operations [`LX_OBJ_INPUT_RING`] and [`LX_OBJ_INPUT_CTL`] of host `h`.
 pub fn obj_op(h: crate::ipc::protocol::SvcId, op: u64, a: u64, _b: u64, _c: u64) -> i64 {
@@ -202,9 +179,6 @@ pub fn obj_op(h: crate::ipc::protocol::SvcId, op: u64, a: u64, _b: u64, _c: u64)
     }
     match op {
         LX_OBJ_INPUT_RING => {
-            if !forwarded() {
-                return ENODEV; // the kernel copy consumes the ring
-            }
             let Some(ep) = crate::task::current_service() else { return EPERM };
             let Some(obj) = RING_OBJ.lock().clone() else { return ENODEV };
             match crate::lx::mem::give(ep, obj) {
@@ -212,8 +186,8 @@ pub fn obj_op(h: crate::ipc::protocol::SvcId, op: u64, a: u64, _b: u64, _c: u64)
                 Err(_) => ENOMEM,
             }
         }
-        // `a` = 0: whether input is forwarded to the service (1) or served by the kernel (0)
-        LX_OBJ_INPUT_CTL if a == 0 => forwarded() as i64,
+        // `a` = 0: whether input is forwarded to the service (always since wave 10 10-C)
+        LX_OBJ_INPUT_CTL if a == 0 => 1,
         LX_OBJ_INPUT_CTL => EINVAL,
         _ => EINVAL,
     }
@@ -242,12 +216,6 @@ pub fn open(rdev: u64, flags: u32) -> Result<Arc<dyn crate::compat::linux::chard
     }
 }
 
-/// A status line (`service list` / the boot log).
-pub fn summary() -> alloc::string::String {
-    let (h, t, d) = counters();
-    alloc::format!("input ring: {} appended, {} taken, {} dropped, routing {}, {}", h, t, d, routing(), if forwarded() { "input-server" } else { "kernel evdev" })
-}
-
 // The hot keys' screen switch (`drm::request_vt_switch` goes to Group D's `screen.rs`)
 /// Ctrl+Alt+F1 (`to_session` false: show the console) or Ctrl+Alt+F2 (`true`: back to the
 /// hidden desktop session). Called from the keyboard interrupt.
@@ -264,3 +232,14 @@ pub fn session_hidden() -> bool {
 #[cfg(test)]
 #[path = "../../tests/host-t30/unit/ipc_input.rs"]
 mod tests;
+
+/// `(appended, taken, dropped)` so far.
+pub fn counters() -> (u64, u64, u64) {
+    ring().map_or((0, 0, 0), |r| r.counters())
+}
+
+/// A status line (`service list` / the boot log).
+pub fn summary() -> alloc::string::String {
+    let (h, t, d) = counters();
+    alloc::format!("input ring: {} appended, {} taken, {} dropped, routing {}, {}", h, t, d, routing(), "input-server")
+}

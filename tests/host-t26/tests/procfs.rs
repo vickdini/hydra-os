@@ -93,11 +93,11 @@ fn static_and_system_files() {
     assert!(text("/proc/uptime").starts_with("12.34 "));
     assert_eq!(text("/proc/loadavg"), "0.00 0.00 0.00 1/1 150\n");
     // Keys, network tables, locks, sound
-    assert!(text("/proc/keys").contains("keyring"));
+    assert_eq!(text("/proc/keys"), ""); // (wave10 G10-C: only lx-sec has keys)
     hydra_hosttests_t26::fake::lx::KEYS_TEXT.with_borrow_mut(|k| *k = Some("from server\n".into()));
     assert_eq!(text("/proc/keys"), "from server\n");
-    assert!(text("/proc/net/tcp").contains("local_address"));
-    assert!(text("/proc/self/net/unix").starts_with("Num"));
+    assert_eq!(text("/proc/net/tcp"), ""); // (wave10 G10-C: lx-net lists the sockets)
+    assert_eq!(text("/proc/self/net/unix"), ""); // (lx-ipc lists them)
     assert!(text("/proc/100/net/route").starts_with("Iface"));
     assert_eq!(text("/proc/net/snmp"), "");
     hydra_hosttests_t26::fake::lx::NET_TEXT.with_borrow_mut(|k| *k = Some("srv\n".into()));
@@ -323,29 +323,6 @@ fn live_cmdline_from_memory() {
     assert_eq!(pfs::proc_pid_file_text("self/cmdline").unwrap(), b"rec\0");
     mm.lock().args = (0, 0, 0);
     assert_eq!(pfs::proc_pid_file_text("self/cmdline").unwrap(), b"rec\0");
-}
-
-#[test]
-fn fdinfo() {
-    let _e = setup();
-    let f = install(FileDescriptor::File { path: "/dev/zero".into(), cursor: hydra_hosttests_t26::fs::FileCursor::new(77), readable: true, writable: true, append: false, shown: None });
-    task::with_current_fds_mut(|t| t.set_cloexec(f as usize, true));
-    assert_eq!(pid_text(&format!("self/fdinfo/{}", f)).unwrap(), "pos:\t77\nflags:\t02000002\nmnt_id:\t2069\n");
-    // A pidfd of a live process, then of a gone one
-    task::add_process(320, 0);
-    let p = install(FileDescriptor::PidFd(std::sync::Arc::new(lx::pidfd::PidFd { pid: 320 })));
-    assert!(pid_text(&format!("self/fdinfo/{}", p)).unwrap().ends_with("Pid:\t320\nNSpid:\t320\n"));
-    let g = install(FileDescriptor::PidFd(std::sync::Arc::new(lx::pidfd::PidFd { pid: 9999 })));
-    assert!(pid_text(&format!("self/fdinfo/{}", g)).unwrap().ends_with("Pid:\t-1\nNSpid:\t-1\n"));
-    // A linux-server pidfd (its tag is the pid)
-    let d: std::sync::Arc<dyn lx::chardev::CharDevice> = std::sync::Arc::new(lx::chardev::TestDev::server(22, None));
-    let s = install(FileDescriptor::Device(d));
-    assert!(pid_text(&format!("self/fdinfo/{}", s)).unwrap().contains("Pid:\t-1\n"));
-    assert!(pid_text("self/fdinfo/500").is_none());
-    // Another process's descriptor
-    let fds = task::add_process(321, 0);
-    fds.lock().alloc_fd(FileDescriptor::ConsoleIn).unwrap();
-    assert!(pid_text("321/fdinfo/0").unwrap().starts_with("pos:\t0\n"));
 }
 
 #[test]

@@ -197,38 +197,6 @@ fn symlinks_and_readlink() {
 }
 
 #[test]
-fn fd_links_of_every_kind() {
-    let _e = setup();
-    use std::sync::Arc;
-    let b = buf(128);
-    let rl = |fd: i64| -> String {
-        let n = sys(89, &[cstr(&format!("/proc/self/fd/{}", fd)), b, 128]);
-        assert!(n > 0, "readlink fd {}: {}", fd, n);
-        String::from_utf8(read(b, n as usize)).unwrap()
-    };
-    memfs::mkfile("/some/file", b"");
-    assert_eq!(rl(open("/some/file", O_RDONLY)), "/some/file");
-    assert_eq!(rl(install(FileDescriptor::file("/dev/zero"))), "/dev/zero");
-    assert_eq!(rl(install(FileDescriptor::ConsoleIn)), "/dev/tty1");
-    let p = hydra_hosttests_t26::fs::pipe::PipeBuffer::new();
-    assert!(rl(install(FileDescriptor::PipeRead(p))).starts_with("pipe:["));
-    assert!(rl(install(FileDescriptor::Socket(Arc::new(spin::Mutex::new(Default::default()))))).starts_with("socket:["));
-    assert!(rl(install(FileDescriptor::Inet(Arc::new(spin::Mutex::new(Default::default()))))).starts_with("socket:["));
-    assert_eq!(rl(install(FileDescriptor::Unix(lx::unix::UnixSocket::new(55)))), "socket:[55]");
-    assert_eq!(rl(install(FileDescriptor::TimerFd(Arc::new(Default::default())))), "anon_inode:[timerfd]");
-    assert_eq!(rl(install(FileDescriptor::PidFd(Arc::new(lx::pidfd::PidFd { pid: 1 })))), "anon_inode:[pidfd]");
-    assert_eq!(rl(install(FileDescriptor::Epoll(Arc::new(spin::Mutex::new(Default::default()))))), "anon_inode:[eventpoll]");
-    assert_eq!(rl(install(FileDescriptor::EventFd(lx::eventfd::EventFd::new(0)))), "anon_inode:[eventfd]");
-    assert_eq!(rl(install(FileDescriptor::SignalFd(Arc::new(Default::default())))), "anon_inode:[signalfd]");
-    assert_eq!(rl(install(FileDescriptor::MemFd { memfd: lx::memfd::MemFd::new("m"), flags: 2 })), "/memfd: (deleted)");
-    assert_eq!(rl(install(FileDescriptor::Pty(lx::pty::PtyFile::named("/dev/pts/4", false)))), "/dev/pts/4");
-    let d: Arc<dyn lx::chardev::CharDevice> = Arc::new(lx::chardev::TestDev::new("/dev/dri/card0", 0));
-    assert_eq!(rl(install(FileDescriptor::Device(d))), "/dev/dri/card0");
-    // Another process's descriptors are not shown as links here
-    assert!(sys(89, &[cstr("/proc/1/fd/0"), b, 128]) < 0);
-}
-
-#[test]
 fn chmod_chown_and_times() {
     let _e = setup();
     let f = memfs::mkfile("/f", b"");

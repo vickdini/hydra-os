@@ -13,14 +13,8 @@ const NR_GETRLIMIT: u64 = 97;
 const NR_REBOOT: u64 = 169;
 const NR_GETPPID: u64 = 110;
 const NR_GETPGRP: u64 = 111;
-const NR_SETSID: u64 = 112;
-const NR_SETPGID: u64 = 109;
-const NR_GETPGID: u64 = 121;
-const NR_GETSID: u64 = 124;
-const NR_SETRLIMIT: u64 = 160;
 const NR_SET_ROBUST_LIST: u64 = 273;
 const NR_GET_ROBUST_LIST: u64 = 274;
-const NR_PRLIMIT64: u64 = 302;
 const NR_RSEQ: u64 = 334;
 const NR_NANOSLEEP: u64 = 35;
 const NR_CLOCK_NANOSLEEP: u64 = 230;
@@ -192,7 +186,6 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_GET_ROBUST_LIST => get_robust_list(a[0] as i32, a[1], a[2]),
         NR_RSEQ => ENOSYS,
         115 => super::proc::sys_getgroups(a[0], a[1]),
-        116 => super::proc::sys_setgroups(a[0], a[1]),
         73 => super::locks::flock(a[0], a[1]),
         // sync_file_range: writeback hint; data reaches the pool with the next transaction group
         277 => 0,
@@ -202,23 +195,12 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         37 => super::itimer::sys_alarm(a[0]),
         36 => super::itimer::sys_getitimer(a[0], a[1]),
         38 => super::itimer::sys_setitimer(a[0], a[1], a[2]),
-        // pidfd_open / pidfd_send_signal
-        434 => super::pidfd::sys_pidfd_open(a[0], a[1]),
         424 => super::pidfd::sys_pidfd_send_signal(a[0], a[1], a[2], a[3]),
-        // eventfd / eventfd2
-        284 => super::eventfd::sys_eventfd2(a[0], 0),
-        290 => super::eventfd::sys_eventfd2(a[0], a[1]),
-        // timerfd_create / settime / gettime
-        283 => super::timerfd::sys_create(a[0], a[1]),
-        286 => super::timerfd::sys_settime(a[0], a[1], a[2], a[3]),
-        287 => super::timerfd::sys_gettime(a[0], a[1]),
         // inotify_init / inotify_init1 / add_watch / rm_watch
         253 => super::inotify::sys_init1(0),
         294 => super::inotify::sys_init1(a[0]),
         254 => super::inotify::sys_add_watch(a[0], a[1], a[2]),
         255 => super::inotify::sys_rm_watch(a[0], a[1]),
-        282 => super::signalfd::sys_signalfd4(a[0] as i32 as i64, a[1], a[2], 0),
-        289 => super::signalfd::sys_signalfd4(a[0] as i32 as i64, a[1], a[2], a[3]),
         // pause: sleep until a signal is delivered (a posted signal wakes the event wait)
         34 => loop {
             if super::proc::signal_pending() {
@@ -286,9 +268,6 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             }
             now
         }
-        // setfsuid/setfsgid: file-system ids follow the effective ids; report the current one
-        122 => crate::task::with_current_task_mut(|t| t.euid as i64).unwrap_or(0),
-        123 => crate::task::with_current_task_mut(|t| t.egid as i64).unwrap_or(0),
         NR_NANOSLEEP | NR_CLOCK_NANOSLEEP => {
             let (req, abs, rem) = if num == NR_NANOSLEEP { (a[0], false, a[1]) } else { (a[2], a[1] & 1 != 0, a[3]) };
             // A transparently restarted sleep continues toward its original deadline
@@ -318,14 +297,10 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             };
             sleep_until(deadline, if abs { 0 } else { rem })
         }
-        NR_GETRLIMIT | NR_SETRLIMIT | NR_PRLIMIT64 => super::limits::rlimit(num, a),
+        NR_GETRLIMIT => super::limits::rlimit(num, a),
         NR_REBOOT => sys_reboot(a[0] as u32, a[1] as u32, a[2] as u32),
         NR_GETPPID => super::proc::getppid(),
         NR_GETPGRP => super::proc::getpgid(0),
-        NR_GETPGID => super::proc::getpgid(a[0] as u32 as u64),
-        NR_GETSID => super::proc::getsid(a[0] as u32 as u64),
-        NR_SETPGID => super::proc::setpgid(a[0] as u32 as u64, a[1] as u32 as u64),
-        NR_SETSID => super::proc::setsid(),
         // pid_t arguments are 32-bit: sign-extend from the low half of the register
         // PID namespace: 1 is the namespace's init
         NR_KILL => {

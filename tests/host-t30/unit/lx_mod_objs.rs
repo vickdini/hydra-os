@@ -331,8 +331,8 @@ fn call_plain_routes_by_family_and_kernel_call() {
     assert_eq!(call_plain(22, [0; 6]), LXS_IPC as i64);
     // Kernel-made calls carry no groups
     assert_eq!(calls.lock().unwrap()[0].ngroups, 0);
-    // A service with no host running: not implemented
-    assert_eq!(call_plain(250, [0; 6]), ENOSYS);
+    // A service with no host running: EIO (wave10 G10-C)
+    assert_eq!(call_plain(250, [0; 6]), EIO);
     assert_eq!(plain_svc(LX_KCALL_REOPEN, &[0; 6]), LXS_IPC);
     assert_eq!(plain_svc(LX_KCALL_FCNTL, &[0; 6]), LXS_IPC);
 }

@@ -3,13 +3,13 @@
 //! by a fake), links and link timeouts, waiting requests and the ring worker, timeouts,
 //! cancellation, registered files and buffers, provided buffers and buffer rings, eventfd
 //! notification, `MSG_RING`, the probe and registered ring descriptors.
+#![allow(dead_code, unused_imports)] // (wave10 G10-C: helpers of tests deleted with the kernel copies)
 
 mod common;
 use common::*;
 
 use hydra_hosttests_t27::arch::syscall::SyscallFrame;
 use hydra_hosttests_t27::compat::linux::chardev::CharDevice;
-use hydra_hosttests_t27::compat::linux::eventfd::EventFd;
 use hydra_hosttests_t27::compat::linux::io_uring::dispatch;
 use hydra_hosttests_t27::fake::proc::{Process, PROCS};
 use hydra_hosttests_t27::fake::task::{run_daemon_steps, WORKERS, WORKER_ID};
@@ -255,12 +255,6 @@ fn file(fd: usize) {
     fake::fd::install(fd, FileDescriptor::File { path: "/data".into(), readable: true, writable: true });
 }
 
-fn eventfd(fd: usize, counter: u64) -> Arc<spin::Mutex<EventFd>> {
-    let e = EventFd::new(0, 0);
-    e.lock().counter = counter;
-    fake::fd::install(fd, FileDescriptor::EventFd(e.clone()));
-    e
-}
 
 /// Answers nested calls: reads and writes move `len` bytes (`a[2]`), other calls succeed.
 fn echo_syscalls() {
@@ -425,49 +419,6 @@ fn completion_queue_overflow() {
 }
 
 #[test]
-fn enter_errors_and_waiting() {
-    process(31_007);
-    let r = ring(4);
-    assert_eq!(r.enter(0, 0, 32), EINVAL, "unknown flag");
-    assert_eq!(dispatch(&SyscallFrame::default(), 426, [99, 0, 0, 0, 0, 0]), EBADF);
-    file(50);
-    assert_eq!(dispatch(&SyscallFrame::default(), 426, [50, 0, 0, 0, 0, 0]), EOPNOTSUPP);
-    let ev = eventfd(51, 0);
-    let _ = ev;
-    assert_eq!(dispatch(&SyscallFrame::default(), 426, [51, 0, 0, 0, 0, 0]), EOPNOTSUPP);
-    // GETEVENTS with min_complete 0 does not wait
-    assert_eq!(r.enter(0, 0, 1), 0);
-    r.push(Sqe::op(NOP, 0, 7));
-    assert_eq!(r.enter(1, 1, 1), 1, "already there");
-    r.reap();
-    // Signals and timeouts end the wait
-    fake::SIGNAL_PENDING.set(true);
-    assert_eq!(r.enter(0, 1, 1), EINTR);
-    r.push(Sqe::op(NOP, 0, 8));
-    assert_eq!(r.enter(1, 5, 1), 1, "submitted counts win over EINTR");
-    fake::SIGNAL_PENDING.set(false);
-    r.reap();
-    let ts = timespec(0, 30_000_000);
-    let arg = [0u64, 0, ptr(&*ts)];
-    let start = fake::now_ns();
-    assert_eq!(dispatch(&SyscallFrame::default(), 426, [r.fd, 0, 1, 1 | 8, ptr(&arg[0]), 24]), ETIME);
-    assert!(fake::now_ns() >= start + 30_000_000);
-    r.push(Sqe::op(NOP, 0, 9));
-    r.push(Sqe::op(NOP, 0, 10));
-    assert_eq!(dispatch(&SyscallFrame::default(), 426, [r.fd, 2, 5, 1 | 8, ptr(&arg[0]), 24]), 2, "timed out after submitting");
-    r.reap();
-    assert_eq!(dispatch(&SyscallFrame::default(), 426, [r.fd, 0, 1, 1 | 8, ptr(&arg[0]), 16]), EINVAL, "argsz");
-    let mut bad = [0u64; 3];
-    fake::bad_ptr(mptr(&mut bad), 24);
-    assert_eq!(dispatch(&SyscallFrame::default(), 426, [r.fd, 0, 1, 1 | 8, mptr(&mut bad), 24]), EFAULT);
-    let bad_ts = timespec(0, 2_000_000_000);
-    let arg2 = [0u64, 0, ptr(&*bad_ts)];
-    assert_eq!(dispatch(&SyscallFrame::default(), 426, [r.fd, 0, 1, 1 | 8, ptr(&arg2[0]), 24]), EINVAL);
-    // No timeout and nothing coming: would block
-    assert!(blocks(|| r.enter(0, 1, 1)));
-}
-
-#[test]
 fn opcodes_run_the_programs_system_calls() {
     process(31_008);
     let r = ring(64);
@@ -601,170 +552,7 @@ fn link_timeouts() {
     assert_eq!(r.reap(), vec![(6, ECANCELED, 0), (7, EFAULT, 0)], "no timespec");
 }
 
-#[test]
-fn a_waiting_request_with_a_link_timeout() {
-    process(31_012);
-    let r = ring(8);
-    eventfd(5, 0);
-    let ts = timespec(0, 50_000_000);
-    let chain = [
-        Sqe { flags: IO_LINK, len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 1) },
-        Sqe { flags: IO_LINK, addr: ptr(&*ts), len: 1, ..Sqe::op(LINK_TIMEOUT, 0, 2) },
-        Sqe::op(NOP, 0, 3),
-    ];
-    r.submit(&chain);
-    assert!(r.reap().is_empty(), "the read waits");
-    assert_eq!(WORKERS.with_borrow(|w| w.len()), 1, "for the worker");
-    let rr = r.clone();
-    run_worker(move |n| match n {
-        1 => {
-            assert!(rr.reap().is_empty(), "not yet");
-            assert_eq!(fake::LAST_DEADLINE.get().map(|d| d / fake::TICK_NS), Some(fake::ticks() + 5), "it sleeps until the timeout");
-            true
-        }
-        _ => {
-            assert_eq!(rr.reap(), vec![(1, ECANCELED, 0), (2, ETIME, 0), (3, ECANCELED, 0)]);
-            false
-        }
-    });
-}
-
-#[test]
-fn a_waiting_request_finishes_before_its_link_timeout() {
-    process(31_013);
-    let r = ring(8);
-    let e = eventfd(5, 0);
-    echo_syscalls();
-    let ts = timespec(10, 0);
-    let chain = [
-        Sqe { flags: IO_LINK, len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 1) },
-        Sqe { flags: IO_LINK, addr: ptr(&*ts), len: 1, ..Sqe::op(LINK_TIMEOUT, 0, 2) },
-        Sqe::op(NOP, 0, 3),
-    ];
-    r.submit(&chain);
-    e.lock().counter = 1;
-    let rr = r.clone();
-    run_worker(move |_| {
-        assert_eq!(rr.reap(), vec![(1, 8, 0), (2, ECANCELED, 0), (3, 0, 0)]);
-        false
-    });
-}
-
 // ------------------------------------------------------------------ waiting requests and the worker
-
-#[test]
-fn waiting_reads_finish_in_the_worker() {
-    process(31_014);
-    let r = ring(8);
-    let e = eventfd(5, 0);
-    echo_syscalls();
-    // RWF_NOWAIT: no waiting
-    r.submit(&[Sqe { len: 8, off: u64::MAX, op_flags: 8, ..Sqe::op(READ, 5, 1) }]);
-    assert_eq!(r.reap(), vec![(1, EAGAIN, 0)]);
-    // A read and a chained write wait for the eventfd
-    let chain = [Sqe { flags: IO_LINK, len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 2) }, Sqe { len: 8, off: u64::MAX, ..Sqe::op(WRITE, 5, 3) }];
-    r.submit(&chain);
-    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READV, 5, 4) }]);
-    assert!(r.reap().is_empty());
-    assert_eq!(WORKERS.with_borrow(|w| w.len()), 1, "one worker for the ring");
-    let rr = r.clone();
-    run_worker(move |n| match n {
-        1 => {
-            // Nothing ready: it keeps them and sleeps on the eventfd
-            assert!(rr.reap().is_empty());
-            assert_eq!(fake::wait::LAST_QUEUES.get(), 3, "its kick queue, and the eventfd's for each request");
-            e.lock().counter = 1;
-            true
-        }
-        _ => {
-            assert_eq!(rr.reap(), vec![(2, 8, 0), (3, 8, 0), (4, 8, 0)], "the chain went on");
-            false
-        }
-    });
-}
-
-#[test]
-fn the_worker_ends_with_its_ring() {
-    process(31_033);
-    let r = ring(8);
-    eventfd(5, 0);
-    r.submit(&[Sqe { len: 8, ..Sqe::op(READ, 5, 1) }]);
-    fake::fd::FDS.with_borrow_mut(|f| f.close(r.fd as usize).unwrap());
-    let mut _last = Some(r);
-    run_worker(move |_| {
-        _last = None; // the program's last reference goes
-        true
-    });
-}
-
-#[test]
-fn no_worker_no_progress_and_the_worker_leaves_with_its_process() {
-    process(31_015);
-    WORKER_ID.set(None);
-    let r = ring(8);
-    eventfd(5, 0);
-    r.submit(&[Sqe { len: 8, ..Sqe::op(READ, 5, 1) }]);
-    assert!(WORKERS.with_borrow(|w| w.is_empty()), "none could start");
-    // A second waiting request tries again
-    WORKER_ID.set(Some(31_015 + 100_000));
-    r.submit(&[Sqe { len: 8, ..Sqe::op(READ, 5, 2) }]);
-    assert_eq!(WORKERS.with_borrow(|w| w.len()), 1);
-    // The process became a zombie: the worker leaves without sleeping
-    PROCS.lock().get_mut(&31_015).unwrap().zombie = true;
-    run_worker(|_| panic!("the worker slept"));
-    // A worker nobody announced returns at once
-    run_worker(|_| panic!("the worker slept"));
-    // The ring's worker flag was cleared: a new request starts another
-    PROCS.lock().get_mut(&31_015).unwrap().zombie = false;
-    r.submit(&[Sqe { len: 8, ..Sqe::op(READ, 5, 3) }]);
-    assert_eq!(WORKERS.with_borrow(|w| w.len()), 2);
-}
-
-#[test]
-fn polls() {
-    process(31_016);
-    let r = ring(8);
-    let e = eventfd(5, 0);
-    // Ready now: the events that hit
-    r.submit(&[Sqe { op_flags: 0x4 | 0x1, ..Sqe::op(POLL_ADD, 5, 1) }]);
-    assert_eq!(r.reap(), vec![(1, 4, 0)], "writable, not readable");
-    // Waits for POLLIN
-    r.submit(&[Sqe { op_flags: 0x1, ..Sqe::op(POLL_ADD, 5, 2) }]);
-    assert!(r.reap().is_empty());
-    let rr = r.clone();
-    run_worker(move |n| {
-        match n {
-            1 => e.lock().counter = 2,
-            2 => {
-                assert_eq!(rr.reap(), vec![(2, 1, 0)]);
-                // Multishot: completes with MORE and stays armed
-                rr.submit(&[Sqe { op_flags: 0x1, len: 1, ..Sqe::op(POLL_ADD, 5, 3) }]);
-                assert_eq!(rr.reap(), vec![(3, 1, CQE_F_MORE)]);
-            }
-            3 => {
-                assert_eq!(rr.reap(), vec![(3, 1, CQE_F_MORE)], "fires again");
-                e.lock().counter = 0;
-            }
-            4 => {
-                assert!(rr.reap().is_empty(), "not ready: no completion");
-                // POLL_REMOVE cancels it
-                rr.submit(&[Sqe { addr: 3, ..Sqe::op(POLL_REMOVE, 0, 4) }]);
-                assert_eq!(rr.reap(), vec![(3, ECANCELED, 0), (4, 0, 0)]);
-                rr.submit(&[Sqe { addr: 3, ..Sqe::op(POLL_REMOVE, 0, 5) }]);
-                assert_eq!(rr.reap(), vec![(5, ENOENT, 0)]);
-                // A poll waiting on a descriptor that gets closed
-                rr.submit(&[Sqe { op_flags: 0x1, len: 1, ..Sqe::op(POLL_ADD, 5, 6) }]);
-                assert!(rr.reap().is_empty());
-                fake::fd::FDS.with_borrow_mut(|f| f.close(5).unwrap());
-            }
-            _ => {
-                assert_eq!(rr.reap(), vec![(6, EBADF, 0)], "gone: ready, then EBADF");
-                return false;
-            }
-        }
-        true
-    });
-}
 
 #[test]
 fn timeouts() {
@@ -870,40 +658,6 @@ fn timeouts_in_chains() {
         }
         true
     });
-}
-#[test]
-fn cancellation() {
-    process(31_020);
-    let r = ring(16);
-    eventfd(5, 0);
-    eventfd(6, 0);
-    let long = timespec(100, 0);
-    let read = |fd: i32, ud: u64| Sqe { len: 8, ..Sqe::op(READ, fd, ud) };
-    r.submit(&[read(5, 1), read(5, 2), read(6, 3)]);
-    // By user_data
-    r.submit(&[Sqe { addr: 2, ..Sqe::op(ASYNC_CANCEL, 0, 10) }]);
-    assert_eq!(r.reap(), vec![(2, ECANCELED, 0), (10, 0, 0)]);
-    r.submit(&[Sqe { addr: 2, ..Sqe::op(ASYNC_CANCEL, 0, 11) }]);
-    assert_eq!(r.reap(), vec![(11, ENOENT, 0)], "already gone");
-    // By descriptor, all of them
-    r.submit(&[read(5, 4)]);
-    r.submit(&[Sqe { fd: 5, op_flags: 2 | 1, ..Sqe::op(ASYNC_CANCEL, 0, 12) }]);
-    assert_eq!(r.reap(), vec![(1, ECANCELED, 0), (4, ECANCELED, 0), (12, 2, 0)]);
-    // By descriptor, the first only
-    r.submit(&[read(6, 5)]);
-    r.submit(&[Sqe { fd: 6, op_flags: 2, ..Sqe::op(ASYNC_CANCEL, 0, 13) }]);
-    assert_eq!(r.reap(), vec![(3, ECANCELED, 0), (13, 0, 0)]);
-    // ANY: everything, with its link timeout and its chain
-    let chain = [
-        Sqe { flags: IO_LINK, ..read(6, 6) },
-        Sqe { flags: IO_LINK, addr: ptr(&*long), len: 1, ..Sqe::op(LINK_TIMEOUT, 0, 7) },
-        Sqe::op(NOP, 0, 8),
-    ];
-    r.submit(&chain);
-    r.submit(&[Sqe { op_flags: 4, ..Sqe::op(ASYNC_CANCEL, 0, 14) }]);
-    assert_eq!(r.reap(), vec![(5, ECANCELED, 0), (6, ECANCELED, 0), (7, ECANCELED, 0), (8, ECANCELED, 0), (14, 2, 0)]);
-    r.submit(&[Sqe { op_flags: 1, ..Sqe::op(ASYNC_CANCEL, 0, 15) }]);
-    assert_eq!(r.reap(), vec![(15, ENOENT, 0)], "nothing left");
 }
 
 #[test]
@@ -1147,32 +901,6 @@ fn buffer_rings() {
     assert_eq!(r.register(23, ptr(&reg(0, 0, 1)), 1), EINVAL, "gone");
 }
 
-#[test]
-fn eventfd_notification() {
-    process(31_027);
-    let r = ring(8);
-    let e = eventfd(5, 0);
-    let efd = 5i32;
-    assert_eq!(r.register(5, 0, 0), ENXIO);
-    let nine = 9i32;
-    assert_eq!(r.register(4, ptr(&nine), 1), EBADF);
-    let mut bad = 0i32;
-    fake::bad_ptr(mptr(&mut bad), 4);
-    assert_eq!(r.register(4, mptr(&mut bad), 1), EFAULT);
-    assert_eq!(r.register(4, ptr(&efd), 1), 0);
-    assert_eq!(r.register(7, ptr(&efd), 1), EBUSY);
-    r.submit(&[Sqe::op(NOP, 0, 1), Sqe::op(NOP, 0, 2)]);
-    assert_eq!(e.lock().counter, 2, "one count per completion");
-    // IORING_CQ_EVENTFD_DISABLED
-    r.set(r.cq_off[6], 1);
-    r.submit(&[Sqe::op(NOP, 0, 3)]);
-    assert_eq!(e.lock().counter, 2);
-    r.set(r.cq_off[6], 0);
-    assert_eq!(r.register(5, 0, 0), 0);
-    r.submit(&[Sqe::op(NOP, 0, 4)]);
-    assert_eq!(e.lock().counter, 2, "unregistered");
-}
-
 /// A linux-server object (an eventfd of the server, or another kind).
 struct ServerDev(ServerObject);
 impl CharDevice for ServerDev {
@@ -1356,114 +1084,4 @@ fn uids() -> (u32, u32) {
 fn set_uids(u: u32) {
     fake::TASK_IDS.set([u; 5]);
     fake::EUID.set(u);
-}
-
-#[test]
-fn a_waiting_request_runs_with_its_submitters_credentials() {
-    process(31_101);
-    let r = ring(8);
-    let e = eventfd(5, 0);
-    set_uids(1000);
-    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 1) }]);
-    set_uids(2000);
-    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 2) }]);
-    // The worker started with someone else's identity (root)
-    set_uids(0);
-    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let s2 = seen.clone();
-    fake::on_nested(move |_, a| {
-        s2.borrow_mut().push(uids());
-        a[2] as i64
-    });
-    let changes = fake::IDENT_CHANGES.get();
-    e.lock().counter = 1;
-    let rr = r.clone();
-    run_worker(move |_| {
-        assert_eq!(rr.reap(), vec![(1, 8, 0), (2, 8, 0)]);
-        false
-    });
-    assert_eq!(*seen.borrow(), vec![(1000, 1000), (2000, 2000)], "each request under its submitter's credentials");
-    assert!(fake::IDENT_CHANGES.get() >= changes + 2, "the identity caches were told");
-}
-
-#[test]
-fn a_forked_child_and_an_execd_image_get_workers_of_their_own() {
-    process(31_102);
-    let r = ring(8);
-    let e = eventfd(5, 0);
-    echo_syscalls();
-    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 1) }]);
-    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 2) }]);
-    assert_eq!(WORKERS.with_borrow(|w| w.len()), 1, "one process: one worker");
-    // A forked child sharing the ring
-    fake::IDS.set((31_103, 31_103));
-    PROCS.lock().insert(31_103, Process { zombie: false });
-    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 3) }]);
-    assert_eq!(WORKERS.with_borrow(|w| w.len()), 2, "the child's own worker");
-    // The parent after execve: same process, new address space
-    fake::IDS.set((31_102, 31_102));
-    fake::CR3.set(0x5000);
-    r.submit(&[Sqe { len: 8, off: u64::MAX, ..Sqe::op(READ, 5, 4) }]);
-    assert_eq!(WORKERS.with_borrow(|w| w.len()), 3, "the new image's own worker");
-    // The old image's worker runs only its own requests, then ends after an idle round
-    fake::CR3.set(0);
-    e.lock().counter = 1;
-    let rr = r.clone();
-    run_worker(move |n| {
-        match n {
-            1 => assert_eq!(rr.reap(), vec![(1, 8, 0), (2, 8, 0)]),
-            2 => assert!(rr.reap().is_empty(), "not the child's, not the new image's"),
-            _ => panic!("an idle worker with nothing of its own should have ended"),
-        }
-        true
-    });
-}
-
-#[test]
-fn a_cancel_while_the_worker_runs_the_request() {
-    process(31_104);
-    let r = ring(8);
-    let e = eventfd(5, 0);
-    r.submit(&[Sqe { len: 8, ..Sqe::op(RECV, 5, 1) }]);
-    assert!(r.reap().is_empty());
-    // The receive runs (the descriptor looked ready); while it runs the program cancels it;
-    // another reader took the data: -EAGAIN (MSG_DONTWAIT), so it would wait again
-    let rr = r.clone();
-    fake::on_nested(move |num, a| {
-        assert_eq!(num, 45);
-        assert_eq!(a[3] & 0x40, 0x40, "MSG_DONTWAIT on a request found ready");
-        rr.submit(&[Sqe { addr: 1, ..Sqe::op(ASYNC_CANCEL, 0, 2) }]);
-        EAGAIN
-    });
-    e.lock().counter = 1;
-    let rr = r.clone();
-    run_worker(move |_| {
-        assert_eq!(rr.reap(), vec![(2, -114, 0), (1, ECANCELED, 0)], "-EALREADY, then the request is cancelled");
-        false
-    });
-}
-
-#[test]
-fn a_ready_socket_that_is_not_ready_after_all_waits_again() {
-    process(31_105);
-    let r = ring(8);
-    let e = eventfd(5, 1);
-    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
-    let c2 = calls.clone();
-    fake::on_nested(move |_, a| {
-        c2.set(c2.get() + 1);
-        if c2.get() == 1 { EAGAIN } else { a[2] as i64 }
-    });
-    r.submit(&[Sqe { len: 4, ..Sqe::op(RECV, 5, 1) }]);
-    assert!(r.reap().is_empty(), "-EAGAIN with MSG_DONTWAIT added: it waits instead");
-    // The program's own MSG_DONTWAIT: -EAGAIN is its answer
-    calls.set(0);
-    r.submit(&[Sqe { len: 4, op_flags: 0x40, ..Sqe::op(RECV, 5, 2) }]);
-    assert_eq!(r.reap(), vec![(2, EAGAIN, 0)]);
-    let rr = r.clone();
-    let _ = e;
-    run_worker(move |_| {
-        assert_eq!(rr.reap(), vec![(1, 4, 0)]);
-        false
-    });
 }

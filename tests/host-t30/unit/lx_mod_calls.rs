@@ -252,9 +252,9 @@ fn linux_server_dying_ends_every_linux_program() {
     assert_eq!(sim.spawned().iter().filter(|n| **n == "lx-recover").count(), 1);
     // Its whole process was ended
     assert_eq!(sim.state(s.workers[0]), crate::task::TaskState::Dead);
-    // EndLinux: callers do not wait for the new instance
+    // EndLinux: callers do not wait for the new instance (wave10 G10-C: EIO)
     assert!(!restart::restarting(LXS_LINUX));
-    assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(ENOSYS));
+    assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(EIO));
 }
 
 #[test]
@@ -348,18 +348,6 @@ fn a_redirect_to_a_service_in_the_kernel_or_not_running_fails() {
     start(&sim, LXS_TEST, 300, 1, true, handler(|s| (s.call.args[1] as i64, LX_REPLY_REDIRECT)));
     // linux-server is not running
     assert_eq!(test_call(LX_TEST_REDIRECT, LXS_LINUX as u64, 0), ENOSYS);
-    // wave7 G7-4: a service switched back to the kernel (or every service): the kernel's own
-    // code answers the call (nothing happened in the redirecting service)
-    let kernel_answers = || {
-        crate::world::bkl_enter();
-        forward(&frame(LX_TEST_NR, [LX_TEST_REDIRECT, LXS_LINUX as u64, 0, 0, 0, 0]))
-    };
-    svc::tests::set_mode(LXS_LINUX, svc::SvcMode::Kernel);
-    assert_eq!(kernel_answers(), None);
-    svc::tests::set_mode(LXS_LINUX, svc::SvcMode::Forward);
-    ALL_KERNEL.store(true, Ordering::Release);
-    assert_eq!(kernel_answers(), None);
-    ALL_KERNEL.store(false, Ordering::Release);
 }
 
 // ----------------------------------------------------------------------

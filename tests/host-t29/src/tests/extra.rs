@@ -189,32 +189,6 @@ fn adjtimex_steps_the_clock() {
     assert_eq!(call(159, [mptr(&mut t), 0, 0, 0, 0, 0]), EINVAL);
 }
 
-#[test]
-fn host_and_domain_names() {
-    let _g = setup();
-    proc_(610, 1000);
-    assert_eq!(extra::uts_names(), ("hydra".to_string(), "localdomain".to_string()));
-    let name = *b"box";
-    assert_eq!(call(170, [ptr(&name), 65, 0, 0, 0, 0]), EINVAL, "longer than 64");
-    assert_eq!(call(170, [0, 3, 0, 0, 0, 0]), EFAULT);
-    assert_eq!(call(170, [ptr(&name), 3, 0, 0, 0, 0]), EPERM, "needs CAP_SYS_ADMIN");
-    caps(610, CAP_SYS_ADMIN);
-    assert_eq!(call(170, [ptr(&name), 3, 0, 0, 0, 0]), 0);
-    assert_eq!(call(171, [ptr(b"lan"), 3, 0, 0, 0, 0]), 0);
-    assert_eq!(extra::uts_names(), ("box".to_string(), "lan".to_string()));
-    // A new UTS namespace starts with a copy; changing it leaves the old one
-    extra::uts_copy(0, 77);
-    linux::proc::PROCS.lock().get_mut(&610).unwrap().ns.uts = 77;
-    assert_eq!(call(170, [ptr(b"inner"), 5, 0, 0, 0, 0]), 0);
-    assert_eq!(extra::uts_names().0, "inner");
-    linux::proc::PROCS.lock().get_mut(&610).unwrap().ns.uts = 0;
-    assert_eq!(extra::uts_names().0, "box");
-    extra::uts_copy(4242, 78); // no names to copy: nothing happens
-    // Reset for other tests
-    assert_eq!(call(170, [ptr(b"hydra"), 5, 0, 0, 0, 0]), 0);
-    assert_eq!(call(171, [ptr(b"localdomain"), 11, 0, 0, 0, 0]), 0);
-}
-
 // ------------------------------------------------- small stubs
 
 #[test]

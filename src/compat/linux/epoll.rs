@@ -314,7 +314,6 @@ pub fn epoll_collect_ready(
                 // count is read before the readiness, so a change between the two reports
                 // once more rather than never
                 let wakes = match desc {
-                    FileDescriptor::EventFd(e) if watch.events & EPOLLET != 0 => Some(e.lock().wq.wakes()),
                     // A linux-server object: its readiness word's edge count (wave 4)
                     FileDescriptor::Device(d) if watch.events & EPOLLET != 0 => d.edges(),
                     _ => None,

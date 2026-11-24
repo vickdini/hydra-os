@@ -12,7 +12,6 @@ pub(crate) fn reset() {
     for e in SVC.iter() {
         e.endpoint.store(0, Ordering::Release);
         e.host.store(0, Ordering::Release);
-        e.mode.store(0, Ordering::Release);
     }
     for w in ALL_WORKERS.iter() {
         w.store(0, Ordering::Release);
@@ -62,7 +61,7 @@ pub(crate) fn reset_host(x: &Host) {
 fn init_fills_the_default_registry() {
     let _g = crate::world::serial();
     reset();
-    assert!(!init(b""));
+    init(b"");
     assert_eq!(endpoint_of(LXS_LINUX), ENDPOINT_LINUX_SERVER);
     assert_eq!(endpoint_of(LXS_SEC), ENDPOINT_LX_SEC);
     assert_eq!(endpoint_of(LXS_TEST), ENDPOINT_SVC_TEST);
@@ -76,7 +75,7 @@ fn init_fills_the_default_registry() {
     assert_eq!(host_of(LXS_NET), LXS_NET);
     assert_eq!(host_of(LXS_IPC), LXS_IPC);
     reset();
-    init(b"lx.net=linux+lx.ipc=linux");
+    init_colocated(b"lx.net=linux+lx.ipc=linux");
     assert_eq!(host_of(LXS_NET), LXS_LINUX);
     assert_eq!(host_of(LXS_IPC), LXS_LINUX);
     assert_eq!(endpoint_of(LXS_NET), ENDPOINT_LINUX_SERVER);
@@ -86,35 +85,34 @@ fn init_fills_the_default_registry() {
     assert_eq!(host_of(LXS_TEST), LXS_TEST);
     // Ids without an endpoint have no host
     assert_eq!(host_of(12), 0);
-    assert_eq!(mode(LXS_NET), SvcMode::Forward);
     // Out of range ids
     assert_eq!(host_of(200), 0);
     assert_eq!(endpoint_of(200), 0);
-    assert_eq!(mode(200), SvcMode::Forward);
     assert_eq!(host_by_endpoint(ENDPOINT_LINUX_SERVER), Some(LXS_LINUX));
     assert_eq!(host_by_endpoint(0x7777), None);
 }
 
 #[test]
-fn init_applies_the_switch_back_words() {
+fn init_ignores_the_old_switch_back_words() {
     let _g = crate::world::serial();
+    crate::fake::reset();
     reset();
-    // lx.<name>=kernel, lx.<name>=linux, the `lx.` prefix optional, several separators,
-    // unknown names and values ignored
-    assert!(!init(b"lx.net=kernel+sec=linux,lx.bogus=kernel;lx.ipc=what\tkernel=linux test"));
-    assert_eq!(mode(LXS_NET), SvcMode::Kernel);
-    assert_eq!(mode(LXS_IPC), SvcMode::Forward);
-    assert_eq!(endpoint_of(LXS_SEC), ENDPOINT_LINUX_SERVER);
-    assert_eq!(host_of(LXS_SEC), LXS_LINUX);
-    // The kernel's own id (0) cannot be switched
+    // wave10 G10-C: lx=kernel, kernel, lx.<name>=kernel, lx.<name>=linux, tmpfs=pool: logged
+    // and ignored; the registry stays the default one
+    init(b"lx.net=kernel+sec=linux,lx.bogus=kernel;lx.ipc=what	kernel lx=kernel uring=kernel tmpfs=pool lx.net.restart=endlinux");
+    assert_eq!(endpoint_of(LXS_SEC), ENDPOINT_LX_SEC);
+    assert_eq!(host_of(LXS_SEC), LXS_SEC);
+    assert_eq!(endpoint_of(LXS_NET), crate::ipc::protocol::ENDPOINT_LX_NET);
+    assert!(crate::fake::logged("[lx] lx.net=kernel: ignored (no switch back since wave 10: a crashed service is restarted)"));
+    assert!(crate::fake::logged("[lx] sec=linux: ignored (no switch back since wave 10: a crashed service is restarted)"));
+    assert!(crate::fake::logged("[lx] kernel: ignored (no switch back since wave 10: a crashed service is restarted)"));
+    assert!(crate::fake::logged("[lx] lx=kernel: ignored (no switch back since wave 10: a crashed service is restarted)"));
+    assert!(crate::fake::logged("[lx] tmpfs=pool: ignored (no switch back since wave 10: a crashed service is restarted)"));
+    assert!(!crate::fake::logged("[lx] lx.ipc=what: ignored (no switch back since wave 10: a crashed service is restarted)"));
+    assert!(!crate::fake::logged("[lx] lx.net.restart=endlinux: ignored (no switch back since wave 10: a crashed service is restarted)"));
+    // The kernel's own id (0) has no endpoint
     assert_eq!(endpoint_of(0), 0);
-    reset();
-    assert!(init(b"lx=kernel"));
-    reset();
-    assert!(init(b"kernel"));
-    reset();
-    // `lx=linux` is not a word of the registry
-    assert!(!init(b"lx=linux"));
+    assert!(ignored_word(b"lx.uring=kernel") && ignored_word(b"vfs=linux") && !ignored_word(b"") && !ignored_word(b"lx.vfs.restart=transparent"));
     reset();
 }
 
@@ -123,13 +121,10 @@ fn log_lines_names_each_service_with_an_endpoint() {
     let _g = crate::world::serial();
     crate::fake::reset();
     reset();
-    init(b"lx.ipc=kernel+lx.net=linux");
-    log_lines(false);
+    init_colocated(b"lx.net=linux");
+    log_lines();
     assert!(crate::fake::logged("[lx] net: linux (co-located, endpoint 0x29)"));
-    assert!(crate::fake::logged("[lx] ipc: in the kernel (lx.<name>=kernel)"));
     assert!(crate::fake::logged("[lx] sec: its own process (endpoint 0x31, when started)"));
-    log_lines(true);
-    assert!(crate::fake::logged("[lx] test: in the kernel (lx=kernel)"));
     reset();
 }
 
@@ -203,7 +198,7 @@ fn worker_list_spans_hosts() {
 fn take_ids_moves_every_id_of_an_endpoint() {
     let _g = crate::world::serial();
     reset();
-    init(b"lx.sec=linux+lx.net=linux");
+    init_colocated(b"lx.sec=linux+lx.net=linux");
     SVC[LXS_SEC as usize].host.store(0, Ordering::Release);
     SVC[LXS_NET as usize].host.store(0, Ordering::Release);
     take_ids(LXS_LINUX, ENDPOINT_LINUX_SERVER);
@@ -226,13 +221,6 @@ fn major_svc_needs_a_forwarded_online_service() {
     assert_eq!(major_svc(240), 0);
     x.online.store(true, Ordering::Release);
     assert_eq!(major_svc(240), LXS_TEST);
-    // Switched back to the kernel
-    SVC[LXS_TEST as usize].mode.store(SvcMode::Kernel as u8, Ordering::Release);
-    assert_eq!(major_svc(240), 0);
-    SVC[LXS_TEST as usize].mode.store(SvcMode::Forward as u8, Ordering::Release);
-    crate::lx::ALL_KERNEL.store(true, Ordering::Release);
-    assert_eq!(major_svc(240), 0);
-    crate::lx::ALL_KERNEL.store(false, Ordering::Release);
     reset();
 }
 
@@ -305,7 +293,19 @@ pub(crate) fn set_host(id: SvcId, h: SvcId) {
     SVC[id as usize].host.store(h, Ordering::Release);
 }
 
-/// Sets service `id`'s mode.
-pub(crate) fn set_mode(id: SvcId, m: SvcMode) {
-    SVC[id as usize].mode.store(m as u8, Ordering::Release);
+/// [`init`] with `<name>=linux` words applied as the old co-location did (wave10 G10-C: the
+/// boot words are ignored now; the tests still host several ids in one process this way).
+pub(crate) fn init_colocated(words: &[u8]) {
+    init(b"");
+    for w in words.split(|c| matches!(c, b'+' | b',' | b' ')) {
+        let w = w.strip_prefix(b"lx.").unwrap_or(w);
+        let Some(name) = w.strip_suffix(b"=linux") else { continue };
+        if let Some(id) = LXS_NAMES.iter().position(|n| n.as_bytes() == name) {
+            SVC[id].endpoint.store(ENDPOINT_LINUX_SERVER, Ordering::Release);
+        }
+    }
+    for id in 1..LXS_MAX {
+        let ep = SVC[id].endpoint.load(Ordering::Acquire);
+        SVC[id].host.store(if ep == 0 { 0 } else { home_of(ep) }, Ordering::Release);
+    }
 }

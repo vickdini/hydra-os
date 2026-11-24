@@ -182,21 +182,6 @@ fn pty_paths_stat_through_the_pty_layer() {
 }
 
 #[test]
-fn own_descriptor_links_in_proc() {
-    let _e = setup();
-    let ino = memfs::mkfile("/f", b"z");
-    let fd = open("/f", O_RDONLY);
-    let p = format!("/proc/self/fd/{}", fd);
-    assert_eq!(stat(&p).unwrap().st_ino, ino);
-    assert_eq!(lstat(&p).unwrap().st_mode, 0o120700);
-    let p2 = format!("/dev/fd/{}", fd);
-    assert_eq!(stat(&p2).unwrap().st_ino, ino);
-    // A descriptor fstat does not know (a legacy socket): the link stats as itself
-    let sfd = install(FileDescriptor::Socket(std::sync::Arc::new(spin::Mutex::new(Default::default()))));
-    assert!(stat(&format!("/proc/self/fd/{}", sfd)).is_ok());
-}
-
-#[test]
 fn links_in_the_pool_to_files_served_by_name() {
     let _e = setup();
     // /etc/mtab -> ../proc/self/mounts: the server cannot follow it there

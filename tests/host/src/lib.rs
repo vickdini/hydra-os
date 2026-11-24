@@ -235,24 +235,16 @@ pub mod compat {
                 (rest == "self/comm").then(|| b"hydra-test\n".to_vec())
             }
         }
-        #[path = "../../../../../src/compat/linux/eventfd.rs"]
-        pub mod eventfd;
-        #[path = "../../../../../src/compat/linux/keys.rs"]
-        pub mod keys;
         #[path = "../../../../../src/compat/linux/landlock.rs"]
         pub mod landlock;
         #[path = "../../../../../src/compat/linux/memfd.rs"]
         pub mod memfd;
         #[path = "../../../../../src/compat/linux/mm.rs"]
         pub mod mm;
-        #[path = "../../../../../src/compat/linux/mqueue.rs"]
-        pub mod mqueue;
         #[path = "../../../../../src/compat/linux/prof.rs"]
         pub mod prof;
         #[path = "../../../../../src/compat/linux/seccomp.rs"]
         pub mod seccomp;
-        #[path = "../../../../../src/compat/linux/sockopt.rs"]
-        pub mod sockopt;
 
         /// *stub*
         pub mod ptrace {
@@ -291,8 +283,6 @@ pub mod compat {
 
         #[path = "../../../../../src/compat/linux/userfaultfd.rs"]
         pub mod userfaultfd;
-        #[path = "../../../../../src/compat/linux/unix.rs"]
-        pub mod unix;
         #[path = "../../../../../src/compat/linux/futex.rs"]
         pub mod futex;
         /// *stub* System call tracing switch (`linux trace`).
@@ -403,17 +393,11 @@ pub mod compat {
                 fn deliver_notification(&self, _data: &[u8]) -> bool {
                     false
                 }
-                fn as_mqueue(&self) -> Option<&crate::compat::linux::mqueue::MqHandle> {
-                    None
-                }
                 /// *stub* (Group 13) No linux-server objects on the host.
                 fn as_server(&self) -> Option<&crate::lx::obj::ServerObject> {
                     None
                 }
                 fn as_landlock(&self) -> Option<&crate::compat::linux::landlock::Ruleset> {
-                    None
-                }
-                fn as_bpf(&self) -> Option<crate::compat::linux::bpf::Obj> {
                     None
                 }
             }
@@ -605,14 +589,12 @@ pub mod fs {
     /// the ones the code under test matches on, with the fields it reads.
     #[derive(Clone)]
     pub enum FileDescriptor {
-        EventFd(alloc::sync::Arc<spin::Mutex<crate::compat::linux::eventfd::EventFd>>),
         MemFd { memfd: alloc::sync::Arc<spin::Mutex<crate::compat::linux::memfd::MemFd>>, flags: u32 },
         Vnode(alloc::sync::Arc<spin::Mutex<crate::fake::Vnode>>),
         File { path: alloc::string::String, readable: bool, writable: bool },
         Device(alloc::sync::Arc<dyn crate::compat::linux::chardev::CharDevice>),
         PipeRead(alloc::sync::Arc<spin::Mutex<crate::fs::pipe::PipeBuffer>>),
         PipeWrite(alloc::sync::Arc<spin::Mutex<crate::fs::pipe::PipeBuffer>>),
-        Unix(alloc::sync::Arc<crate::compat::linux::unix::UnixSocket>),
     }
 
     impl FileDescriptor {
@@ -622,13 +604,11 @@ pub mod fs {
                 alloc::sync::Arc::as_ptr(a) as *const u8 as usize
             }
             match self {
-                FileDescriptor::EventFd(a) => of(a),
                 FileDescriptor::MemFd { memfd, .. } => of(memfd),
                 FileDescriptor::Vnode(a) => of(a),
                 FileDescriptor::File { path, .. } => path.as_ptr() as usize,
                 FileDescriptor::Device(a) => of(a),
                 FileDescriptor::PipeRead(a) | FileDescriptor::PipeWrite(a) => of(a),
-                FileDescriptor::Unix(a) => of(a),
             }
         }
     }

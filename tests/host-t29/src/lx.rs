@@ -29,8 +29,9 @@ pub fn call_plain(nr: u64, args: [u64; 6]) -> i64 {
     crate::fake::rec(alloc::format!("lx::call_plain({nr},{:?})", args));
     crate::fake::ret("lx::call_plain")
 }
-pub fn step4() -> bool {
-    false
+/// *stub* wave10 G10-C: lx-ipc can take calls (a clone's pidfd), unless a test says not.
+pub fn ipc_usable() -> bool {
+    crate::fake::ret("lx::ipc_usable") == 0
 }
 pub fn summary() -> alloc::string::String {
     alloc::string::String::new()

@@ -44,8 +44,6 @@ use crate::memory::vm::prefault_current;
 /// Total number of supported POSIX and real-time signals (`1..=64`).
 pub const NSIG: usize = 64;
 
-/// Hangup detected on controlling terminal or death of controlling process (`SIGHUP`).
-pub const SIGHUP: u32 = 1;
 /// Interactive attention / interrupt signal from keyboard (`SIGINT`).
 pub const SIGINT: u32 = 2;
 /// Quit from keyboard with core dump (`SIGQUIT`).
@@ -658,38 +656,6 @@ pub fn sys_getgroups(size: u64, list: u64) -> i64 {
     groups.len() as i64
 }
 
-/// Replaces the supplementary group IDs for the calling process (privileged only).
-///
-/// # Arguments
-/// * `size` - Number of group IDs in the array.
-/// * `list` - User pointer to array of `gid_t` (`u32`).
-///
-/// # Returns
-/// `0` on success, or a negative Linux error code on failure.
-pub fn sys_setgroups(size: u64, list: u64) -> i64 {
-    if size > 65536 {
-        return EINVAL;
-    }
-    let privileged = crate::task::with_current_task_mut(|t| t.caps.has(crate::task::tcb::Caps::SETGID)).unwrap_or(false);
-    if !privileged {
-        return EPERM;
-    }
-    let mut groups = Vec::with_capacity(size as usize);
-    if size > 0 {
-        if !prefault_current(list, size * 4, false) {
-            return EFAULT;
-        }
-        for i in 0..size {
-            groups.push(unsafe { *((list + i * 4) as *const u32) });
-        }
-    }
-    let (_, pid) = current_ids();
-    if let Some(p) = PROCS.lock().get_mut(&pid) {
-        p.groups = groups;
-    }
-    0
-}
-
 /// The processes the caller sees in `/proc`, by the IDs it knows them by: those in its PID
 /// namespace (zombies included, as on Linux), or all from the initial namespace.
 pub fn visible_pids() -> Vec<u64> {
@@ -781,54 +747,6 @@ pub fn getpgid(target: u64) -> i64 {
     let (_, pid) = current_ids();
     let target = if target == 0 { pid } else { target };
     crate::lx::proc::task_pgrp(target).map_or(ESRCH, |p| p.pgid as i64)
-}
-
-/// Returns the session ID of `target` (or the caller when `target == 0`).
-///
-/// # Arguments
-/// * `target` - Process ID to query, or `0` for the calling process.
-///
-/// # Returns
-/// Session ID on success, or negative error code (`-ESRCH`).
-pub fn getsid(target: u64) -> i64 {
-    let (_, pid) = current_ids();
-    let target = if target == 0 { pid } else { target };
-    crate::lx::proc::task_pgrp(target).map_or(ESRCH, |p| p.sid as i64)
-}
-
-/// Sets the process group ID of `target` to `pgid`.
-///
-/// # Arguments
-/// * `target` - Target process ID, or `0` for the caller.
-/// * `pgid` - New process group ID, or `0` to use `target`.
-///
-/// # Returns
-/// `0` on success, or a negative Linux error code on failure.
-pub fn setpgid(target: u64, pgid: u64) -> i64 {
-    // wave9 G7a: the rule (`lx::proc::rules`), then the primitive
-    use crate::lx::proc as mech;
-    let (_, pid) = current_ids();
-    let target = if target == 0 { pid } else { target };
-    // (one hold of the table for the rule and the change)
-    match mech::task_pgrp_update(target, |t, _| mech::rules::setpgid(pid, t, pgid).map(|g| (g, false))) {
-        Ok(_) => 0,
-        Err(e) => e,
-    }
-}
-
-/// Creates a new session if the calling process is not a process group leader.
-///
-/// # Returns
-/// The new session ID on success, or a negative Linux error code on failure.
-pub fn setsid() -> i64 {
-    // wave9 G7a: the rule (`lx::proc::rules`), then the primitive
-    use crate::lx::proc as mech;
-    let (_, pid) = current_ids();
-    // (one hold of the table for the rule and the change)
-    match mech::task_pgrp_update(pid, |me, used| mech::rules::setsid(me, used(pid, pid)).map(|s| (s, true))) {
-        Ok(sid) => sid as i64,
-        Err(e) => e,
-    }
 }
 
 /// Thread IDs of process `pid` (just `pid` itself if the process has no thread records).
@@ -1976,18 +1894,6 @@ pub fn sigchld_details(parent: u64) -> (i32, u64, i32) {
         return (CLD_CONTINUED, c.pid, SIGCONT as i32);
     }
     (0, 0, 0)
-}
-
-/// Takes the lowest pending signal in `mask` for the calling thread (its own pending set
-/// first, then the process's) without delivering it (`signalfd` reads).
-///
-/// # Arguments
-/// * `mask` - Mask of signals eligible to be taken.
-///
-/// # Returns
-/// `Some(signal_number)` if a pending signal was found and dequeued, or `None`.
-pub fn take_signal(mask: u64) -> Option<u32> {
-    take_signal_info(mask).map(|i| i.signo)
 }
 
 /// What `siginfo` reports about a signal taken with [`take_signal_info`].

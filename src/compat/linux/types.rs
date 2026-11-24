@@ -80,6 +80,8 @@ pub const EIO: i64 = 5;
 pub const ENXIO: i64 = 6;
 /// Bad file descriptor (`EBADF`).
 pub const EBADF: i64 = 9;
+/// Not a socket (`ENOTSOCK`).
+pub const ENOTSOCK: i64 = 88;
 /// Resource temporarily unavailable / operation would block (`EAGAIN` / `EWOULDBLOCK`).
 pub const EAGAIN: i64 = 11;
 /// Out of memory (`ENOMEM`).

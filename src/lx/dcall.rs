@@ -218,11 +218,8 @@ fn my_svc() -> SvcId {
     crate::task::current_service().and_then(svc::host_by_endpoint).unwrap_or(0)
 }
 
-/// Service `target`'s host when it serves calls now (`None`: in the kernel, or not running).
+/// Service `target`'s host when it serves calls now (`None`: not running).
 fn target_host(target: SvcId) -> Option<&'static svc::Host> {
-    if svc::mode(target) == svc::SvcMode::Kernel {
-        return None;
-    }
     svc::host(svc::host_of(target)).filter(|x| x.is_online())
 }
 
@@ -234,9 +231,6 @@ fn target_host(target: SvcId) -> Option<&'static svc::Host> {
 /// `-ENOSYS` (not a forwarded service, or not running and not restarting), `-EIO` (given
 /// up by the ladder, or not back within 30 s), `-EINTR` (a signal came while waiting).
 fn dcall_host(target: SvcId) -> Result<&'static svc::Host, i64> {
-    if svc::mode(target) == svc::SvcMode::Kernel {
-        return Err(ENOSYS);
-    }
     let x = svc::host(svc::host_of(target)).ok_or(ENOSYS)?;
     if x.is_online() {
         return Ok(x);

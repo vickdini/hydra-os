@@ -38,9 +38,6 @@ pub(crate) fn reset_all() {
     netwaits(|w| w.clear());
     RELAY_SERVER.store(false, Ordering::Release);
     WATCHED_NET.store(0, Ordering::Release);
-    ALL_KERNEL.store(false, Ordering::Release);
-    STEP4.store(false, Ordering::Release);
-    KERNEL_BY_BOOT_OPTION.store(false, Ordering::Release);
     *BOOT_WORDS.lock() = ([0; 256], 0);
     FAMILIES.store(0, Ordering::Release);
     for f in FAMILY_SVC.iter() {
@@ -71,8 +68,8 @@ pub(crate) fn world() -> Sim {
     // wave8 GX2: these tests were written with the network and IPC pieces co-located in
     // linux-server (one fake host serves everything): `lx.net=linux`, `lx.ipc=linux`
     // keeps that arrangement (the split defaults: `split_defaults_route_to_lx_net_and_lx_ipc`)
-    svc::init(b"net=linux+ipc=linux");
-    set_forwarding(true);
+    crate::lx::svc::tests::init_colocated(b"net=linux+ipc=linux");
+    set_forwarding();
     let mut p = crate::compat::linux::proc::Process::default();
     p.groups = vec![1000, 27];
     p.pgid = 100;
@@ -290,7 +287,6 @@ fn set_forwarding_routes_the_moved_calls() {
     assert_eq!(family_svc(2), LXS_NET);
     assert_eq!(family_svc(1), LXS_IPC);
     assert_eq!(family_svc(17), 0);
-    assert!(STEP4.load(Ordering::Relaxed));
     assert_eq!(route(250), Route::Server);
     assert_eq!(route(39), Route::Kernel);
     assert!(keys_forwarded());
@@ -298,32 +294,32 @@ fn set_forwarding_routes_the_moved_calls() {
     assert_eq!(entry(600), 0);
     assert_eq!(entry(PRIV_BASE + 200), 0);
     assert_eq!(entry(u64::MAX), 0);
-    // Off: everything back to the kernel
-    set_forwarding(false);
+}
+
+/// The tables emptied (the tests' "nothing routed" start; wave10 G10-C: no switch back
+/// empties them any more).
+pub(crate) fn clear_forwarding() {
+    for e in TABLE.iter().chain(PRIV.iter()) {
+        e.store(0, Ordering::Release);
+    }
+    FAMILIES.store(0, Ordering::Release);
+    for f in FAMILY_SVC.iter() {
+        f.store(0, Ordering::Release);
+    }
+}
+
+#[test]
+fn clear_forwarding_empties_the_tables() {
+    let _sim = world();
+    clear_forwarding();
     assert_eq!(entry(250), 0);
     assert_eq!(entry(41), 0);
     assert_eq!(entry(0), 0);
     assert_eq!(entry(LX_TEST_NR), 0);
     assert!(!family_moved(2));
-    assert!(!STEP4.load(Ordering::Relaxed));
     assert!(!keys_forwarded());
-}
-
-#[test]
-fn a_service_switched_back_stays_in_the_kernel() {
-    let _sim = world();
-    svc::tests::reset();
-    svc::init(b"lx.ipc=kernel lx.net=kernel");
-    set_forwarding(true);
-    assert_eq!(entry(240), 0);
-    assert_ne!(entry(250), 0);
-    // Both socket services switched back: no family moved, no socket call routed
-    assert!(!family_moved(1));
-    assert!(!family_moved(2));
-    assert_eq!(entry(41), 0);
-    assert_eq!(entry(44), 0);
-    assert!(!STEP4.load(Ordering::Relaxed));
-    assert!(!step4());
+    set_forwarding();
+    assert!(keys_forwarded());
 }
 
 // wave8 GX2 begin
@@ -332,7 +328,7 @@ fn split_defaults_route_to_lx_net_and_lx_ipc() {
     let _sim = world();
     svc::tests::reset();
     svc::init(b"");
-    set_forwarding(true);
+    set_forwarding();
     // The service and its own process (lx-net, lx-ipc), not linux-server
     assert_eq!(by_args(240, &[0; 6]), Some(Target { svc: LXS_IPC, host: LXS_IPC }));
     assert_eq!(by_args(22, &[0; 6]), Some(Target { svc: LXS_IPC, host: LXS_IPC }));
@@ -344,15 +340,14 @@ fn split_defaults_route_to_lx_net_and_lx_ipc() {
     assert_eq!(svc::endpoint_of(svc::host_of(LXS_IPC)), ENDPOINT_LX_IPC);
     // Keys stay with lx-sec, the rest with linux-server
     assert_eq!(by_args(250, &[0; 6]), Some(Target { svc: LXS_SEC, host: LXS_SEC }));
-    // One switched back: the other stays split
+    // The old switch-back word changes nothing (wave10 G10-C)
     svc::tests::reset();
     svc::init(b"lx.net=kernel");
-    set_forwarding(true);
-    assert_eq!(by_args(41, &[2, 1, 0, 0, 0, 0]), None);
-    assert_eq!(by_args(22, &[0; 6]), Some(Target { svc: LXS_IPC, host: LXS_IPC }));
+    set_forwarding();
+    assert_eq!(by_args(41, &[2, 1, 0, 0, 0, 0]), Some(Target { svc: LXS_NET, host: LXS_NET }));
     svc::tests::reset();
-    svc::init(b"net=linux+ipc=linux");
-    set_forwarding(true);
+    crate::lx::svc::tests::init_colocated(b"net=linux+ipc=linux");
+    set_forwarding();
 }
 // wave8 GX2 end
 
@@ -395,23 +390,16 @@ fn boot_words_and_init() {
     }
     svc::tests::reset();
     init();
-    assert!(all_kernel());
-    assert_eq!(entry(250), 0);
-    assert!(crate::fake::logged("in the kernel (switched back: lx=kernel)"));
-    // fw_cfg words come first; the boot entry's words after them
+    assert_ne!(entry(250), 0);
+    assert!(crate::fake::logged("forwarded to their services"));
+    assert!(crate::fake::logged("[lx] lx=kernel: ignored"));
+    // fw_cfg words come first; the boot entry's words after them (only logged now)
     reset_all();
     crate::fake::rec(|r| r.fwcfg.insert("opt/hydra/lx".into(), b"lx.net=kernel".to_vec()));
     init();
-    assert!(!all_kernel());
-    assert_eq!(svc::mode(LXS_NET), svc::SvcMode::Kernel);
-    assert_ne!(entry(250), 0);
-    assert!(crate::fake::logged("forwarded to their services"));
-    // The boot option alone
-    reset_all();
+    assert!(crate::fake::logged("[lx] lx.net=kernel: ignored"));
+    assert_ne!(entry(41), 0);
     crate::fake::rec(|r| r.fwcfg.clear());
-    KERNEL_BY_BOOT_OPTION.store(true, Ordering::Release);
-    init();
-    assert!(all_kernel());
     // Words that would overflow the buffer are dropped
     reset_all();
     let long = [b'l'; 300];
@@ -422,18 +410,23 @@ fn boot_words_and_init() {
 #[test]
 fn forward_answers_the_null_call_and_unrouted_calls() {
     let _sim = world();
-    set_forwarding(false);
+    crate::lx::tests::clear_forwarding();
     assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(0));
     assert_eq!(forward(&frame(39, [0; 6])), None);
-    set_forwarding(true);
-    // linux-server is not running: its calls are not implemented
-    assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(ENOSYS));
+    set_forwarding();
+    // linux-server is not running: EIO (wave10 G10-C: no kernel copy answers instead)
+    assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(EIO));
     // ... and fail with EIO once the ladder gave it up
     restart::tests::set_down(LXS_LINUX, true);
     assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(EIO));
     restart::tests::set_down(LXS_LINUX, false);
-    // A family whose service is not online goes to the kernel
-    assert_eq!(forward(&frame(41, [2, 1, 0, 0, 0, 0])), None);
+    // A family whose service is not running: EIO (wave10 G10-C: no kernel copy); a family
+    // no service has is the kernel's (its dispatcher answers EAFNOSUPPORT)
+    assert_eq!(forward(&frame(41, [2, 1, 0, 0, 0, 0])), Some(EIO));
+    // ... and one the ladder gave up: EIO too
+    restart::tests::set_down(svc::host_of(LXS_NET), true);
+    assert_eq!(forward(&frame(41, [2, 1, 0, 0, 0, 0])), Some(EIO));
+    restart::tests::set_down(svc::host_of(LXS_NET), false);
     assert_eq!(forward(&frame(41, [17, 1, 0, 0, 0, 0])), None);
     // A by-descriptor call on a descriptor holding no server object
     assert_eq!(forward(&frame(44, [3, 0, 0, 0, 0, 0])), None);
@@ -558,16 +551,9 @@ fn the_vfs_walk_call_routes_to_vfs_server_with_its_context() {
     });
     vfs_ctx(&mut c);
     assert_eq!((c.root, c.cwd), (u64::MAX, 0));
-    // wave9 G9-C: `lx.vfs=kernel` is ignored; `lx=kernel` still takes this test call away (the
-    // walk's redirects need the other services forwarded)
+    // wave9 G9-C / wave10 G10-C: `lx.vfs=kernel` is ignored
     svc::init(b"lx.vfs=kernel");
-    set_forwarding(true);
-    assert_eq!(entry_svc(entry(LX_VFS_WALK_NR)), LXS_VFS);
-    svc::tests::reset();
-    svc::init(b"");
-    set_forwarding(false);
-    assert_eq!(entry(LX_VFS_WALK_NR), 0);
-    set_forwarding(true);
+    set_forwarding();
     assert_eq!(entry_svc(entry(LX_VFS_WALK_NR)), LXS_VFS);
 }
 // wave7 G7-1 end

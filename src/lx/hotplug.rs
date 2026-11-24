@@ -162,10 +162,10 @@ fn task() {
     crate::task::exit();
 }
 
-/// Hands messages to every uevent socket: the kernel's own, and the network service's.
-/// Returns how many sockets got one.
+/// Hands messages to every uevent socket (the network service's: wave 10 10-C deleted the
+/// kernel's own netlink sockets). Returns how many sockets got one.
 fn deliver(msgs: &[(u32, Vec<u8>)]) -> usize {
-    let mut reached = crate::compat::linux::netlink::uevent_all(msgs);
+    let mut reached = 0;
     if super::family_svc(16) == 0 {
         return reached;
     }

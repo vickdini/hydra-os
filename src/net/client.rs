@@ -33,16 +33,10 @@ use crate::ipc::service::{self, CALL_TIMEOUT_TICKS};
 use crate::ipc::Message;
 use crate::task::wait::WaitQueue;
 
-/// Linux errno for Connection Refused (`-111`).
-pub const ECONNREFUSED: i64 = -111;
 /// Linux errno for Connection Reset by Peer (`-104`).
 pub const ECONNRESET: i64 = -104;
 /// Linux errno for Connection Timed Out (`-110`).
 pub const ETIMEDOUT: i64 = -110;
-/// Linux errno for Transport Endpoint Is Not Connected (`-107`).
-pub const ENOTCONN: i64 = -107;
-/// Linux errno for Broken Pipe (`-32`).
-pub const EPIPE: i64 = -32;
 /// Linux errno for Network Is Unreachable (`-101`).
 pub const ENETUNREACH: i64 = -101;
 /// Linux errno for Network Is Down (`-100`): the network server is gone.
@@ -101,11 +95,6 @@ pub const V6_LOOPBACK: [u8; 4] = [0, 0, 0, 1];
 /// The network card's IPv6 link-local address (`fe80::` from its MAC, as Linux assigns one
 /// to every interface), carried the same way: usable on this host only.
 pub const V6_LINKLOCAL: [u8; 4] = [0, 0, 0, 2];
-
-/// Whether `ip` is one of the IPv6 addresses above.
-pub fn is_v6(ip: [u8; 4]) -> bool {
-    ip == V6_LOOPBACK || ip == V6_LINKLOCAL
-}
 
 // ----------------------------------------------------------------------
 // Handles, the status area and the doorbell
@@ -187,16 +176,6 @@ fn alive(id: u32) -> bool {
     sid(id).is_some()
 }
 
-/// Whether socket `id` died with its server (its operations fail from now on).
-pub fn dead(id: u32) -> bool {
-    !alive(id)
-}
-
-/// The kernel handle of the running server's handle `sid` (0 if the kernel holds none).
-fn kid_of(sid: u32) -> u32 {
-    handles(|_, by| by.get(&sid).copied().unwrap_or(0))
-}
-
 /// Reads status-area word `i` of the server's window.
 fn status_word(w: &[u8], i: usize) -> u64 {
     unsafe { core::ptr::read_volatile((w.as_ptr().add(NETS_STATUS_OFF) as *const u64).add(i)) }
@@ -273,11 +252,6 @@ fn wake_all() {
     for q in queues {
         q.wake_all();
     }
-}
-
-/// The wait queue of socket `id`: woken when its readiness changes.
-pub fn wait_queue(id: u32) -> Option<Arc<WaitQueue>> {
-    handles(|h, _| h.get(&id).map(|x| x.wq.clone()))
 }
 
 /// Whether the network server runs (socket waits then sleep until woken).
@@ -448,21 +422,6 @@ pub fn tcp_state(id: u32) -> TcpState {
     word(id).map_or(TcpState::Closed, |w| TcpState::from_number((w >> 40) & 0xFF))
 }
 
-/// Takes and clears the pending error of connection `id` (`SO_ERROR`); a connection that
-/// died with its server reports `ECONNRESET`.
-pub fn tcp_take_error(id: u32) -> Option<i64> {
-    if !alive(id) {
-        return handles(|h, _| h.contains_key(&id)).then_some(ECONNRESET);
-    }
-    if word(id).is_some_and(|w| w >> 48 == 0) {
-        return None;
-    }
-    match on(id, ECONNRESET, MSG_NETS_TCP_TAKE_ERROR, [0; 4]) {
-        Ok(r) if r[0] != 0 => Some(-(r[0] as i64)),
-        _ => None,
-    }
-}
-
 /// Queues `data` for transmission on connection `id`: the bytes taken (0: no room yet).
 ///
 /// # Errors
@@ -502,202 +461,15 @@ pub fn tcp_recv(id: u32, buf: &mut [u8], peek: bool) -> Result<(usize, bool), i6
     })
 }
 
-/// The readiness of connection `id`: `(readable, writable, hang_up, error)`.
-pub fn tcp_poll(id: u32) -> (bool, bool, bool, bool) {
-    match word(id) {
-        Some(w) => {
-            let b = bits(w);
-            (b & NETS_R_IN != 0, b & NETS_R_OUT != 0, b & NETS_R_HUP != 0, b & NETS_R_ERR != 0)
-        }
-        None => (true, false, true, !alive(id)),
-    }
-}
-
-/// Shuts down the write half of connection `id` (`FIN` after the buffered data).
-pub fn tcp_shutdown_write(id: u32) {
-    let _ = on(id, ECONNRESET, MSG_NETS_TCP_SHUTDOWN, [0, 0, 0, 0]);
-}
-
 /// Closes connection `id` (it finishes in the background).
 pub fn tcp_close(id: u32) {
     let _ = on(id, ECONNRESET, MSG_NETS_TCP_CLOSE, [0, 0, 0, 0]);
     untrack(id);
 }
 
-/// `(local port, remote address, remote port, local address)` of connection `id`.
-fn tcp_info(id: u32) -> Option<(u16, [u8; 4], u16, [u8; 4])> {
-    let r = on(id, ENOTCONN, MSG_NETS_TCP_INFO, [0, 0, 0, 0]).ok()?;
-    Some((r[1] as u16, ip_of(r[2] >> 16), r[2] as u16, ip_of(r[1] >> 16)))
-}
-
-/// `(local_port, remote_ip, remote_port)` of connection `id`.
-pub fn tcp_endpoints(id: u32) -> Option<(u16, [u8; 4], u16)> {
-    tcp_info(id).map(|(lp, rip, rp, _)| (lp, rip, rp))
-}
-
-/// Local address of connection `id`.
-pub fn tcp_local_ip(id: u32) -> Option<[u8; 4]> {
-    tcp_info(id).map(|i| i.3)
-}
-
-/// Reserves TCP port `port` (0: a free one) on `ip` for `bind`, with Linux's
-/// `SO_REUSEADDR` / `SO_REUSEPORT` rules (net-server applies them): `(handle, port)`.
-///
-/// # Errors
-/// `EADDRINUSE`.
-pub fn tcp_bind(ip: [u8; 4], port: u16, reuse_addr: bool, reuse_port: bool, v4: bool, v6: bool) -> Result<(u32, u16), i64> {
-    let flags = reuse_addr as u64 | (reuse_port as u64) << 1 | (v4 as u64) << 2 | (v6 as u64) << 3;
-    let r = request(MSG_NETS_TCP_BIND, [addr(ip), port as u64, flags, 0])?;
-    Ok((track(r[0] as u32), r[1] as u16))
-}
-
-/// Releases port reservation `id`.
-pub fn tcp_unbind(id: u32) {
-    let _ = on(id, ENOTCONN, MSG_NETS_TCP_UNBIND, [0, 0, 0, 0]);
-    untrack(id);
-}
-
-/// Starts listening on reservation `bind` with `backlog`: the listener's handle.
-///
-/// # Errors
-/// `EADDRINUSE` if another socket listens on the port.
-pub fn tcp_listen(bind: u32, backlog: usize) -> Result<u32, i64> {
-    let r = on(bind, ENETDOWN, MSG_NETS_TCP_LISTEN, [0, backlog as u64, 0, 0])?;
-    Ok(track(r[0] as u32))
-}
-
-/// Changes listener `id`'s backlog (a second `listen`).
-pub fn tcp_set_backlog(id: u32, backlog: usize) {
-    let _ = on(id, ENETDOWN, MSG_NETS_TCP_BACKLOG, [0, backlog as u64, 0, 0]);
-}
-
-/// Takes the next established connection of listener `id`.
-pub fn tcp_accept(id: u32) -> Option<u32> {
-    if word(id).is_some_and(|w| bits(w) & NETS_R_ACCEPT == 0) {
-        return None;
-    }
-    let c = on(id, ENETDOWN, MSG_NETS_TCP_ACCEPT, [0, 0, 0, 0]).ok()?[0] as u32;
-    Some(track(c))
-}
-
-/// Whether listener `id` has a connection to accept (or died: accept then fails).
-pub fn tcp_acceptable(id: u32) -> bool {
-    word(id).map_or(dead(id), |w| bits(w) & NETS_R_ACCEPT != 0)
-}
-
-/// Stops listener `id`: connections not yet accepted are reset.
-pub fn tcp_unlisten(id: u32) {
-    let _ = on(id, ENETDOWN, MSG_NETS_TCP_UNLISTEN, [0, 0, 0, 0]);
-    untrack(id);
-}
-
-/// A TCP connection as `/proc/net/tcp` shows it.
-pub struct TcpEntry {
-    /// Connection handle (the kernel's; 0 if the kernel holds none, as for one closed and
-    /// finishing in the background).
-    pub id: u32,
-    /// Local address and port.
-    pub local: ([u8; 4], u16),
-    /// Remote address and port.
-    pub remote: ([u8; 4], u16),
-    /// State.
-    pub state: TcpState,
-    /// Bytes queued to send (unsent or unacknowledged).
-    pub tx: usize,
-    /// Bytes received and not yet read.
-    pub rx: usize,
-}
-
-/// All TCP connections.
-pub fn tcp_list() -> Vec<TcpEntry> {
-    list(0)
-        .into_iter()
-        .map(|r| TcpEntry {
-            id: kid_of(r[0] as u32),
-            local: (ip_of(r[1] >> 16), r[1] as u16),
-            remote: (ip_of(r[2] >> 16), r[2] as u16),
-            state: TcpState::from_number(r[3]),
-            tx: r[4] as usize,
-            rx: r[5] as usize,
-        })
-        .collect()
-}
-
-/// All listeners: `(handle, address, port, connections waiting to be accepted, backlog)`.
-pub fn listener_list() -> Vec<(u32, [u8; 4], u16, usize, usize)> {
-    list(1).into_iter().map(|r| (kid_of(r[0] as u32), ip_of(r[1] >> 16), r[1] as u16, r[2] as usize, r[3] as usize)).collect()
-}
-
-/// All UDP sockets: `(handle, port, bytes queued)`.
-pub fn udp_list() -> Vec<(u32, u16, usize)> {
-    list(2).into_iter().map(|r| (kid_of(r[0] as u32), r[1] as u16, r[2] as usize)).collect()
-}
-
 // ----------------------------------------------------------------------
 // UDP
 // ----------------------------------------------------------------------
-
-/// Opens a UDP socket bound to `port` (`0` allocates an ephemeral port).
-///
-/// # Errors
-/// `EADDRINUSE` if `port` is taken.
-pub fn udp_open(port: u16) -> Result<u32, i64> {
-    let r = request(MSG_NETS_UDP_OPEN, [port as u64, 0, 0, 0])?;
-    Ok(track(r[0] as u32))
-}
-
-/// Moves UDP socket `id` to `port` (0: keep its port), as `bind` after an implicit open.
-pub fn udp_rebind(id: u32, port: u16) -> Result<(), i64> {
-    on(id, ENETDOWN, MSG_NETS_UDP_REBIND, [0, port as u64, 0, 0]).map(|_| ())
-}
-
-/// The local port of UDP socket `id` (0 if unknown).
-pub fn udp_port(id: u32) -> u16 {
-    on(id, ENETDOWN, MSG_NETS_UDP_PORT, [0, 0, 0, 0]).map_or(0, |r| r[0] as u16)
-}
-
-/// Sends a datagram from UDP socket `id` to `ip:port`: its length.
-///
-/// # Errors
-/// `ENETUNREACH` if the interface is down, `EMSGSIZE` if it is too long, `ENETDOWN` if
-/// the socket died with its server.
-pub fn udp_send(id: u32, ip: [u8; 4], port: u16, data: &[u8]) -> Result<usize, i64> {
-    if !alive(id) {
-        return Err(ENETDOWN);
-    }
-    if data.len() > CHUNK {
-        return Err(-90); // EMSGSIZE
-    }
-    with_window(|w| {
-        w[..data.len()].copy_from_slice(data);
-        Ok(on(id, ENETDOWN, MSG_NETS_UDP_SEND, [0, addr(ip) << 16 | port as u64, 0, data.len() as u64])?[0] as usize)
-    })
-}
-
-/// Takes (or peeks at) the next datagram of UDP socket `id`: `(source, source port,
-/// payload, arrival time)`; `None` if none waits (or it died: see [`dead`]).
-pub fn udp_recv(id: u32, peek: bool) -> Option<([u8; 4], u16, Vec<u8>, u64)> {
-    if word(id).is_some_and(|w| bits(w) & NETS_R_IN == 0) || !alive(id) {
-        return None;
-    }
-    with_window(|w| {
-        let r = on(id, ENETDOWN, MSG_NETS_UDP_RECV, [0, 0, peek as u64, 0])?;
-        let n = (r[0] as usize).min(NETS_DATA_LEN);
-        Ok((ip_of(r[1] >> 16), r[1] as u16, w[..n].to_vec(), r[2]))
-    })
-    .ok()
-}
-
-/// Whether UDP socket `id` has a datagram waiting.
-pub fn udp_readable(id: u32) -> bool {
-    word(id).is_some_and(|w| bits(w) & NETS_R_IN != 0)
-}
-
-/// Closes UDP socket `id`.
-pub fn udp_close(id: u32) {
-    let _ = on(id, ENETDOWN, MSG_NETS_UDP_CLOSE, [0, 0, 0, 0]);
-    untrack(id);
-}
 
 // ----------------------------------------------------------------------
 // ICMP sockets
@@ -710,16 +482,6 @@ pub fn icmp_open(raw: bool, v6: bool) -> u32 {
         Ok(r) => track(r[0] as u32),
         Err(_) => 0,
     }
-}
-
-/// Echo identifier of ping socket `id`.
-pub fn icmp_ident(id: u32) -> u16 {
-    on(id, ENETDOWN, MSG_NETS_ICMP_IDENT, [0, 0, 0, 0]).map_or(0, |r| r[0] as u16)
-}
-
-/// Gives ping socket `id` echo identifier `ident` (`bind`); `EADDRINUSE` if taken.
-pub fn icmp_set_ident(id: u32, ident: u16) -> Result<(), i64> {
-    on(id, ENETDOWN, MSG_NETS_ICMP_SET_IDENT, [0, ident as u64, 0, 0]).map(|_| ())
 }
 
 /// Sends ICMP message `msg` from socket `id` to `dst` (a ping socket's must be an echo
@@ -748,11 +510,6 @@ pub fn icmp_recv(id: u32, peek: bool) -> Option<([u8; 4], Vec<u8>, u64)> {
         Ok((ip_of(r[1]), w[..n].to_vec(), r[2]))
     })
     .ok()
-}
-
-/// Whether ICMP socket `id` has a message.
-pub fn icmp_readable(id: u32) -> bool {
-    word(id).is_some_and(|w| bits(w) & NETS_R_IN != 0)
 }
 
 /// Closes ICMP socket `id`.

@@ -106,12 +106,6 @@ pub fn status(dir: usize) -> Option<SndStatus> {
     Some(st)
 }
 
-/// Whether the sound service answers the ALSA devices now (not `lx.sound=kernel` nor
-/// `lx=kernel`): the in-kernel layer then keeps its hands off the card.
-pub fn forwarded() -> bool {
-    !crate::lx::all_kernel() && crate::lx::svc::mode(LXS_SOUND) == crate::lx::svc::SvcMode::Forward
-}
-
 /// Fills `info` with the card and, through `give`, new handles of the service at
 /// `endpoint` (split out so the host tests run it without the memory-object tables).
 fn fill_info(info: &mut LxSndInfo, give: &mut dyn FnMut(&Arc<MemObject>) -> Result<u32, i64>) -> Result<(), i64> {
@@ -145,7 +139,7 @@ fn fill_info(info: &mut LxSndInfo, give: &mut dyn FnMut(&Arc<MemObject>) -> Resu
 /// `SYS_LX_OBJ(LX_OBJ_SND, sub-op, x, y)` from host `h`: the sound service's operations
 /// (the `LX_SND_*` sub-ops in `ipc/protocol.rs`).
 pub fn ctl(h: u8, op: u64, x: u64, y: u64) -> i64 {
-    if !forwarded() || crate::lx::svc::host_of(LXS_SOUND) != h || crate::task::current_service() != Some(ENDPOINT_LX_SOUND) {
+    if crate::lx::svc::host_of(LXS_SOUND) != h || crate::task::current_service() != Some(ENDPOINT_LX_SOUND) {
         return EPERM;
     }
     match op {
@@ -221,9 +215,6 @@ fn guard_task() {
 /// rings, so the controller plays a gap until the new instance stops the stream; its
 /// driving threads get their own priority back.
 pub fn service_gone() {
-    if !forwarded() {
-        return;
-    }
     if let Some(b) = BUFFERS.get().and_then(|b| b.as_ref()) {
         // The playback ring only (the controller writes the capture ring)
         if let Some(r) = &b.rings[0] {

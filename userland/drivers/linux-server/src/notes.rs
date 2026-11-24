@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{fence, AtomicU64, Ordering};
 
-use hydra_rt::protocol::{LX_NOTES, LX_NOTES_ENTRY_OFF, LX_NOTES_OFF, LX_NOTE_CLOSE, LX_NOTE_EXEC, LX_NOTE_EXIT, LX_NOTE_FORK, LX_NOTE_INTERRUPT, LX_NOTE_TIMER};
+use hydra_rt::protocol::{LX_NOTES, LX_NOTES_ENTRY_OFF, LX_NOTES_OFF, LX_NOTE_CLOSE, LX_NOTE_INTERRUPT};
 
 use crate::lock::YLock;
 
@@ -63,25 +63,11 @@ fn take(seq: u64) {
         let e = (BASE.load(Ordering::Acquire) - LX_NOTES_OFF as u64 + LX_NOTES_ENTRY_OFF as u64 + (t % LX_NOTES) * 32) as *const u64;
         // SAFETY: the entry lies in the mapped window
         let (kind, a, b) = unsafe { (core::ptr::read_volatile(e), core::ptr::read_volatile(e.add(1)), core::ptr::read_volatile(e.add(2))) };
-        // wave10 G8-2: System V shared memory's attachment notes (`lx.ipc=linux`)
-        // SAFETY: as above
-        let c = unsafe { core::ptr::read_volatile(e.add(3)) };
+        // (wave10 G10-C: forks, execs and exits matter only to the pieces that are lx-sec's,
+        // lx-net's and lx-ipc's alone now)
         match kind {
-            LX_NOTE_FORK => crate::keys::on_fork(a, b),
-            LX_NOTE_EXEC => crate::keys::on_exec(a, b),
-            LX_NOTE_EXIT => {
-                crate::keys::on_exit(a);
-                // wave8 GX2: the IPC and network pieces (co-located here or not: harmless)
-                crate::ipcsvc::on_exit(a);
-                crate::netsvc::on_exit(a);
-            }
             LX_NOTE_INTERRUPT => crate::interrupted(a),
             LX_NOTE_CLOSE => crate::obj::closed(a as u32, b as u32),
-            // Group 13: timer_arm (cookies: the top byte says whose)
-            LX_NOTE_TIMER => {
-                crate::ipcsvc::timer(a); // wave8 GX2
-            }
-            hydra_rt::protocol::LX_NOTE_SHM => crate::sysv::on_shm_note(a, b, c), // wave10 G8-2
             _ => {}
         }
         t += 1;

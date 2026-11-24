@@ -669,13 +669,14 @@ fn restart_support_adopt_dead_and_list() {
 }
 
 #[test]
-fn offline_lets_pins_go_and_clears_bpf_device_programs() {
+fn offline_lets_pins_go_and_keeps_bpf_device_programs() {
     let sim = world();
     let s = start(&sim, LXS_SEC, 500, 1, true, obj_handler());
     s.x.objs.pins.lock().insert(1, StdArc::new(Plain));
     offline(s.x);
     assert!(s.x.objs.pins.lock().is_empty());
-    assert_eq!(crate::fake::rec(|r| r.bpf_programs.clone()), vec![Vec::<u8>::new()]);
+    // (wave10 G10-C: the device programs stay; only a service given up drops them)
+    assert!(crate::fake::rec(|r| r.bpf_programs.is_empty()));
     // The area is made once and kept across restarts
     assert_eq!(s.x.objs.area.load(Ordering::Relaxed), 0);
     assert_eq!(online(s.x), 0);

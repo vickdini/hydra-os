@@ -592,9 +592,7 @@ fn commit(frame: &mut SyscallFrame, fpu: *mut FpuState, r: Ready) -> i64 {
     // Close-on-exec descriptors close outside the scheduler lock: releasing a file is a
     // request to the file server
     crate::task::with_current_fds_mut(|fds| fds.close_on_exec());
-    // The thread and process keyrings do not survive exec
     let (tid, tgid) = super::proc::current_ids();
-    super::keys::on_exec(tid, tgid);
     crate::lx::note(crate::ipc::protocol::LX_NOTE_EXEC, tid, tgid, 0);
     // wave10 G7b-1: the new program's name; dumpable again
     crate::lx::proc::attrs_on_exec(tid, tgid);

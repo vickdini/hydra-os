@@ -19,41 +19,26 @@
 //!   Ubuntu.
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-use super::chardev::CharDevice;
-use super::vfs::{copy_in, copy_out};
-use crate::task::wait::WaitSet;
 
 const EPERM: i64 = -1;
 const ENOENT: i64 = -2;
-const EBADF: i64 = -9;
 const E2BIG: i64 = -7;
-const EFAULT: i64 = -14;
 const EEXIST: i64 = -17;
 const EINVAL: i64 = -22;
-const EMFILE: i64 = -24;
-const ENOSPC: i64 = -28;
-const ENOTSUPP: i64 = -524;
 
 // Map types
-const MAP_HASH: u32 = 1;
 const MAP_ARRAY: u32 = 2;
-const MAP_PERCPU_HASH: u32 = 5;
 const MAP_PERCPU_ARRAY: u32 = 6;
 const MAP_LRU_HASH: u32 = 9;
 const MAP_LRU_PERCPU_HASH: u32 = 10;
 
 // Program types
-const PROG_SOCKET_FILTER: u32 = 1;
-const PROG_CGROUP_SKB: u32 = 8;
-const PROG_CGROUP_SOCK: u32 = 9;
 const PROG_CGROUP_DEVICE: u32 = 15;
-const PROG_CGROUP_SOCK_ADDR: u32 = 18;
-const PROG_CGROUP_SYSCTL: u32 = 23;
 
 // Attach types
 const ATTACH_CGROUP_DEVICE: u32 = 6;
@@ -70,6 +55,7 @@ const HELPERS: &[i32] = &[1, 2, 3, 5, 6, 7, 8, 14, 15, 16, 125];
 // ----------------------------------------------------------------------
 
 /// A map.
+#[allow(dead_code)] // (wave10 G10-C: fields the deleted bpf()/ALSA copy read; kept as the records' shape)
 pub struct Map {
     id: u32,
     kind: u32,
@@ -86,14 +72,6 @@ impl Map {
     fn is_array(&self) -> bool {
         matches!(self.kind, MAP_ARRAY | MAP_PERCPU_ARRAY)
     }
-    /// The value size user space sees (per-CPU maps: one 8-byte aligned value per CPU).
-    fn user_value_size(&self) -> usize {
-        if matches!(self.kind, MAP_PERCPU_HASH | MAP_PERCPU_ARRAY | MAP_LRU_PERCPU_HASH) {
-            (self.value_size as usize + 7) & !7
-        } else {
-            self.value_size as usize
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -106,6 +84,7 @@ struct Insn {
 }
 
 /// A loaded program.
+#[allow(dead_code)] // (wave10 G10-C: fields the deleted bpf()/ALSA copy read; kept as the records' shape)
 pub struct Prog {
     id: u32,
     kind: u32,
@@ -116,82 +95,9 @@ pub struct Prog {
     tag: [u8; 8],
 }
 
-/// A link: a program attached to a cgroup until the link goes.
-pub struct Link {
-    id: u32,
-    prog: Arc<Prog>,
-    cgroup: String,
-    attach_type: u32,
-    detached: AtomicBool,
-}
-
-/// BTF data, kept as given.
-pub struct Btf {
-    id: u32,
-}
-
-/// The object behind a bpf descriptor.
-#[derive(Clone)]
-pub enum Obj {
-    /// A map.
-    Map(Arc<Map>),
-    /// A program.
-    Prog(Arc<Prog>),
-    /// A link.
-    Link(Arc<Link>),
-    /// BTF.
-    Btf(Arc<Btf>),
-}
-
-struct BpfDev(Obj);
-
-impl Drop for BpfDev {
-    fn drop(&mut self) {
-        if let Obj::Link(l) = &self.0 {
-            // The last descriptor of a link (a pin holds its own reference) detaches it
-            if Arc::strong_count(l) == 1 {
-                detach_link(l);
-            }
-        }
-    }
-}
-
-impl CharDevice for BpfDev {
-    fn read(&self, _buf: &mut [u8]) -> i64 {
-        EINVAL
-    }
-    fn poll_events(&self) -> u32 {
-        0
-    }
-    fn add_wait_queues(&self, _waits: &mut WaitSet) {}
-    fn rdev(&self) -> u64 {
-        0
-    }
-    fn path(&self) -> String {
-        String::from(match &self.0 {
-            Obj::Map(_) => "anon_inode:bpf-map",
-            Obj::Prog(_) => "anon_inode:bpf-prog",
-            Obj::Link(_) => "anon_inode:bpf_link",
-            Obj::Btf(_) => "anon_inode:btf",
-        })
-    }
-    fn set_nonblock(&self, _on: bool) {}
-    fn nonblock(&self) -> bool {
-        false
-    }
-    fn as_bpf(&self) -> Option<Obj> {
-        Some(self.0.clone())
-    }
-}
-
-static NEXT_ID: AtomicU32 = AtomicU32::new(1);
-static MAPS: Mutex<BTreeMap<u32, Weak<Map>>> = Mutex::new(BTreeMap::new());
-static PROGS: Mutex<BTreeMap<u32, Weak<Prog>>> = Mutex::new(BTreeMap::new());
-static LINKS: Mutex<BTreeMap<u32, Weak<Link>>> = Mutex::new(BTreeMap::new());
-/// Pinned objects by path.
-static PINS: Mutex<BTreeMap<String, Obj>> = Mutex::new(BTreeMap::new());
 
 /// A program attached to a cgroup.
+#[allow(dead_code)] // (wave10 G10-C: fields the deleted bpf()/ALSA copy read; kept as the records' shape)
 struct Attached {
     cgroup: String,
     attach_type: u32,
@@ -203,88 +109,17 @@ struct Attached {
 static ATTACHED: Mutex<Vec<Attached>> = Mutex::new(Vec::new());
 static ANY_DEVICE: AtomicBool = AtomicBool::new(false);
 
-fn new_id() -> u32 {
-    NEXT_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-fn install(obj: Obj) -> i64 {
-    let dev: Arc<dyn CharDevice> = Arc::new(BpfDev(obj));
-    crate::task::with_current_fds_mut(|fds| match fds.alloc_fd(crate::fs::FileDescriptor::Device(dev)) {
-        Ok(fd) => {
-            fds.set_cloexec(fd, true);
-            fd as i64
-        }
-        Err(_) => EMFILE,
-    })
-}
-
-fn obj_of(fd: u32) -> Result<Obj, i64> {
-    let d = crate::task::with_current_fds_mut(|fds| fds.get(fd as i32 as usize).cloned());
-    match d {
-        Some(crate::fs::FileDescriptor::Device(d)) => d.as_bpf().ok_or(EINVAL),
-        Some(_) => Err(EINVAL),
-        None => Err(EBADF),
-    }
-}
-
-fn map_of(fd: u32) -> Result<Arc<Map>, i64> {
-    match obj_of(fd)? {
-        Obj::Map(m) => Ok(m),
-        _ => Err(EINVAL),
-    }
-}
-
-fn prog_of(fd: u32) -> Result<Arc<Prog>, i64> {
-    match obj_of(fd)? {
-        Obj::Prog(p) => Ok(p),
-        _ => Err(EINVAL),
-    }
-}
-
-fn detach_link(l: &Link) {
-    if !l.detached.swap(true, Ordering::Relaxed) {
-        ATTACHED.lock().retain(|a| a.link != l.id);
-    }
+/// (wave10 G10-C: the kernel holds no bpf maps any more: lx-sec's device programs come
+/// without them, so a map reference in a program is refused.)
+fn map_of(_fd: u32) -> Result<Arc<Map>, i64> {
+    Err(EINVAL)
 }
 
 // ----------------------------------------------------------------------
 // Maps
 // ----------------------------------------------------------------------
 
-fn map_create(a: &[u8]) -> i64 {
-    let u = |o: usize| u32::from_le_bytes(a[o..o + 4].try_into().unwrap());
-    let (kind, key_size, value_size, max, flags) = (u(0), u(4), u(8), u(12), u(16));
-    let mut name = [0u8; 16];
-    name.copy_from_slice(&a[28..44]);
-    if !matches!(kind, MAP_HASH | MAP_ARRAY | MAP_PERCPU_HASH | MAP_PERCPU_ARRAY | MAP_LRU_HASH | MAP_LRU_PERCPU_HASH) {
-        return EINVAL;
-    }
-    if value_size == 0 || max == 0 || key_size == 0 || value_size > 65536 || key_size > 512 {
-        return EINVAL;
-    }
-    // Arrays: 4-byte keys, every index present (zeroed)
-    let array = matches!(kind, MAP_ARRAY | MAP_PERCPU_ARRAY);
-    if array && key_size != 4 {
-        return EINVAL;
-    }
-    if (max as u64) * (value_size as u64) > 64 << 20 {
-        return -12; // ENOMEM
-    }
-    let mut entries = BTreeMap::new();
-    if array {
-        for i in 0..max {
-            entries.insert(i.to_le_bytes().to_vec(), alloc::vec![0u8; value_size as usize]);
-        }
-    }
-    let m = Arc::new(Map { id: new_id(), kind, key_size, value_size, max, flags, name, entries: Mutex::new(entries), frozen: AtomicBool::new(false) });
-    MAPS.lock().insert(m.id, Arc::downgrade(&m));
-    install(Obj::Map(m))
-}
-
 impl Map {
-    fn lookup(&self, key: &[u8]) -> Option<Vec<u8>> {
-        self.entries.lock().get(key).cloned()
-    }
 
     /// Update with `BPF_ANY` (0), `BPF_NOEXIST` (1) or `BPF_EXIST` (2).
     fn update(&self, key: &[u8], value: &[u8], flags: u64) -> i64 {
@@ -327,71 +162,6 @@ impl Map {
             return EINVAL;
         }
         if self.entries.lock().remove(key).is_some() { 0 } else { ENOENT }
-    }
-}
-
-fn map_elem(cmd: u32, a: &[u8]) -> i64 {
-    let fd = u32::from_le_bytes(a[0..4].try_into().unwrap());
-    let key_ptr = u64::from_le_bytes(a[8..16].try_into().unwrap());
-    let val_ptr = u64::from_le_bytes(a[16..24].try_into().unwrap());
-    let flags = u64::from_le_bytes(a[24..32].try_into().unwrap());
-    let m = match map_of(fd) {
-        Ok(m) => m,
-        Err(e) => return e,
-    };
-    let key = if key_ptr == 0 && cmd == 4 { None } else {
-        match copy_in(key_ptr, m.key_size as usize) {
-            Ok(k) => Some(k),
-            Err(e) => return e,
-        }
-    };
-    let uvs = m.user_value_size();
-    match cmd {
-        // LOOKUP_ELEM, LOOKUP_AND_DELETE_ELEM
-        1 | 21 => {
-            let Some(v) = m.lookup(key.as_ref().unwrap()) else { return ENOENT };
-            let mut out = v;
-            out.resize(uvs, 0);
-            if copy_out(val_ptr, &out).is_err() {
-                return EFAULT;
-            }
-            if cmd == 21 {
-                if m.is_array() {
-                    return EINVAL;
-                }
-                m.entries.lock().remove(key.as_ref().unwrap());
-            }
-            0
-        }
-        2 => {
-            if m.frozen.load(Ordering::Relaxed) {
-                return EPERM;
-            }
-            let v = match copy_in(val_ptr, uvs) {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            m.update(key.as_ref().unwrap(), &v, flags)
-        }
-        3 => {
-            if m.frozen.load(Ordering::Relaxed) {
-                return EPERM;
-            }
-            m.delete(key.as_ref().unwrap())
-        }
-        // GET_NEXT_KEY: after `key` (the first key when absent or unknown)
-        _ => {
-            let e = m.entries.lock();
-            let next = match &key {
-                Some(k) if e.contains_key(k) => e.range::<Vec<u8>, _>((core::ops::Bound::Excluded(k.clone()), core::ops::Bound::Unbounded)).next().map(|(k, _)| k.clone()),
-                _ => e.keys().next().cloned(),
-            };
-            drop(e);
-            match next {
-                Some(n) => copy_out(val_ptr, &n).map_or(EFAULT, |_| 0),
-                None => ENOENT,
-            }
-        }
     }
 }
 
@@ -513,44 +283,6 @@ fn check(insns: &mut [Insn], maps: &mut Vec<Arc<Map>>) -> Result<(), &'static st
         return Err("last instruction is not an exit or jump");
     }
     Ok(())
-}
-
-fn prog_load(a: &[u8]) -> i64 {
-    let u = |o: usize| u32::from_le_bytes(a[o..o + 4].try_into().unwrap());
-    let q = |o: usize| u64::from_le_bytes(a[o..o + 8].try_into().unwrap());
-    let (kind, cnt, insns_ptr, log_level, log_size, log_buf) = (u(0), u(4) as usize, q(8), u(24), u(28), q(32));
-    if !matches!(kind, PROG_SOCKET_FILTER | PROG_CGROUP_SKB | PROG_CGROUP_SOCK | PROG_CGROUP_DEVICE | PROG_CGROUP_SOCK_ADDR | PROG_CGROUP_SYSCTL) {
-        return EINVAL;
-    }
-    if cnt == 0 || cnt > MAX_INSNS {
-        return E2BIG;
-    }
-    let raw = match copy_in(insns_ptr, cnt * 8) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-    let mut insns = decode(&raw);
-    let mut maps = Vec::new();
-    if let Err(why) = check(&mut insns, &mut maps) {
-        // The reason, in the log buffer (as the verifier writes its log)
-        if log_level != 0 && log_buf != 0 && log_size > 1 {
-            let mut msg = alloc::format!("{}\n", why).into_bytes();
-            msg.truncate(log_size as usize - 1);
-            msg.push(0);
-            let _ = copy_out(log_buf, &msg);
-        }
-        return if log_level != 0 && log_size == 0 { EINVAL } else { -13 }; // EACCES, as a verifier refusal
-    }
-    let mut name = [0u8; 16];
-    name.copy_from_slice(&a[48..64]);
-    // A tag from the instructions (Linux: the first 8 bytes of their SHA-1)
-    let mut tag = [0u8; 8];
-    for (i, b) in raw.iter().enumerate() {
-        tag[i % 8] = tag[i % 8].rotate_left(3) ^ *b;
-    }
-    let p = Arc::new(Prog { id: new_id(), kind, insns, maps, name, tag });
-    PROGS.lock().insert(p.id, Arc::downgrade(&p));
-    install(Obj::Prog(p))
 }
 
 // ----------------------------------------------------------------------
@@ -988,319 +720,6 @@ pub fn set_server_device_programs(raw: &[u8]) -> i64 {
 // Attaching
 // ----------------------------------------------------------------------
 
-/// The cgroup a descriptor names (its path below `/sys/fs/cgroup`; "" is the root).
-fn cgroup_of(fd: u32) -> Result<String, i64> {
-    let d = crate::task::with_current_fds_mut(|fds| fds.get(fd as i32 as usize).cloned());
-    let path = match d {
-        Some(crate::fs::FileDescriptor::Vnode(f)) => f.lock().path.clone(),
-        Some(crate::fs::FileDescriptor::File { path, .. }) => path,
-        Some(_) => return Err(EINVAL),
-        None => return Err(EBADF),
-    };
-    let rest = path.strip_prefix(super::fs::CGROUP_ROOT).ok_or(EINVAL)?;
-    Ok(String::from(rest.trim_end_matches('/')))
-}
-
-/// Which program types attach with which attach types.
-fn attach_ok(kind: u32, attach_type: u32) -> bool {
-    match kind {
-        PROG_CGROUP_SKB => matches!(attach_type, 0 | 1),
-        PROG_CGROUP_SOCK => matches!(attach_type, 2 | 12 | 13 | 25 | 26),
-        PROG_CGROUP_DEVICE => attach_type == ATTACH_CGROUP_DEVICE,
-        PROG_CGROUP_SOCK_ADDR => matches!(attach_type, 8..=11 | 14..=17 | 18 | 19 | 28..=31),
-        PROG_CGROUP_SYSCTL => attach_type == 18,
-        _ => false,
-    }
-}
-
-fn attach(cgroup: String, attach_type: u32, prog: Arc<Prog>, link: u32) {
-    if attach_type == ATTACH_CGROUP_DEVICE {
-        ANY_DEVICE.store(true, Ordering::Relaxed);
-    }
-    ATTACHED.lock().push(Attached { cgroup, attach_type, prog, link });
-}
-
 // ----------------------------------------------------------------------
 // The system call
 // ----------------------------------------------------------------------
-
-fn info(obj: &Obj, ptr: u64, len: u32) -> i64 {
-    let mut out = alloc::vec![0u8; 256];
-    let p32 = |o: &mut [u8], at: usize, v: u32| o[at..at + 4].copy_from_slice(&v.to_le_bytes());
-    let size = match obj {
-        Obj::Prog(p) => {
-            p32(&mut out, 0, p.kind);
-            p32(&mut out, 4, p.id);
-            out[8..16].copy_from_slice(&p.tag);
-            p32(&mut out, 20, (p.insns.len() * 8) as u32);
-            p32(&mut out, 52, p.maps.len() as u32);
-            out[64..80].copy_from_slice(&p.name);
-            228
-        }
-        Obj::Map(m) => {
-            p32(&mut out, 0, m.kind);
-            p32(&mut out, 4, m.id);
-            p32(&mut out, 8, m.key_size);
-            p32(&mut out, 12, m.value_size);
-            p32(&mut out, 16, m.max);
-            p32(&mut out, 20, m.flags);
-            out[24..40].copy_from_slice(&m.name);
-            88
-        }
-        Obj::Link(l) => {
-            p32(&mut out, 0, 3); // BPF_LINK_TYPE_CGROUP
-            p32(&mut out, 4, l.id);
-            p32(&mut out, 8, l.prog.id);
-            // cgroup_id: a number for the cgroup's path
-            let cg = l.cgroup.bytes().fold(1469598103934665603u64, |h, b| (h ^ b as u64).wrapping_mul(1099511628211));
-            out[16..24].copy_from_slice(&cg.to_le_bytes());
-            p32(&mut out, 24, l.attach_type);
-            32
-        }
-        Obj::Btf(b) => {
-            p32(&mut out, 16, b.id);
-            32
-        }
-    };
-    let n = (len as usize).min(size);
-    if copy_out(ptr, &out[..n]).is_err() {
-        return EFAULT;
-    }
-    n as i64
-}
-
-/// `bpf(cmd, attr, size)`.
-pub fn sys_bpf(cmd: u64, attr: u64, size: u64) -> i64 {
-    if !crate::task::with_current_task_mut(|t| (t.caps.effective & ((1 << 39) | (1 << 21))) != 0 && !t.caps.in_userns).unwrap_or(false) {
-        return EPERM;
-    }
-    if size > 4096 {
-        return E2BIG;
-    }
-    let mut a = match copy_in(attr, size as usize) {
-        Ok(a) => a,
-        Err(e) => return e,
-    };
-    a.resize(256, 0);
-    let u = |o: usize| u32::from_le_bytes(a[o..o + 4].try_into().unwrap());
-    let q = |o: usize| u64::from_le_bytes(a[o..o + 8].try_into().unwrap());
-    match cmd {
-        0 => map_create(&a),
-        1..=4 | 21 => map_elem(cmd as u32, &a),
-        5 => prog_load(&a),
-        // OBJ_PIN, OBJ_GET
-        6 | 7 => {
-            let path = match super::vfs::user_path(q(0)) {
-                Ok(p) => String::from_utf8_lossy(&p).into_owned(),
-                Err(e) => return e,
-            };
-            if cmd == 6 {
-                let obj = match obj_of(u(8)) {
-                    Ok(o) => o,
-                    Err(e) => return e,
-                };
-                let mut pins = PINS.lock();
-                if pins.contains_key(&path) {
-                    return EEXIST;
-                }
-                pins.insert(path, obj);
-                0
-            } else {
-                match PINS.lock().get(&path).cloned() {
-                    Some(o) => install(o),
-                    None => ENOENT,
-                }
-            }
-        }
-        // PROG_ATTACH, PROG_DETACH
-        8 | 9 => {
-            let cg = match cgroup_of(u(0)) {
-                Ok(c) => c,
-                Err(e) => return e,
-            };
-            let attach_type = u(8);
-            if cmd == 8 {
-                let p = match prog_of(u(4)) {
-                    Ok(p) => p,
-                    Err(e) => return e,
-                };
-                if !attach_ok(p.kind, attach_type) {
-                    return EINVAL;
-                }
-                // Without BPF_F_ALLOW_MULTI the new program replaces the cgroup's one
-                if u(12) & 2 == 0 {
-                    ATTACHED.lock().retain(|x| !(x.cgroup == cg && x.attach_type == attach_type && x.link == 0));
-                }
-                attach(cg, attach_type, p, 0);
-                0
-            } else {
-                let want = prog_of(u(4)).ok();
-                let mut list = ATTACHED.lock();
-                let before = list.len();
-                let mut done = false;
-                list.retain(|x| {
-                    let hit = !done && x.cgroup == cg && x.attach_type == attach_type && x.link == 0 && want.as_ref().map_or(true, |w| Arc::ptr_eq(w, &x.prog));
-                    if hit {
-                        done = true;
-                    }
-                    !hit
-                });
-                if list.len() == before { ENOENT } else { 0 }
-            }
-        }
-        // PROG_TEST_RUN
-        10 => {
-            let p = match prog_of(u(0)) {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-            if !matches!(p.kind, PROG_SOCKET_FILTER | PROG_CGROUP_SKB) {
-                return ENOTSUPP;
-            }
-            let (size_in, data_in, data_out) = (u(8) as usize, q(16), q(24));
-            if size_in < 14 || size_in > 65536 {
-                return EINVAL;
-            }
-            let data = match copy_in(data_in, size_in) {
-                Ok(d) => d,
-                Err(e) => return e,
-            };
-            // The program sees the packet from its network header, as cgroup hooks show it
-            // (after the 14-byte Ethernet header): struct __sk_buff len and protocol
-            // (network order), and data/data_end as packet pointers. (Linux's test runs
-            // leave data/data_end unset for these program types.)
-            let net = data[14..].to_vec();
-            let mut ctx = alloc::vec![0u8; 192];
-            ctx[0..4].copy_from_slice(&(net.len() as u32).to_le_bytes());
-            ctx[16] = data[12];
-            ctx[17] = data[13];
-            let ptrs = [(76usize, ptr(R_PACKET, 0, 0)), (80usize, ptr(R_PACKET, 0, net.len() as u64))];
-            let (res, net_out) = run(&p, ctx, &ptrs, net);
-            let mut pkt = data[..14].to_vec();
-            pkt.extend_from_slice(&net_out);
-            let Some(ret) = res else { return EINVAL };
-            let mut out = a.clone();
-            out[4..8].copy_from_slice(&(ret as u32).to_le_bytes());
-            out[12..16].copy_from_slice(&(pkt.len() as u32).to_le_bytes());
-            out[36..40].copy_from_slice(&1u32.to_le_bytes()); // duration (ns)
-            // As Linux's bpf_test_finish: at most data_size_out bytes (0: not given, as older
-            // callers pass), and ENOSPC when the packet did not fit, still reporting its
-            // full size
-            let room = u(12) as usize;
-            let fits = room == 0 || pkt.len() <= room;
-            let copy = if fits { pkt.len() } else { room };
-            if data_out != 0 && copy_out(data_out, &pkt[..copy]).is_err() {
-                return EFAULT;
-            }
-            if copy_out(attr, &out[..size as usize]).is_err() {
-                return EFAULT;
-            }
-            if fits {
-                0
-            } else {
-                ENOSPC
-            }
-        }
-        // PROG_GET_NEXT_ID, MAP_GET_NEXT_ID, LINK_GET_NEXT_ID
-        11 | 12 | 31 => {
-            let start = u(0);
-            let next = match cmd {
-                11 => PROGS.lock().iter().filter(|(&k, w)| k > start && w.strong_count() > 0).map(|(&k, _)| k).next(),
-                12 => MAPS.lock().iter().filter(|(&k, w)| k > start && w.strong_count() > 0).map(|(&k, _)| k).next(),
-                _ => LINKS.lock().iter().filter(|(&k, w)| k > start && w.strong_count() > 0).map(|(&k, _)| k).next(),
-            };
-            match next {
-                Some(n) => copy_out(attr + 4, &n.to_le_bytes()).map_or(EFAULT, |_| 0),
-                None => ENOENT,
-            }
-        }
-        // PROG_GET_FD_BY_ID, MAP_GET_FD_BY_ID, LINK_GET_FD_BY_ID
-        13 | 14 | 30 => {
-            let id = u(0);
-            let obj = match cmd {
-                13 => PROGS.lock().get(&id).and_then(|w| w.upgrade()).map(Obj::Prog),
-                14 => MAPS.lock().get(&id).and_then(|w| w.upgrade()).map(Obj::Map),
-                _ => LINKS.lock().get(&id).and_then(|w| w.upgrade()).map(Obj::Link),
-            };
-            match obj {
-                Some(o) => install(o),
-                None => ENOENT,
-            }
-        }
-        // OBJ_GET_INFO_BY_FD
-        15 => match obj_of(u(0)) {
-            Ok(o) => {
-                let n = info(&o, q(8), u(4));
-                if n < 0 {
-                    return n;
-                }
-                copy_out(attr + 4, &(n as u32).to_le_bytes()).map_or(EFAULT, |_| 0)
-            }
-            Err(e) => e,
-        },
-        // PROG_QUERY
-        16 => {
-            let cg = match cgroup_of(u(0)) {
-                Ok(c) => c,
-                Err(e) => return e,
-            };
-            let attach_type = u(4);
-            let ids: Vec<u32> = ATTACHED.lock().iter().filter(|x| x.cgroup == cg && x.attach_type == attach_type).map(|x| x.prog.id).collect();
-            let room = u(24) as usize;
-            let mut out = a.clone();
-            out[24..28].copy_from_slice(&(ids.len() as u32).to_le_bytes());
-            if q(16) != 0 {
-                let bytes: Vec<u8> = ids.iter().take(room).flat_map(|v| v.to_le_bytes()).collect();
-                if copy_out(q(16), &bytes).is_err() {
-                    return EFAULT;
-                }
-            }
-            if copy_out(attr, &out[..size as usize]).is_err() {
-                return EFAULT;
-            }
-            if room < ids.len() && q(16) != 0 { ENOSPC } else { 0 }
-        }
-        // BTF_LOAD: kept, not checked
-        18 => {
-            let b = Arc::new(Btf { id: new_id() });
-            install(Obj::Btf(b))
-        }
-        // MAP_FREEZE
-        22 => match map_of(u(0)) {
-            Ok(m) => {
-                m.frozen.store(true, Ordering::Relaxed);
-                0
-            }
-            Err(e) => e,
-        },
-        // LINK_CREATE
-        28 => {
-            let p = match prog_of(u(0)) {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-            let cg = match cgroup_of(u(4)) {
-                Ok(c) => c,
-                Err(e) => return e,
-            };
-            let attach_type = u(8);
-            if !attach_ok(p.kind, attach_type) {
-                return EINVAL;
-            }
-            let l = Arc::new(Link { id: new_id(), prog: p.clone(), cgroup: cg.clone(), attach_type, detached: AtomicBool::new(false) });
-            LINKS.lock().insert(l.id, Arc::downgrade(&l));
-            attach(cg, attach_type, p, l.id);
-            install(Obj::Link(l))
-        }
-        // LINK_DETACH
-        34 => match obj_of(u(0)) {
-            Ok(Obj::Link(l)) => {
-                detach_link(&l);
-                0
-            }
-            Ok(_) => EINVAL,
-            Err(e) => e,
-        },
-        _ => EINVAL,
-    }
-}

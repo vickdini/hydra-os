@@ -87,14 +87,13 @@ fn a_call_goes_to_the_file_service_only_once_claimed() {
 }
 
 #[test]
-fn claims_route_also_with_lx_kernel() {
-    // wave9 G9-C: the file service has no switch back; `lx=kernel` leaves it forwarded
+fn claims_route_after_set_forwarding() {
+    // wave9 G9-C / wave10 G10-C: the file service has no switch back
     let _sim = world();
     assert_eq!(entry_for(6), 0, "not claimed");
     claim_nr(6);
-    set_forwarding(false);
     assert_ne!(entry(6), 0);
-    set_forwarding(true);
+    set_forwarding();
     assert_ne!(entry(6), 0);
     assert_ne!(entry_for(6), 0);
 }
@@ -903,12 +902,12 @@ fn a_call_on_an_o_path_descriptor_is_the_kernels() {
 fn claims_and_the_routing_switch_do_not_race() {
     let _sim = world();
     claim_nr(4);
-    set_forwarding(false);
+    crate::lx::tests::clear_forwarding();
     claim_nr(6);
     // (wave9 G9-C: `lx=kernel` leaves the file service forwarded)
     assert_ne!(entry(4), 0);
     assert_ne!(entry(6), 0);
-    set_forwarding(true);
+    set_forwarding();
     assert_ne!(entry(4), 0);
     assert_ne!(entry(6), 0);
 }

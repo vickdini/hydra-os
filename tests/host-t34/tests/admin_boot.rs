@@ -31,7 +31,6 @@ fn boot_options_set_the_switches() {
     use core::sync::atomic::Ordering::Acquire;
     let _g = setup();
     boot::discover_with(None, Some(b"quiet lx=kernel lx.net=linux persona=fbsd-stub"));
-    assert!(k::lx::KERNEL_BY_BOOT_OPTION.load(Acquire));
     assert!(k::personality::STUB_BY_BOOT_OPTION.load(Acquire));
     assert_eq!(fake::take_log(), vec!["boot_words quiet lx=kernel lx.net=linux persona=fbsd-stub", "personality_init"]);
     // No options: no boot words, the personality hook still starts

@@ -316,10 +316,8 @@ fn proc_net_text_comes_from_the_network_service() {
     assert_eq!(*asked.lock().unwrap(), vec![(MSG_LX_PROC_NET, 1, 0), (MSG_LX_PROC_NET, 2, 0)]);
     // Unix sockets: from the IPC service once step 4 moved them
     assert_eq!(proc_net_unix_text().as_deref(), Some("  sl  local_address\n"));
-    STEP4.store(false, Ordering::Release);
-    assert_eq!(proc_net_unix_text(), None);
     // Internet sockets still the kernel's
-    set_forwarding(false);
+    crate::lx::tests::clear_forwarding();
     assert_eq!(proc_net_text("tcp"), None);
 }
 
@@ -347,7 +345,7 @@ fn proc_keys_text_comes_from_the_key_service() {
     assert_eq!(*groups.lock().unwrap(), vec![1000, 27]);
     // A failing answer: empty
     // The key calls in the kernel: the in-kernel table answers
-    set_forwarding(false);
+    crate::lx::tests::clear_forwarding();
     assert_eq!(proc_keys_text(), None);
 }
 

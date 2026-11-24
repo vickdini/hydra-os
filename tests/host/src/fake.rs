@@ -341,19 +341,15 @@ impl Fds {
     pub fn readiness(&self, desc: &crate::fs::FileDescriptor) -> u32 {
         use crate::fs::FileDescriptor::*;
         match desc {
-            EventFd(e) => e.lock().poll_events(),
             Device(d) => d.poll_events(),
             File { .. } | Vnode(_) | MemFd { .. } => 0x1 | 0x4,
-            Unix(s) => s.poll_events(),
             PipeRead(_) | PipeWrite(_) => 0,
         }
     }
 
     pub fn add_wait_queues_for(&self, desc: &crate::fs::FileDescriptor, waits: &mut wait::WaitSet) {
         match desc {
-            crate::fs::FileDescriptor::EventFd(e) => waits.add(wait::QueueRef::Shared(e.lock().wq.clone())),
             crate::fs::FileDescriptor::Device(d) => d.add_wait_queues(waits),
-            crate::fs::FileDescriptor::Unix(s) => s.add_wait_queues(waits),
             _ => {}
         }
     }

@@ -31,11 +31,7 @@ pub mod epoll;
 #[cfg(target_os = "uefi")]
 pub mod evdev;
 #[cfg(target_os = "uefi")]
-pub mod netlink;
-#[cfg(target_os = "uefi")]
 pub mod ns;
-#[cfg(target_os = "uefi")]
-pub mod eventfd;
 #[cfg(target_os = "uefi")]
 pub mod fs;
 #[cfg(target_os = "uefi")]
@@ -50,8 +46,6 @@ pub mod inotify;
 pub mod io_uring;
 #[cfg(target_os = "uefi")]
 pub mod futex;
-#[cfg(target_os = "uefi")]
-pub mod inet;
 #[cfg(target_os = "uefi")]
 pub mod memfd;
 #[cfg(target_os = "uefi")]
@@ -70,8 +64,6 @@ pub mod extra;
 #[cfg(target_os = "uefi")]
 pub mod fanotify;
 #[cfg(target_os = "uefi")]
-pub mod keys;
-#[cfg(target_os = "uefi")]
 pub mod limits;
 #[cfg(target_os = "uefi")]
 pub mod live;
@@ -82,8 +74,6 @@ pub mod landlock;
 /// Segment calls for 32-bit code: set_thread_area, get_thread_area, modify_ldt, arch_prctl.
 #[cfg(target_os = "uefi")]
 pub mod ldt;
-#[cfg(target_os = "uefi")]
-pub mod mqueue;
 #[cfg(target_os = "uefi")]
 pub mod proc;
 #[cfg(target_os = "uefi")]
@@ -109,19 +99,11 @@ pub mod seccomp;
 #[cfg(target_os = "uefi")]
 pub mod select;
 #[cfg(target_os = "uefi")]
-pub mod signalfd;
-#[cfg(target_os = "uefi")]
 pub mod snd;
-#[cfg(target_os = "uefi")]
-pub mod sockopt;
-#[cfg(target_os = "uefi")]
-pub mod socket;
 #[cfg(target_os = "uefi")]
 pub mod syscalls;
 #[cfg(target_os = "uefi")]
 pub mod sysv;
-#[cfg(target_os = "uefi")]
-pub mod timerfd;
 #[cfg(target_os = "uefi")]
 pub mod tty;
 #[cfg(target_os = "uefi")]
@@ -146,9 +128,7 @@ use x86_64::VirtAddr;
 
 use crate::arch::syscall::SyscallFrame;
 pub use epoll::*;
-pub use eventfd::*;
 pub use memfd::*;
-pub use socket::*;
 pub use syscalls::*;
 pub use types::*;
 
@@ -395,11 +375,7 @@ fn slow_poll(fds_ptr: u64, nfds: u64, t0: u64, ret: i64) {
             continue;
         }
         let link = vfs::fd_link(&alloc::format!("/proc/self/fd/{}", fd)).unwrap_or_default();
-        let peer = crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
-            Some(crate::fs::FileDescriptor::Unix(s)) => s.peer_cred().map(|(p, _, _)| p),
-            _ => None,
-        });
-        crate::kprintln!("[prof]   fd {} events {:#x} {} peer {:?}", fd, ev, link, peer);
+        crate::kprintln!("[prof]   fd {} events {:#x} {}", fd, ev, link);
     }
 }
 
@@ -426,7 +402,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         101 => return ptrace::sys_ptrace(arg0, arg1, arg2, arg3),
         323 => return userfaultfd::sys_userfaultfd(arg0),
         298 => return perf::sys_perf_event_open(arg0, arg1, arg2, arg3, arg4),
-        321 => return bpf::sys_bpf(arg0, arg1, arg2),
+
         // syslog, ustat, sysfs, vhangup, acct, swapon, swapoff, quotactl, quotactl_fd
         103 | 136 | 139 | 153 | 163 | 167 | 168 | 179 | 443 => return admin::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]),
         // fanotify_init, fanotify_mark, open_by_handle_at
@@ -472,9 +448,9 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         // rt_sigqueueinfo, rt_tgsigqueueinfo
         129 => return proc::sys_rt_sigqueueinfo(arg0 as u32 as u64, None, arg1, arg2),
         297 => return proc::sys_rt_sigqueueinfo(arg0 as u32 as u64, Some(arg1 as u32 as u64), arg2, arg3),
-        // System V IPC: shmget shmat shmctl semget semop semctl shmdt msgget msgsnd msgrcv
-        // msgctl semtimedop
-        29..=31 | 64..=71 | 220 => {
+        // System V shared memory's mapping half: shmat (after lx-ipc's answer), shmdt (every
+        // other System V call is lx-ipc's)
+        30 | 67 => {
             if let Some(r) = sysv::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
                 return r;
             }
@@ -482,26 +458,16 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         // mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr
         // readahead, mbind, set_mempolicy, migrate_pages, move_pages, process_vm_readv/writev,
         // kcmp, sched_setattr/getattr, set_mempolicy_home_node, cachestat, mseal
-        // adjtimex, clock_adjtime, settimeofday, clock_settime, sethostname, setdomainname,
+        // adjtimex, clock_adjtime, settimeofday, clock_settime,
         // pkey_mprotect, memfd_secret, map_shadow_stack, lsm_get/set_self_attr, lsm_list_modules
-        187 | 237 | 238 | 256 | 279 | 310..=312 | 314 | 315 | 450 | 451 | 462 | 159 | 305 | 164 | 227 | 170 | 171 | 329 | 447 | 453 | 459..=461 => {
+        187 | 237 | 238 | 256 | 279 | 310..=312 | 314 | 315 | 450 | 451 | 462 | 159 | 305 | 164 | 227 | 329 | 447 | 453 | 459..=461 => {
             if let Some(r) = extra::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
                 return r;
             }
         }
         // setns
         308 => return ns::sys_setns(arg0, arg1),
-        // add_key, request_key, keyctl
-        248..=250 => {
-            if let Some(r) = keys::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
-                return r;
-            }
-        }
-        240..=245 => {
-            if let Some(r) = mqueue::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
-                return r;
-            }
-        }
+
         222..=226 => {
             if let Some(r) = ptimer::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
                 return r;
@@ -533,13 +499,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
     }
 
     if let Some(r) = chardev::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
-        return r;
-    }
-    if let Some(r) = unix::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
-        return r;
-    }
-    if let Some(r) = inet::dispatch(num, [arg0, arg1, arg2, arg3, arg4, arg5]) {
-        LINUX_STATS.lock().io_calls += 1;
         return r;
     }
 
@@ -725,13 +684,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
                         }
                         crate::fs::FileDescriptor::PipeRead(_) | crate::fs::FileDescriptor::PipeWrite(_) => {
                             statbuf.st_mode = S_IFIFO | 0o600;
-                            unsafe { *stat_ptr = statbuf; }
-                            0
-                        }
-                        crate::fs::FileDescriptor::Socket(_)
-                        | crate::fs::FileDescriptor::Unix(_)
-                        | crate::fs::FileDescriptor::Inet(_) => {
-                            statbuf.st_mode = S_IFSOCK | 0o777;
                             unsafe { *stat_ptr = statbuf; }
                             0
                         }
@@ -1066,47 +1018,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             }
         }
 
-        SYS_PIPE | SYS_PIPE2 => {
-            // sys_pipe(pipefd: int[2])
-            let pipefd_ptr = arg0 as *mut [i32; 2];
-            if !user_ok(arg0, 8, true) {
-                return -EFAULT;
-            }
-
-            // pipe2 flags: O_NONBLOCK (0o4000), O_CLOEXEC (0o2000000)
-            let flags = if num == SYS_PIPE2 { arg1 } else { 0 };
-            let pipe = crate::fs::PipeBuffer::new();
-            {
-                let mut p = pipe.lock();
-                p.read_nonblock = flags & 0o4000 != 0;
-                p.write_nonblock = flags & 0o4000 != 0;
-            }
-            let read_desc = crate::fs::FileDescriptor::PipeRead(pipe.clone());
-            let write_desc = crate::fs::FileDescriptor::PipeWrite(pipe);
-
-            crate::task::with_current_fds_mut(|fds| {
-                match fds.alloc_fd(read_desc) {
-                    Ok(rfd) => match fds.alloc_fd(write_desc) {
-                        Ok(wfd) => {
-                            if flags & 0o2000000 != 0 {
-                                fds.set_cloexec(rfd, true);
-                                fds.set_cloexec(wfd, true);
-                            }
-                            unsafe {
-                                (*pipefd_ptr)[0] = rfd as i32;
-                                (*pipefd_ptr)[1] = wfd as i32;
-                            }
-                            0
-                        }
-                        Err(_) => {
-                            let _ = fds.close(rfd);
-                            -EMFILE
-                        }
-                    },
-                    Err(_) => -EMFILE,
-                }
-            })
-        }
 
         SYS_SCHED_YIELD => {
             crate::task::yield_now();
@@ -1138,435 +1049,17 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             })
         }
 
-        SYS_SOCKET => {
-            // sys_socket(domain: int, type: int, protocol: int)
-            let domain = arg0 as u32;
-            let sock_type = arg1 as u32;
-            let _protocol = arg2 as u32;
-
-            if domain != AF_UNIX && domain != AF_LOCAL {
-                return -EAFNOSUPPORT;
+        // wave10 G10-C: every socket family Linux programs use is a service's (lx-net: AF_INET,
+        // AF_INET6, AF_NETLINK; lx-ipc: AF_UNIX); the calls on a socket descriptor go to its
+        // owner by descriptor. What reaches the kernel is another family or a descriptor that
+        // is no socket.
+        SYS_SOCKET | SYS_SOCKETPAIR => -EAFNOSUPPORT,
+        SYS_BIND | SYS_LISTEN | SYS_ACCEPT | SYS_ACCEPT4 | SYS_CONNECT | SYS_SENDTO | SYS_RECVFROM | SYS_SENDMSG | SYS_RECVMSG | SYS_SHUTDOWN | SYS_GETSOCKNAME | SYS_GETPEERNAME | 54 | 55 | 299 | 307 => {
+            if crate::task::with_current_fds_mut(|fds| fds.get(arg0 as usize).is_some()) {
+                -ENOTSOCK
+            } else {
+                -EBADF
             }
-
-            let nonblock = (sock_type & SOCK_NONBLOCK) != 0;
-            let sock = UnixSocket::new(domain, sock_type, nonblock);
-            let desc = crate::fs::FileDescriptor::Socket(sock);
-
-            crate::task::with_current_fds_mut(|fds| {
-                fds.alloc_fd(desc).map(|fd| fd as i64).unwrap_or(-EMFILE)
-            })
-        }
-
-        SYS_BIND => {
-            // sys_bind(sockfd: int, addr: const struct sockaddr*, addrlen: socklen_t)
-            let fd = arg0 as usize;
-            let addr_ptr = arg1 as *const LinuxSockaddrUn;
-            let addrlen = arg2 as usize;
-
-            if addrlen < 2 || !user_ok(arg1, core::mem::size_of::<LinuxSockaddrUn>() as u64, false) {
-                return -EFAULT;
-            }
-
-            let addr: LinuxSockaddrUn = unsafe { core::ptr::read_unaligned(addr_ptr) };
-            if addr.sun_family as u32 != AF_UNIX && addr.sun_family as u32 != AF_LOCAL {
-                return -EAFNOSUPPORT;
-            }
-
-            let path = match read_sockaddr_path(&addr.sun_path) {
-                Some(p) => p,
-                None => return -EINVAL,
-            };
-
-            let res = crate::task::with_current_fds_mut(|fds| {
-                if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
-                    let sock_clone = sock.clone();
-                    UnixSocket::bind(&sock_clone, &path)
-                } else {
-                    Err(-EBADF)
-                }
-            });
-            match res {
-                Ok(()) => 0,
-                Err(e) => e,
-            }
-        }
-
-        SYS_LISTEN => {
-            // sys_listen(sockfd: int, backlog: int)
-            let fd = arg0 as usize;
-            let backlog = arg1 as usize;
-
-            let res = crate::task::with_current_fds_mut(|fds| {
-                if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
-                    sock.lock().listen(backlog)
-                } else {
-                    Err(-EBADF)
-                }
-            });
-            match res {
-                Ok(()) => 0,
-                Err(e) => e,
-            }
-        }
-
-        SYS_ACCEPT | SYS_ACCEPT4 => {
-            // sys_accept(sockfd: int, addr: struct sockaddr*, addrlen: socklen_t*)
-            // sys_accept4(sockfd: int, addr: struct sockaddr*, addrlen: socklen_t*, flags: int)
-            let fd = arg0 as usize;
-            let addr_ptr = arg1 as *mut LinuxSockaddrUn;
-            let addrlen_ptr = arg2 as *mut u32;
-            let flags = if num == SYS_ACCEPT4 { arg3 as u32 } else { 0 };
-            let nonblock = (flags & SOCK_NONBLOCK) != 0;
-
-            let sock = crate::task::with_current_fds_mut(|fds| {
-                if let Some(crate::fs::FileDescriptor::Socket(s)) = fds.get(fd) {
-                    Some(s.clone())
-                } else {
-                    None
-                }
-            });
-
-            let sock = match sock {
-                Some(s) => s,
-                None => return -EBADF,
-            };
-
-            let client_sock = match sock.lock().accept(nonblock) {
-                Ok(c) => c,
-                Err(err) => return err,
-            };
-
-            if !addr_ptr.is_null() && user_ok(arg1, core::mem::size_of::<LinuxSockaddrUn>() as u64, true) {
-                unsafe {
-                    let mut un = LinuxSockaddrUn::default();
-                    un.sun_family = AF_UNIX as u16;
-                    *addr_ptr = un;
-                    if user_ok(arg2, 4, true) {
-                        *addrlen_ptr = 2; // sizeof(sun_family)
-                    }
-                }
-            }
-
-            let desc = crate::fs::FileDescriptor::Socket(client_sock);
-            crate::task::with_current_fds_mut(|fds| {
-                fds.alloc_fd(desc).map(|newfd| newfd as i64).unwrap_or(-EMFILE)
-            })
-        }
-
-        SYS_CONNECT => {
-            // sys_connect(sockfd: int, addr: const struct sockaddr*, addrlen: socklen_t)
-            let fd = arg0 as usize;
-            let addr_ptr = arg1 as *const LinuxSockaddrUn;
-            let addrlen = arg2 as usize;
-
-            if addrlen < 2 || !user_ok(arg1, core::mem::size_of::<LinuxSockaddrUn>() as u64, false) {
-                return -EFAULT;
-            }
-
-            let addr: LinuxSockaddrUn = unsafe { core::ptr::read_unaligned(addr_ptr) };
-            if addr.sun_family as u32 != AF_UNIX && addr.sun_family as u32 != AF_LOCAL {
-                return -EAFNOSUPPORT;
-            }
-
-            let path = match read_sockaddr_path(&addr.sun_path) {
-                Some(p) => p,
-                None => return -EINVAL,
-            };
-
-            let res = crate::task::with_current_fds_mut(|fds| {
-                if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
-                    sock.lock().connect(&path)
-                } else {
-                    Err(-EBADF)
-                }
-            });
-            match res {
-                Ok(()) => 0,
-                Err(e) => e,
-            }
-        }
-
-        SYS_SOCKETPAIR => {
-            // sys_socketpair(domain: int, type: int, protocol: int, sv: int[2])
-            let domain = arg0 as u32;
-            let sock_type = arg1 as u32;
-            let _protocol = arg2 as u32;
-            let sv_ptr = arg3 as *mut [i32; 2];
-
-            if !user_ok(arg3, 8, true) {
-                return -EFAULT;
-            }
-
-            if domain != AF_UNIX && domain != AF_LOCAL {
-                return -EAFNOSUPPORT;
-            }
-
-            let nonblock = (sock_type & SOCK_NONBLOCK) != 0;
-            let (sock_a, sock_b) = UnixSocket::pair(sock_type, nonblock);
-
-            let desc_a = crate::fs::FileDescriptor::Socket(sock_a);
-            let desc_b = crate::fs::FileDescriptor::Socket(sock_b);
-
-            crate::task::with_current_fds_mut(|fds| {
-                match fds.alloc_fd(desc_a) {
-                    Ok(fd_a) => match fds.alloc_fd(desc_b) {
-                        Ok(fd_b) => {
-                            unsafe {
-                                (*sv_ptr)[0] = fd_a as i32;
-                                (*sv_ptr)[1] = fd_b as i32;
-                            }
-                            0
-                        }
-                        Err(_) => {
-                            let _ = fds.close(fd_a);
-                            -EMFILE
-                        }
-                    },
-                    Err(_) => -EMFILE,
-                }
-            })
-        }
-
-        SYS_SENDTO => {
-            // sys_sendto(sockfd: int, buf: const void*, len: size_t, flags: int, dest_addr: const struct sockaddr*, addrlen: socklen_t)
-            let fd = arg0 as usize;
-            let ptr = arg1 as *const u8;
-            let count = arg2 as usize;
-            if ptr.is_null() && count > 0 {
-                return -EFAULT;
-            }
-            if count == 0 {
-                return 0;
-            }
-            if !user_ok(arg1, count as u64, false) {
-                return -EFAULT;
-            }
-            let slice = unsafe { core::slice::from_raw_parts(ptr, count) };
-            let res = crate::task::with_current_fds_mut(|fds| {
-                if let Some(desc) = fds.get_mut(fd) {
-                    match desc.write(slice) {
-                        Ok(n) => n as i64,
-                        Err(e) => write_errno(e),
-                    }
-                } else {
-                    -EBADF
-                }
-            });
-            res
-        }
-
-        SYS_RECVFROM => {
-            // sys_recvfrom(sockfd: int, buf: void*, len: size_t, flags: int, src_addr: struct sockaddr*, addrlen: socklen_t*)
-            let fd = arg0 as usize;
-            let ptr = arg1 as *mut u8;
-            let count = arg2 as usize;
-            if ptr.is_null() && count > 0 {
-                return -EFAULT;
-            }
-            if count == 0 {
-                return 0;
-            }
-            if !user_ok(arg1, count as u64, true) {
-                return -EFAULT;
-            }
-            let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
-            crate::task::with_current_fds_mut(|fds| {
-                if let Some(desc) = fds.get_mut(fd) {
-                    match desc.read(slice) {
-                        Ok(n) => n as i64,
-                        // Write-only or O_PATH
-                        Err("File not opened for reading") => -EBADF,
-                        Err(_) => -EIO,
-                    }
-                } else {
-                    -EBADF
-                }
-            })
-        }
-
-        SYS_SENDMSG => {
-            // sys_sendmsg(sockfd: int, msg: const struct msghdr*, flags: int)
-            let fd = arg0 as usize;
-            let msg_ptr = arg1 as *const LinuxMsghdr;
-            if !user_ok(arg1, core::mem::size_of::<LinuxMsghdr>() as u64, false) {
-                return -EFAULT;
-            }
-            let msg = unsafe { *msg_ptr };
-            if !msghdr_ok(&msg, false) {
-                return -EFAULT;
-            }
-
-            // 1. Process SCM_RIGHTS ancillary data if present
-            if !msg.msg_control.is_null() && msg.msg_controllen >= 16 {
-                let cmsg = unsafe { *(msg.msg_control as *const LinuxCmsghdr) };
-                if cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS {
-                    let num_fds = cmsg.cmsg_len.saturating_sub(16) / 4;
-                    let fd_array = unsafe { msg.msg_control.add(16) as *const i32 };
-                    for i in 0..num_fds {
-                        let target_fd = unsafe { *fd_array.add(i) } as usize;
-                        let desc_clone = crate::task::with_current_fds_mut(|fds| {
-                            fds.get(target_fd).cloned()
-                        });
-                        if let Some(desc) = desc_clone {
-                            let _ = crate::task::with_current_fds_mut(|fds| {
-                                if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
-                                    sock.lock().push_ancillary_fd(desc)
-                                } else {
-                                    Err("Not a socket")
-                                }
-                            });
-                        }
-                    }
-                }
-            }
-
-            // 2. Transmit payload data buffers from msg_iov
-            let mut total_sent = 0;
-            if !msg.msg_iov.is_null() && msg.msg_iovlen > 0 {
-                for i in 0..msg.msg_iovlen {
-                    let iov = unsafe { *msg.msg_iov.add(i) };
-                    if iov.iov_base != 0 && iov.iov_len > 0 {
-                        let slice = unsafe { core::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len as usize) };
-                        let sent = crate::task::with_current_fds_mut(|fds| {
-                            if let Some(desc) = fds.get_mut(fd) {
-                                desc.write(slice).map(|n| n as i64).unwrap_or_else(write_errno)
-                            } else {
-                                -EBADF
-                            }
-                        });
-                        if sent < 0 {
-                            return sent;
-                        }
-                        total_sent += sent;
-                    }
-                }
-            }
-            total_sent
-        }
-
-        SYS_RECVMSG => {
-            // sys_recvmsg(sockfd: int, msg: struct msghdr*, flags: int)
-            let fd = arg0 as usize;
-            let msg_ptr = arg1 as *mut LinuxMsghdr;
-            if !user_ok(arg1, core::mem::size_of::<LinuxMsghdr>() as u64, true) {
-                return -EFAULT;
-            }
-            let msg = unsafe { *msg_ptr };
-            if !msghdr_ok(&msg, true) {
-                return -EFAULT;
-            }
-
-            // 1. Receive incoming ancillary data (SCM_RIGHTS) if requested
-            if !msg.msg_control.is_null() && msg.msg_controllen >= 20 {
-                let incoming_desc = crate::task::with_current_fds_mut(|fds| {
-                    if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
-                        sock.lock().pop_ancillary_fd()
-                    } else {
-                        None
-                    }
-                });
-
-                if let Some(desc) = incoming_desc {
-                    let new_fd = crate::task::with_current_fds_mut(|fds| {
-                        fds.alloc_fd(desc).map(|f| f as i32).unwrap_or(-1)
-                    });
-                    if new_fd >= 0 {
-                        unsafe {
-                            let cmsg_ptr = msg.msg_control as *mut LinuxCmsghdr;
-                            *cmsg_ptr = LinuxCmsghdr {
-                                cmsg_len: 20,
-                                cmsg_level: SOL_SOCKET,
-                                cmsg_type: SCM_RIGHTS,
-                            };
-                            let fd_dest = msg.msg_control.add(16) as *mut i32;
-                            *fd_dest = new_fd;
-                            (*msg_ptr).msg_controllen = 20;
-                        }
-                    }
-                } else {
-                    unsafe {
-                        (*msg_ptr).msg_controllen = 0;
-                    }
-                }
-            }
-
-            // 2. Read incoming payload data into msg_iov
-            let mut total_recv = 0;
-            if !msg.msg_iov.is_null() && msg.msg_iovlen > 0 {
-                for i in 0..msg.msg_iovlen {
-                    let iov = unsafe { *msg.msg_iov.add(i) };
-                    if iov.iov_base != 0 && iov.iov_len > 0 {
-                        let slice = unsafe { core::slice::from_raw_parts_mut(iov.iov_base as *mut u8, iov.iov_len as usize) };
-                        let recvd = crate::task::with_current_fds_mut(|fds| {
-                            if let Some(desc) = fds.get_mut(fd) {
-                                desc.read(slice).map(|n| n as i64).unwrap_or(-EIO)
-                            } else {
-                                -EBADF
-                            }
-                        });
-                        if recvd < 0 {
-                            return recvd;
-                        }
-                        total_recv += recvd;
-                    }
-                }
-            }
-            total_recv
-        }
-
-        SYS_SHUTDOWN => {
-            // sys_shutdown(sockfd: int, how: int)
-            let fd = arg0 as usize;
-            let how = arg1 as u32;
-
-            let res = crate::task::with_current_fds_mut(|fds| {
-                if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
-                    sock.lock().shutdown(how)
-                } else {
-                    Err(-EBADF)
-                }
-            });
-            match res {
-                Ok(()) => 0,
-                Err(e) => e,
-            }
-        }
-
-        SYS_GETSOCKNAME | SYS_GETPEERNAME => {
-            // sys_getsockname(sockfd: int, addr: struct sockaddr*, addrlen: socklen_t*)
-            // sys_getpeername(sockfd: int, addr: struct sockaddr*, addrlen: socklen_t*)
-            let fd = arg0 as usize;
-            let addr_ptr = arg1 as *mut LinuxSockaddrUn;
-            let addrlen_ptr = arg2 as *mut u32;
-
-            if !user_ok(arg1, core::mem::size_of::<LinuxSockaddrUn>() as u64, true) || !user_ok(arg2, 4, true) {
-                return -EFAULT;
-            }
-
-            crate::task::with_current_fds_mut(|fds| {
-                if let Some(crate::fs::FileDescriptor::Socket(sock)) = fds.get(fd) {
-                    let s = sock.lock();
-                    let mut un = LinuxSockaddrUn::default();
-                    un.sun_family = AF_UNIX as u16;
-                    let path_str = match &s.role {
-                        UnixSocketRole::Bound(p) => p.as_str(),
-                        UnixSocketRole::Listening { path, .. } => path.as_str(),
-                        UnixSocketRole::Connected { peer_path, .. } => peer_path.as_str(),
-                        _ => "",
-                    };
-                    let bytes = path_str.as_bytes();
-                    let copy_len = bytes.len().min(107);
-                    un.sun_path[..copy_len].copy_from_slice(&bytes[..copy_len]);
-                    un.sun_path[copy_len] = 0;
-                    unsafe {
-                        *addr_ptr = un;
-                        *addrlen_ptr = (2 + copy_len + 1) as u32;
-                    }
-                    0
-                } else {
-                    -EBADF
-                }
-            })
         }
 
         SYS_NANOSLEEP => {
@@ -1722,9 +1215,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             ns::id_for_caller(id, true) as i64
         }
 
-        // wave9 G7a: the setuid family: the rule (`lx::proc::rules`) on the caller's
-        // credentials, then the primitive (`lx::proc::task_creds_set`)
-        SYS_SETUID | SYS_SETGID | SYS_SETREUID | SYS_SETREGID | SYS_SETRESUID => set_ids(num, [arg0, arg1, arg2]),
 
         SYS_GETRESUID => {
             // sys_getresuid(ruid: uid_t*, euid: uid_t*, suid: uid_t*)
@@ -1741,7 +1231,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
             0
         }
 
-        SYS_SETRESGID => set_ids(num, [arg0, arg1, arg2]),
 
         SYS_GETRESGID => {
             // sys_getresgid(rgid: gid_t*, egid: gid_t*, sgid: gid_t*)
@@ -1975,7 +1464,6 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
 
             loop {
                 waits.register();
-                tty::pump();
                 let mut ready_count = 0;
                 crate::task::with_current_fds_mut(|fds| {
                     for i in 0..nfds {
@@ -2189,52 +1677,10 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
 
 const ERANGE: i64 = 34;
 
-/// wave9 G7a: the setuid family (`setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`,
-/// `setresgid`; arguments `a`, ids as 32-bit values, `-1` = keep): today's rule
-/// (`lx::proc::rules`) on the calling thread's credentials, then `lx::proc::task_creds_set`.
-fn set_ids(num: u64, a: [u64; 3]) -> i64 {
-    use crate::lx::proc::{self as mech, rules};
-    let Some((mut c, cap_uid, cap_gid)) = mech::task_creds(0) else { return -EPERM };
-    let (x, y, z) = (a[0] as u32, a[1] as u32, a[2] as u32);
-    let r = match num {
-        SYS_SETUID => rules::set_id(c.uid, x, cap_uid).map(|v| c.uid = v),
-        SYS_SETGID => rules::set_id(c.gid, x, cap_gid).map(|v| c.gid = v),
-        SYS_SETREUID => rules::set_re(c.uid, x, y, cap_uid).map(|v| c.uid = v),
-        SYS_SETREGID => rules::set_re(c.gid, x, y, cap_gid).map(|v| c.gid = v),
-        SYS_SETRESUID => rules::set_res(c.uid, [x, y, z], cap_uid).map(|v| c.uid = v),
-        SYS_SETRESGID => rules::set_res(c.gid, [x, y, z], cap_gid).map(|v| c.gid = v),
-        _ => Err(-ENOSYS),
-    };
-    match r {
-        Ok(()) if mech::task_creds_set(0, c) => 0,
-        Ok(()) => -EPERM,
-        Err(e) => e,
-    }
-}
-
 /// Whether `len` bytes of the caller's memory at `ptr` may be read (or written): never
 /// null, and faulted in. The calls below dereference user pointers directly after it.
 fn user_ok(ptr: u64, len: u64, write: bool) -> bool {
     ptr != 0 && crate::memory::vm::prefault_current(ptr, len, write)
-}
-
-/// Whether the control buffer, the iovec array and every buffer of a `msghdr` may be
-/// accessed (`write`: received into).
-fn msghdr_ok(msg: &LinuxMsghdr, write: bool) -> bool {
-    if !msg.msg_control.is_null() && !user_ok(msg.msg_control as u64, msg.msg_controllen as u64, write) {
-        return false;
-    }
-    if msg.msg_iov.is_null() || msg.msg_iovlen == 0 {
-        return true;
-    }
-    let n = msg.msg_iovlen as u64;
-    if !user_ok(msg.msg_iov as u64, n.saturating_mul(core::mem::size_of::<LinuxIovec>() as u64), false) {
-        return false;
-    }
-    (0..msg.msg_iovlen).all(|i| {
-        let iov = unsafe { *msg.msg_iov.add(i) };
-        iov.iov_len == 0 || user_ok(iov.iov_base, iov.iov_len, write)
-    })
 }
 
 /// Reads a NUL-terminated C string from user space (up to 4096 bytes).
@@ -2320,26 +1766,6 @@ fn open_path(path: &str, flags: u64) -> i64 {
     })
 }
 
-/// Reads a NUL-terminated filesystem path from a `sockaddr_un` structure.
-///
-/// # Arguments
-///
-/// * `sun_path` - Fixed 108-byte character buffer from `struct sockaddr_un`.
-///
-/// # Returns
-///
-/// `Some(String)` containing the decoded path string, or `None` if empty or invalid UTF-8.
-fn read_sockaddr_path(sun_path: &[u8; 108]) -> Option<String> {
-    let mut len = 0;
-    while len < sun_path.len() && sun_path[len] != 0 {
-        len += 1;
-    }
-    if len == 0 {
-        return None;
-    }
-    core::str::from_utf8(&sun_path[..len]).map(String::from).ok()
-}
-
 /// When set, every Linux system call is logged with its arguments and result
 /// (`linux trace on|off`).
 pub static TRACE_SYSCALLS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -2406,6 +1832,11 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
     if let Err(e) = ns::check_clone(args[0]) {
         return e;
     }
+    // wave10 G10-C: pidfds are lx-ipc's alone: with lx-ipc not running (nor restarting), a
+    // clone that asks for one fails before any child exists
+    if pidfd_ptr.is_some() && !crate::lx::ipc_usable() {
+        return -EIO;
+    }
     // CLONE_PARENT (spawn_clone makes our parent the child's): refused to a PID namespace's init and to init
     let sibling = args[0] & (CLONE_PARENT | types::CLONE_THREAD) == CLONE_PARENT;
     if sibling && (proc::current_ids().1 == 1 || proc::is_pid_ns_init(proc::current_ids().1)) {
@@ -2439,8 +1870,6 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
         sysv::on_fork(proc::current_ids().1, child);
     }
     if args[0] & types::CLONE_THREAD == 0 {
-        // A new process inherits the session keyring
-        keys::on_fork(proc::current_ids().1, child);
         // The Linux server learns it too (before any call of the child can reach it)
         crate::lx::note(crate::ipc::protocol::LX_NOTE_FORK, proc::current_ids().1, child, 0);
         // wave10 G7b-1: the child starts with this thread's name and the dumpable flag
@@ -2452,12 +1881,9 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
         proc::set_fs_peer(child, proc::current_ids().1);
     }
     if let Some(ptr) = pidfd_ptr {
-        // Group 13: pidfds are linux-server's (unless switched back)
-        let fd = if crate::lx::step4() {
-            crate::lx::call_plain(crate::ipc::protocol::LX_KCALL_PIDFD, [child, 0, 0, 0, 0, 0]) as i32
-        } else {
-            pidfd::install(child, false) as i32
-        };
+        // Group 13: pidfds are lx-ipc's (wave10 G10-C: if lx-ipc failed it after all, the
+        // child exists: -1 as "no descriptor", never an errno as a descriptor number)
+        let fd = crate::lx::call_plain(crate::ipc::protocol::LX_KCALL_PIDFD, [child, 0, 0, 0, 0, 0]).max(-1) as i32;
         if !crate::memory::vm::prefault_current(ptr, 4, true) {
             return -EFAULT;
         }

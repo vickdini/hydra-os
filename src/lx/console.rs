@@ -84,7 +84,8 @@ pub fn encode_key(printable: Option<char>, scan: u16) -> u32 {
     }
 }
 
-/// [`crate::ipc::protocol::LX_TTY_K_STAT`]'s answer from a slave's mode, owner and group.
+/// [`crate::ipc::protocol::LX_TTY_K_STAT`]'s answer from a slave's mode, owner and group
+/// (tty-server packs it the same way; kept as the protocol's reference for the tests).
 pub fn pack_stat(mode: u32, uid: u32, gid: u32) -> i64 {
     ((mode & 0o7777) as u64 | ((gid as u64) & 0xF_FFFF) << 12 | ((uid as u64) & 0x7FFF_FFFF) << 32) as i64
 }
@@ -177,26 +178,14 @@ mod kernel {
         x86_64::instructions::interrupts::without_interrupts(|| f(&mut STATE.lock()))
     }
 
-    /// Whether the terminals are tty-server's (not `lx=kernel`, `lx.tty=kernel` or
-    /// `lx.tty=linux`).
-    #[inline]
-    pub fn forwarded() -> bool {
-        !super::super::all_kernel() && svc::mode(LXS_TTY) == svc::SvcMode::Forward && svc::endpoint_of(LXS_TTY) == ENDPOINT_TTY_SERVER
-    }
-
     /// Whether a Linux session holds the console (for the trap path: one load).
     static ATTACHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-    /// On every return to user mode (`arch/idt.rs`): the in-kernel copy's pump when the
-    /// terminals are not forwarded; when they are and tty-server is down while a Linux program
-    /// owns the console, Ctrl+C, Ctrl+\ and Ctrl+Z still signal that program (other keys are
+    /// On every return to user mode (`arch/idt.rs`): when tty-server is down while a Linux
+    /// program owns the console, Ctrl+C, Ctrl+\ and Ctrl+Z still signal that program (other keys are
     /// dropped: its reads fail meanwhile), so the console is never wedged by the service.
     #[inline]
     pub fn trap_pump() {
-        if !forwarded() {
-            crate::compat::linux::tty::pump();
-            return;
-        }
         if !ATTACHED.load(core::sync::atomic::Ordering::Acquire) || online() {
             return;
         }
@@ -285,8 +274,10 @@ mod kernel {
         if len == 0 {
             return 0;
         }
-        if !online() {
-            return EIO;
+        // wave10 G10-C: a restarting tty-server is waited for (the restart ladder's 30 s), as
+        // every forwarded call is; EIO only when it is not coming back
+        if let Err(e) = crate::lx::restart::wait_online(svc::host_of(LXS_TTY), &online) {
+            return e;
         }
         let (g, sp) = attach_args();
         let r = kcall([LX_TTY_K_READ, buf, len as u64, nonblock as u64, g, sp], 0);
@@ -431,9 +422,6 @@ mod kernel {
         waits.add(crate::task::wait::QueueRef::Static(&crate::compat::linux::tty::INPUT_WQ));
         loop {
             waits.register();
-            if !forwarded() {
-                return EPERM;
-            }
             // (the keys are taken under the state's lock: a detach cannot slip in between and
             // leave hydra-shell's keys to the old session)
             let mut keys: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
@@ -471,7 +459,7 @@ mod kernel {
     /// `SYS_LX_OBJ` op [`LX_OBJ_TTY`] from host `h`: tty-server's console and process
     /// identity primitives (sub-op `a`).
     pub fn ctl(h: SvcId, a: u64, b: u64, c: u64) -> i64 {
-        if h != svc::host_of(LXS_TTY) || h == 0 || !forwarded() {
+        if h != svc::host_of(LXS_TTY) || h == 0 {
             return EPERM;
         }
         // wave9 G7a: sessions, groups and their signals through the process-identity

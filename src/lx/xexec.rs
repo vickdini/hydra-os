@@ -44,11 +44,8 @@ pub static SOCK_CALLS: AtomicU64 = AtomicU64::new(0);
 
 pub use super::xplan::{decode_plan, ExecPlan};
 
-/// The host of `s` when it is online and the service is not switched back to the kernel.
+/// The host of `s` when it is online.
 fn online(s: crate::ipc::protocol::SvcId) -> Option<&'static Host> {
-    if super::all_kernel() || svc::mode(s) != svc::SvcMode::Forward {
-        return None;
-    }
     svc::host(svc::host_of(s)).filter(|x| x.is_online())
 }
 

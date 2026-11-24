@@ -21,7 +21,6 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;
-use uefi::proto::console::text::{Key, ScanCode};
 
 // c_iflag
 const ICRNL: u32 = 0o400;
@@ -57,7 +56,6 @@ const VWERASE: usize = 14;
 const ENOTTY: i64 = -25;
 const EINVAL: i64 = -22;
 const EFAULT: i64 = -14;
-const EAGAIN: i64 = -11;
 
 /// Kernel `struct termios` (36 bytes).
 #[derive(Clone, Copy)]
@@ -160,14 +158,6 @@ impl Tty {
         }
     }
 
-    /// True if `read` would return data (or end-of-file) now.
-    ///
-    /// # Returns
-    ///
-    /// `true` if input is buffered; `false` otherwise.
-    pub(crate) fn has_input(&self) -> bool {
-        !self.ready.is_empty()
-    }
 }
 
 static TTY: Mutex<Tty> = Mutex::new(Tty::new());
@@ -202,31 +192,13 @@ pub fn set_nonblock(on: bool) {
 /// * `pgrp` - Foreground process group ID.
 pub fn attach_session(sid: u64, pgrp: u64) {
     // wave8 GT: the console terminal is tty-server's
-    if crate::lx::console::forwarded() {
-        TTY.lock().nonblock = false;
-        crate::lx::console::attach(sid, pgrp);
-        return;
-    }
-    let mut t = TTY.lock();
-    t.session = sid;
-    t.fg_pgrp = pgrp;
-    t.termios = Termios::default();
-    t.line.clear();
-    t.ready.clear();
-    t.nonblock = false;
+    TTY.lock().nonblock = false;
+    crate::lx::console::attach(sid, pgrp);
 }
 
 /// Returns the console to the Hydra shell.
 pub fn detach_session() {
-    if crate::lx::console::forwarded() {
-        crate::lx::console::detach();
-        return;
-    }
-    let mut t = TTY.lock();
-    t.session = 0;
-    t.fg_pgrp = 0;
-    t.line.clear();
-    t.ready.clear();
+    crate::lx::console::detach();
 }
 
 /// True while a Linux session owns the console.
@@ -235,10 +207,7 @@ pub fn detach_session() {
 ///
 /// `true` if attached to a Linux session; `false` if owned by Hydra shell.
 pub fn attached() -> bool {
-    if crate::lx::console::forwarded() {
-        return crate::lx::console::attached();
-    }
-    TTY.lock().session != 0
+    crate::lx::console::attached()
 }
 
 /// Prints raw bytes to the console output.
@@ -291,10 +260,7 @@ pub(crate) fn process_output(t: &Tty, data: &[u8], out: &mut Vec<u8>) {
 /// Number of bytes processed and output, or a negative Linux errno (forwarded).
 pub fn write(data: &[u8]) -> i64 {
     // wave8 GT: `data` is the caller's own buffer (`vfs::stream_io`), forwarded as such
-    if crate::lx::console::forwarded() {
-        return crate::lx::console::write(data.as_ptr() as u64, data.len());
-    }
-    write_kernel(data) as i64
+    crate::lx::console::write(data.as_ptr() as u64, data.len())
 }
 
 /// [`write`] in the kernel: output processing with the kernel's termios, then the console
@@ -314,183 +280,6 @@ pub fn write_kernel(data: &[u8]) -> usize {
     data.len()
 }
 
-/// Converts an input Key into ANSI terminal escape bytes.
-///
-/// # Arguments
-///
-/// * `key` - Hardware keyboard input key.
-///
-/// # Returns
-///
-/// Byte vector representing ANSI key sequence.
-fn key_bytes(key: Key) -> Vec<u8> {
-    match key {
-        Key::Printable(c) => {
-            let c = char::from(c);
-            match c {
-                '\u{8}' => alloc::vec![0x7f], // Backspace sends DEL, as on a Linux console
-                _ => {
-                    let mut buf = [0u8; 4];
-                    c.encode_utf8(&mut buf).as_bytes().to_vec()
-                }
-            }
-        }
-        Key::Special(ScanCode(code)) => match code {
-            1 => b"\x1b[A".to_vec(),
-            2 => b"\x1b[B".to_vec(),
-            3 => b"\x1b[C".to_vec(),
-            4 => b"\x1b[D".to_vec(),
-            5 => b"\x1b[H".to_vec(),
-            6 => b"\x1b[F".to_vec(),
-            8 => b"\x1b[3~".to_vec(),
-            9 => b"\x1b[5~".to_vec(),
-            10 => b"\x1b[6~".to_vec(),
-            0x17 => alloc::vec![0x1b], // Escape
-            _ => Vec::new(),
-        },
-    }
-}
-
-/// Feeds input bytes through the line discipline: echo goes to `echo`, and `ISIG`
-/// characters add the signal to raise (in the foreground group) to `signals`.
-///
-/// # Arguments
-///
-/// * `t` - Active Tty state.
-/// * `bytes` - Incoming raw input bytes.
-/// * `echo` - Output buffer for echoed characters.
-/// * `signals` - Output buffer for generated signals.
-pub(crate) fn feed_input(t: &mut Tty, bytes: &[u8], echo: &mut Vec<u8>, signals: &mut Vec<u32>) {
-    for &b in bytes {
-        if let Some(sig) = input_byte(t, b, echo) {
-            signals.push(sig);
-        }
-    }
-}
-
-/// Feeds one input byte through the line discipline. Returns a signal to raise, if any.
-///
-/// # Arguments
-///
-/// * `t` - Active Tty state.
-/// * `b` - Input byte.
-/// * `echo` - Output buffer for echo characters.
-///
-/// # Returns
-///
-/// `Some(signal)` if input byte generated a signal (e.g. `SIGINT`), or `None`.
-fn input_byte(t: &mut Tty, mut b: u8, echo: &mut Vec<u8>) -> Option<u32> {
-    let tm = t.termios;
-    if tm.iflag & ICRNL != 0 && b == b'\r' {
-        b = b'\n';
-    }
-    if tm.lflag & ISIG != 0 {
-        let sig = if b == tm.cc[VINTR] {
-            Some(super::proc::SIGINT)
-        } else if b == tm.cc[VQUIT] {
-            Some(super::proc::SIGQUIT)
-        } else if b == tm.cc[VSUSP] {
-            Some(super::proc::SIGTSTP)
-        } else {
-            None
-        };
-        if let Some(sig) = sig {
-            t.line.clear();
-            if tm.lflag & ECHO != 0 {
-                echo.extend_from_slice(&[b'^', b + 0x40, b'\r', b'\n']);
-            }
-            return Some(sig);
-        }
-    }
-    if tm.lflag & ICANON != 0 {
-        if b == tm.cc[VERASE] || b == 0x08 {
-            if t.line.pop().is_some() && tm.lflag & ECHO != 0 {
-                echo.extend_from_slice(b"\x08 \x08");
-            }
-        } else if b == tm.cc[VKILL] {
-            for _ in 0..t.line.len() {
-                if tm.lflag & ECHO != 0 {
-                    echo.extend_from_slice(b"\x08 \x08");
-                }
-            }
-            t.line.clear();
-        } else if b == tm.cc[VWERASE] {
-            while matches!(t.line.last(), Some(b' ')) {
-                t.line.pop();
-                echo.extend_from_slice(b"\x08 \x08");
-            }
-            while matches!(t.line.last(), Some(c) if *c != b' ') {
-                t.line.pop();
-                echo.extend_from_slice(b"\x08 \x08");
-            }
-        } else if b == tm.cc[VEOF] {
-            let line = core::mem::take(&mut t.line);
-            t.ready.extend(line.into_iter().map(Some));
-            t.ready.push_back(None);
-        } else if b == b'\n' {
-            t.line.push(b);
-            let line = core::mem::take(&mut t.line);
-            t.ready.extend(line.into_iter().map(Some));
-            if tm.lflag & ECHO != 0 {
-                echo.extend_from_slice(b"\r\n");
-            }
-        } else {
-            t.line.push(b);
-            if tm.lflag & ECHO != 0 {
-                if b < 0x20 && tm.lflag & ECHOCTL != 0 {
-                    echo.extend_from_slice(&[b'^', b + 0x40]);
-                } else {
-                    echo.push(b);
-                }
-            }
-        }
-    } else {
-        t.ready.push_back(Some(b));
-        if tm.lflag & ECHO != 0 {
-            echo.push(b);
-        }
-    }
-    None
-}
-
-/// Moves pending keystrokes into the terminal. Safe to call whenever no kernel lock is
-/// held (read paths and returns to user mode).
-pub fn pump() {
-    // (wave8 GT: forwarded, tty-server takes the keys; the console is never attached here)
-    let mut keys = Vec::new();
-    {
-        let t = match TTY.try_lock() {
-            Some(t) => t,
-            None => return,
-        };
-        if t.session == 0 {
-            return;
-        }
-    }
-    while let Some(k) = crate::console::read_key() {
-        keys.push(k);
-    }
-    if keys.is_empty() {
-        return;
-    }
-    let mut echo = Vec::new();
-    let mut signals = Vec::new();
-    let fg = {
-        let mut t = TTY.lock();
-        for k in keys {
-            feed_input(&mut t, &key_bytes(k), &mut echo, &mut signals);
-        }
-        t.fg_pgrp
-    };
-    if !echo.is_empty() {
-        out_raw(&echo);
-    }
-    for sig in signals {
-        super::proc::post_group(fg, sig);
-    }
-    // Another task may be waiting for the input this pump just processed
-    INPUT_WQ.wake_all();
-}
 
 /// True if input is buffered for `read` (does not pull new keystrokes; see [`pump`]).
 ///
@@ -498,20 +287,7 @@ pub fn pump() {
 ///
 /// `true` if input is buffered; `false` otherwise.
 pub fn has_input() -> bool {
-    if crate::lx::console::forwarded() {
-        return crate::lx::console::readable();
-    }
-    TTY.try_lock().map_or(false, |t| !t.ready.is_empty())
-}
-
-/// Bytes available to `read` right now.
-///
-/// # Returns
-///
-/// `true` if characters are waiting to be read.
-pub fn readable() -> bool {
-    pump();
-    !TTY.lock().ready.is_empty()
+    crate::lx::console::readable()
 }
 
 /// `read` from the terminal: blocks until a line (canonical mode) or at least one byte
@@ -530,88 +306,7 @@ pub fn read(buf: &mut [u8], nonblock: bool) -> i64 {
         return 0;
     }
     // wave8 GT: `buf` is the caller's own buffer (`vfs::stream_io`), forwarded as such
-    if crate::lx::console::forwarded() {
-        return crate::lx::console::read(buf.as_mut_ptr() as u64, buf.len(), nonblock);
-    }
-    // A background process reading the terminal is stopped with SIGTTIN (EIO if it
-    // ignores or blocks that signal), as on Linux
-    let (_, pid) = super::proc::current_ids();
-    if let Some((sid, pgid)) = super::proc::session_of(pid) {
-        let (tty_sid, fg) = {
-            let t = TTY.lock();
-            (t.session, t.fg_pgrp)
-        };
-        if tty_sid == sid && fg != 0 && pgid != fg {
-            if super::proc::ignores_or_blocks(super::proc::SIGTTIN) {
-                return -5;
-            }
-            super::proc::post_group(pgid, super::proc::SIGTTIN);
-            return super::proc::ERESTARTSYS;
-        }
-    }
-    let mut waits = crate::task::wait::WaitSet::new();
-    waits.add(crate::task::wait::QueueRef::Static(&INPUT_WQ));
-    loop {
-        waits.register();
-        pump();
-        if let Some(n) = take_input(&mut TTY.lock(), buf) {
-            return n;
-        }
-        if nonblock {
-            return EAGAIN;
-        }
-        if super::proc::signal_pending() {
-            return super::proc::ERESTARTSYS;
-        }
-        waits.wait(None);
-    }
-}
-
-/// Takes input for `read`: a line in canonical mode, otherwise what is there. `None`
-/// means the reader must wait.
-///
-/// # Arguments
-///
-/// * `t` - Active Tty state.
-/// * `buf` - Destination buffer.
-///
-/// # Returns
-///
-/// `Some(bytes_copied)` if input was extracted, or `None` if reader must wait.
-pub(crate) fn take_input(t: &mut Tty, buf: &mut [u8]) -> Option<i64> {
-    let canon = t.termios.lflag & ICANON != 0;
-    if !t.ready.is_empty() {
-        let mut n = 0;
-        while n < buf.len() {
-            match t.ready.front() {
-                Some(Some(b)) => {
-                    buf[n] = *b;
-                    n += 1;
-                    t.ready.pop_front();
-                    if canon && buf[n - 1] == b'\n' {
-                        break;
-                    }
-                }
-                Some(None) => {
-                    // End-of-file marker (^D): ends this read, 0 bytes if nothing came
-                    // before it. Used up either way, as on Linux: a ^D after a partial
-                    // line only pushes the line out (left queued, the next reader saw a
-                    // second end-of-file)
-                    t.ready.pop_front();
-                    break;
-                }
-                None => break,
-            }
-        }
-        if super::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
-            crate::kprintln!("[tty] read -> {:?} (canon={}, left={})", core::str::from_utf8(&buf[..n]).unwrap_or("?"), canon, t.ready.len());
-        }
-        return Some(n as i64);
-    }
-    if !canon && t.termios.cc[VMIN] == 0 {
-        return Some(0);
-    }
-    None
+    crate::lx::console::read(buf.as_mut_ptr() as u64, buf.len(), nonblock)
 }
 
 /// Copies byte slice to user memory after prefaulting.
@@ -697,15 +392,6 @@ pub(crate) fn vt_ioctl(request: u64, arg: u64) -> Option<i64> {
     })
 }
 
-/// The virtual terminal display managers last activated.
-///
-/// # Returns
-///
-/// Active VT index.
-pub fn active_vt() -> u32 {
-    ACTIVE_VT.load(core::sync::atomic::Ordering::Relaxed)
-}
-
 /// Console terminal `ioctl`s.
 ///
 /// # Arguments
@@ -717,10 +403,7 @@ pub fn active_vt() -> u32 {
 ///
 /// Result code, or negative Linux errno on error.
 pub fn ioctl(request: u64, arg: u64) -> i64 {
-    if crate::lx::console::forwarded() {
-        return crate::lx::console::ioctl(request, arg);
-    }
-    ioctl_kernel(request, arg)
+    crate::lx::console::ioctl(request, arg)
 }
 
 /// [`ioctl`] in the kernel (also tty-server's stand-in while it is not online).
@@ -737,9 +420,7 @@ pub fn ioctl_kernel(request: u64, arg: u64) -> i64 {
     if let Some(r) = vt_ioctl(request, arg) {
         return r;
     }
-    if request == 0x541B {
-        pump(); // FIONREAD counts keystrokes not yet pumped
-    }
+
     let default_size = || {
         let (cols, rows) = crate::video::console::dimensions();
         (rows as u16, cols as u16)

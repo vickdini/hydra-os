@@ -1403,7 +1403,6 @@ pub mod lx {
     }
     // wave8 GX2 end
     use core::sync::atomic::AtomicBool;
-    pub static KERNEL_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
     /// *stub* Test switches: online, family 2 moved, relay wanted.
     pub static ONLINE: AtomicBool = AtomicBool::new(false);
     pub static NET_MOVED: AtomicBool = AtomicBool::new(false);

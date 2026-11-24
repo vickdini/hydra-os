@@ -201,12 +201,8 @@ pub mod compat {
         pub mod admin;
         #[path = "../../../../../src/compat/linux/bpf.rs"]
         pub mod bpf;
-        #[path = "../../../../../src/compat/linux/keys.rs"]
-        pub mod keys;
         #[path = "../../../../../src/compat/linux/landlock.rs"]
         pub mod landlock;
-        #[path = "../../../../../src/compat/linux/mqueue.rs"]
-        pub mod mqueue;
         #[path = "../../../../../src/compat/linux/perf.rs"]
         pub mod perf;
         #[path = "../../../../../src/compat/linux/prof.rs"]
@@ -215,8 +211,6 @@ pub mod compat {
         pub mod sysv;
 
         // Other groups' files, compiled because the files above use them
-        #[path = "../../../../../src/compat/linux/eventfd.rs"]
-        pub mod eventfd;
         #[path = "../../../../../src/compat/linux/memfd.rs"]
         pub mod memfd;
         #[path = "../../../../../src/compat/linux/seccomp.rs"]

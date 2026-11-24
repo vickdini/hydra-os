@@ -125,52 +125,6 @@ fn remove_thread(pid: u64, tid: u64) {
     linux::proc::thread_exited(pid, tid, 0, 0, (0, 0));
 }
 
-#[test]
-fn uid_and_gid_maps() {
-    let _g = setup();
-    user_proc(730, 1000);
-    // Before unsharing: the identity map, no writes
-    assert_eq!(read_file("self/uid_map"), format!("{:>10} {:>10} {:>10}\n", 0, 0, u32::MAX));
-    assert_eq!(read_file("self/setgroups"), "allow\n");
-    assert_eq!(write_file("self/uid_map", b"0 1000 1"), EPERM, "the initial namespace's maps are fixed");
-    assert_eq!(sys_unshare(CLONE_NEWUSER), 0);
-    assert_eq!(read_file("self/uid_map"), "", "not written yet");
-    assert_eq!(id_for_caller(1000, false), 65534, "unmapped");
-    // Unprivileged: only the creator's own ID, once
-    assert_eq!(write_file("self/uid_map", b"0 0 1"), EPERM, "not our ID");
-    assert_eq!(write_file("self/uid_map", b"0 1000 2"), EPERM, "more than one");
-    assert_eq!(write_file("self/uid_map", b"0 1000"), EINVAL, "two fields");
-    assert_eq!(write_file("self/uid_map", b"0 1000 1 4"), EINVAL, "four fields");
-    assert_eq!(write_file("self/uid_map", b"0 1000 0"), EINVAL, "count 0");
-    assert_eq!(write_file("self/uid_map", b"4294967295 1000 2"), EINVAL, "overflow");
-    assert_eq!(write_file("self/uid_map", b"x 1000 1"), EINVAL);
-    let epoch = linux::ident_epoch();
-    assert_eq!(write_file("self/uid_map", b"0 1000 1\n"), 9);
-    assert!(linux::ident_epoch() > epoch, "the identity caches are stale now");
-    assert_eq!(read_file("self/uid_map"), format!("{:>10} {:>10} {:>10}\n", 0, 1000, 1));
-    assert_eq!(write_file("self/uid_map", b"0 1000 1"), EPERM, "written once");
-    assert_eq!(id_for_caller(1000, false), 0);
-    assert_eq!(id_for_caller(1001, false), 65534);
-    // gid_map: only after setgroups is denied
-    assert_eq!(write_file("self/gid_map", b"0 1000 1"), EPERM);
-    assert_eq!(write_file("self/setgroups", b"maybe"), EINVAL);
-    assert_eq!(write_file("self/setgroups", b"deny"), 4);
-    assert!(setgroups_denied());
-    assert_eq!(read_file("self/setgroups"), "deny\n");
-    assert_eq!(write_file("self/gid_map", b"0 1000 1"), 8);
-    assert_eq!(read_file("self/gid_map"), format!("{:>10} {:>10} {:>10}\n", 0, 1000, 1));
-    assert_eq!(id_for_caller(1000, true), 0);
-    assert_eq!(write_file("self/setgroups", b"allow"), EPERM, "fixed once gid_map is written");
-    // Bad paths
-    assert_eq!(write_file("nonsense", b"x"), EINVAL);
-    assert_eq!(write_file("4242/uid_map", b"0 0 1"), EPERM, "no such process");
-    assert_eq!(read_file("4242/uid_map"), "");
-    assert_eq!(read_file("nonsense"), "");
-    // A process in the initial namespace reads identity maps and is not denied
-    user_proc(731, 1000);
-    assert!(!setgroups_denied());
-    assert_eq!(id_for_caller(1234, false), 1234);
-}
 
 #[test]
 fn privileged_maps_and_nesting() {

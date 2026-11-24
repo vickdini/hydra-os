@@ -106,60 +106,7 @@ fn registration_inherits_from_the_parent() {
     assert!(vfork_released(4242));
 }
 
-#[test]
-fn getgroups_and_setgroups() {
-    let _g = setup();
-    spawn_as(3010, 0, 1000, 1000);
-    run(3010);
-    let g = [7u32, 8, 9];
-    assert_eq!(sys_setgroups(3, ptr(&g)), EPERM, "needs CAP_SETGID");
-    fake::task(3010, |t| t.caps.effective = 1 << 6);
-    assert_eq!(sys_setgroups(65537, 0), EINVAL);
-    assert_eq!(sys_setgroups(3, ptr(&g)), 0);
-    assert_eq!(sys_getgroups(0, 0), 3, "size 0: the count");
-    let mut small = [0u32; 2];
-    assert_eq!(sys_getgroups(2, mptr(&mut small)), EINVAL);
-    let mut out = [0u32; 4];
-    assert_eq!(sys_getgroups(4, mptr(&mut out)), 3);
-    assert_eq!(&out[..3], &g);
-    assert_eq!(sys_setgroups(0, 0), 0, "no groups");
-    assert_eq!(sys_getgroups(4, mptr(&mut out)), 0);
-    with_current_mm(|| {
-        assert_eq!(sys_setgroups(1, 8), EFAULT);
-        assert_eq!(sys_setgroups(3, ptr(&g)), EFAULT, "host pointers are not user memory here");
-    });
-    assert_eq!(sys_setgroups(3, ptr(&g)), 0);
-    with_current_mm(|| assert_eq!(sys_getgroups(3, 8), EFAULT));
-}
 
-#[test]
-fn process_groups_and_sessions() {
-    let _g = setup();
-    spawn(3020, 0);
-    spawn(3021, 3020);
-    spawn(3022, 3020);
-    run(3021);
-    assert_eq!(getpgid(0), 3020);
-    assert_eq!(getsid(3022), 3020);
-    assert_eq!(getpgid(4242), ESRCH);
-    assert_eq!(getsid(4242), ESRCH);
-    assert_eq!(setpgid(0, -1i64 as u64), EINVAL);
-    assert_eq!(setpgid(3022, 0), ESRCH, "a sibling is not ours to move");
-    assert_eq!(setpgid(0, 0), 0);
-    assert_eq!(getpgid(0), 3021);
-    run(3020);
-    assert_eq!(setpgid(3022, 3021), 0, "a parent moves its child");
-    assert_eq!(group_members(3021), vec![3021, 3022]);
-    assert_eq!(setpgid(0, 0), EPERM, "a session leader");
-    assert_eq!(setsid(), EPERM, "already a group leader");
-    run(3021);
-    assert_eq!(setsid(), EPERM, "3022 is in its group");
-    run(3022);
-    assert_eq!(setsid(), 3022);
-    assert_eq!(session_of(3022), Some((3022, 3022)));
-    fake::switch_to(0);
-    assert_eq!(setsid(), ESRCH, "no process");
-}
 
 #[test]
 fn getppid_and_visible_pids_respect_pid_namespaces() {
@@ -468,27 +415,6 @@ fn sigqueueinfo_and_realtime_queues() {
     assert!(take_signal_info_of(3131, 3131, bit(SIGRT)).is_none());
 }
 
-#[test]
-fn timer_and_notification_signals() {
-    let _g = setup();
-    spawn(3140, 0);
-    add_thread(3140, 3141);
-    assert!(post_timer_signal(3140, None, SIGRT, 4, 0, 99));
-    set_timer_overrun(3140, None, SIGRT, 3);
-    let t = take_signal_info_of(3140, 3140, bit(SIGRT)).unwrap();
-    assert_eq!((t.code, t.pid, t.uid, t.value), (-2, 4, 3, 99), "SI_TIMER, timer id, overrun, value");
-    assert!(post_timer_signal(3140, Some(3141), SIGRT, 5, 1, 7));
-    set_timer_overrun(3140, Some(3141), SIGRT, 2);
-    let t = take_signal_info_of(3141, 3140, bit(SIGRT)).unwrap();
-    assert_eq!((t.pid, t.uid), (5, 2));
-    set_timer_overrun(4242, None, SIGRT, 1);
-    assert!(!post_timer_signal(4242, None, SIGRT, 1, 0, 0));
-    assert!(post_with_info(3140, SIGUSR1, -3, 11, 12, 13));
-    let t = take_signal_info_of(3140, 3140, bit(SIGUSR1)).unwrap();
-    assert_eq!((t.code, t.pid, t.uid, t.value), (-3, 11, 12, 13));
-    assert!(!post_with_info(4242, SIGUSR1, 0, 0, 0, 0));
-    assert_eq!(take_signal(0), None, "no current process");
-}
 
 #[test]
 fn sigcont_continues_a_stopped_process() {

@@ -103,9 +103,8 @@ fn direct_calls_that_are_refused() {
         push(dcall(me, 0, [LXS_TEST as u64, 0, 0, 0, 0, 4], false));
         // Its own pool, whose only worker is this one (busy): EAGAIN
         push(dcall(me, 0, [LXS_TEST as u64, LX_DCALL_OP_NULL, 0, 0, 0, 0], false));
-        // A target not running; one switched back to the kernel
+        // Targets not running
         push(dcall(me, 0, [LXS_SEC as u64, LX_DCALL_OP_NULL, 0, 0, 0, 0], false));
-        crate::lx::svc::tests::set_mode(LXS_VFS, crate::lx::svc::SvcMode::Kernel);
         push(dcall(me, 0, [LXS_VFS as u64, LX_DCALL_OP_NULL, 0, 0, 0, 0], false));
         (0, 0)
     }));

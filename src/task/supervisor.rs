@@ -321,7 +321,7 @@ fn lx_ipc_args() -> Option<Vec<String>> {
 /// Whether Linux service `svc` runs in its own process on `ep`: not co-located in
 /// linux-server, not switched back to the kernel (`lx.<name>=kernel`, `lx=kernel`).
 fn split_out(svc: u8, ep: u32) -> bool {
-    crate::lx::svc::endpoint_of(svc) == ep && crate::lx::svc::mode(svc) == crate::lx::svc::SvcMode::Forward && !crate::lx::all_kernel()
+    crate::lx::svc::endpoint_of(svc) == ep
 }
 // wave8 GX2 end
 
@@ -344,9 +344,6 @@ fn input_server_args() -> Option<Vec<String>> {
 /// display-server (two workers): not started when the kernel's `drm.rs` serves the display
 /// (`lx.display=kernel`, `lx=kernel`); it would only exit again.
 fn display_server_args() -> Option<Vec<String>> {
-    if crate::lx::svc::mode(crate::ipc::protocol::LXS_DISPLAY) != crate::lx::svc::SvcMode::Forward || crate::lx::all_kernel() {
-        return None;
-    }
     Some(alloc::vec![String::from("workers=2")])
 }
 // wave8 GD end
@@ -498,13 +495,9 @@ fn hda_args() -> Option<Vec<String>> {
 }
 
 // wave8 GS begin
-/// The sound service: started when the sound driver described a card and the ALSA devices
-/// are not switched back to the kernel (`lx.sound=kernel`, `lx=kernel`). The kernel asks the
+/// The sound service: started when the sound driver described a card. The kernel asks the
 /// driver about the card first (`snd::probe`): the service takes it from there.
 fn sound_server_args() -> Option<Vec<String>> {
-    if !crate::ipc::sound::forwarded() {
-        return None;
-    }
     // (the card is asked for by `start_all` before this, without the supervisor's lock: a
     // restart while the driver itself restarts finds it known from that first probe)
     crate::compat::linux::snd::card()?;
@@ -804,12 +797,14 @@ pub fn supervisor_init() {
         // The Linux server (wave 3): the Linux system calls the kernel forwards
         // (`crate::lx`); its going away runs the crash policy (the endpoint's hook)
         crate::lx::init();
-        // (wave 6: Linux service 1; EndLinux, the user's decision 6, while it hosts pieces
-        // with unkept state)
+        // (wave 6: Linux service 1; EndLinux, the user's decision 6, while it hosted pieces
+        // with unkept state. wave10 G10-C: it hosts none any more — `/sys` files, exec's front
+        // half, the test calls — so a crash fails only its own calls in flight and its open
+        // `/sys` files: FailObjects)
         sup.services.push(
             ServiceDescriptor::new("linux_server", crate::ipc::protocol::ENDPOINT_LINUX_SERVER, LINUX_SERVER_ELF, linux_server_args, no_grants).linux_service(
                 crate::lx::restart::SVC_LINUX,
-                crate::lx::restart::RestartClass::EndLinux,
+                crate::lx::restart::RestartClass::FailObjects,
                 "linux",
             ),
         );

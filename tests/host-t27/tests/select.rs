@@ -1,11 +1,11 @@
 //! `select` / `pselect6` (`src/compat/linux/select.rs`): descriptor sets in and out,
 //! readiness from real kernel objects (eventfds, pipes), timeouts on the fake clock, signals
 //! and the temporary signal mask.
+#![allow(dead_code, unused_imports)] // (wave10 G10-C: helpers of tests deleted with the kernel copies)
 
 mod common;
 use common::*;
 
-use hydra_hosttests_t27::compat::linux::eventfd::EventFd;
 use hydra_hosttests_t27::compat::linux::select::{sys_pselect6, sys_select};
 use hydra_hosttests_t27::fs::FileDescriptor;
 use std::sync::Arc;
@@ -30,34 +30,9 @@ fn members(s: &Set) -> Vec<usize> {
     (0..1024).filter(|&fd| s[fd / 64] & (1 << (fd % 64)) != 0).collect()
 }
 
-fn eventfd(fd: usize, counter: u64) -> Arc<spin::Mutex<EventFd>> {
-    let e = EventFd::new(0, 0);
-    e.lock().counter = counter;
-    fake::fd::install(fd, FileDescriptor::EventFd(e.clone()));
-    e
-}
 
 fn file(fd: usize) {
     fake::fd::install(fd, FileDescriptor::File { path: "/etc/hostname".into(), readable: true, writable: true });
-}
-
-#[test]
-fn reports_ready_descriptors_in_each_set() {
-    fake::reset();
-    eventfd(5, 1); // readable and writable
-    eventfd(6, 0); // writable only
-    file(70); // always both (second word of the set)
-    let (mut r, mut w, mut e) = (set(&[5, 6, 70]), set(&[6, 70]), set(&[5]));
-    let zero = Pair(0, 0);
-    let n = sys_select([71, mptr(&mut r), mptr(&mut w), mptr(&mut e), ptr(&zero), 0]);
-    assert_eq!(n, 4);
-    assert_eq!(members(&r), vec![5, 70]);
-    assert_eq!(members(&w), vec![6, 70]);
-    assert_eq!(members(&e), Vec::<usize>::new(), "no exceptional conditions");
-    assert_eq!(fake::TTY_PUMPS.get(), 1, "the terminal is pumped first");
-    // Null sets are left alone
-    let mut r = set(&[5]);
-    assert_eq!(sys_select([6, mptr(&mut r), 0, 0, 0, 0]), 1);
 }
 
 #[test]
@@ -96,57 +71,6 @@ fn argument_errors() {
     fake::bad_ptr(mptr(&mut t), 16);
     assert_eq!(sys_select([0, 0, 0, 0, mptr(&mut t), 0]), EFAULT);
     assert_eq!(sys_pselect6([0, 0, 0, 0, mptr(&mut t), 0]), EFAULT);
-}
-
-#[test]
-fn timeouts_end_the_wait() {
-    fake::reset();
-    eventfd(5, 0);
-    let mut r = set(&[5]);
-    let t = Pair(1, 500_000); // 1.5 s (select: microseconds)
-    let start = fake::now_ns();
-    assert_eq!(sys_select([6, mptr(&mut r), 0, 0, ptr(&t), 0]), 0);
-    assert_eq!(fake::LAST_DEADLINE.get(), Some(start + 1_500_000_000));
-    assert_eq!(members(&r), Vec::<usize>::new(), "cleared on timeout");
-    // pselect6: nanoseconds
-    let mut r = set(&[5]);
-    let t = Pair(0, 2_000);
-    let start = fake::now_ns();
-    assert_eq!(sys_pselect6([6, mptr(&mut r), 0, 0, ptr(&t), 0]), 0);
-    assert_eq!(fake::LAST_DEADLINE.get(), Some(start + 2_000));
-}
-
-#[test]
-fn a_blocking_select_wakes_when_a_descriptor_becomes_ready() {
-    fake::reset();
-    let e = eventfd(5, 0);
-    let mut r = set(&[5]);
-    let e2 = e.clone();
-    fake::on_wait(move |_| e2.lock().counter = 3);
-    assert_eq!(sys_select([6, mptr(&mut r), 0, 0, 0, 0]), 1);
-    assert_eq!(fake::WAITS.get(), 1);
-    assert_eq!(fake::wait::LAST_QUEUES.get(), 1, "it slept on the eventfd's queue");
-    assert_eq!(members(&r), vec![5]);
-    // Nothing to wake it: it would block
-    fake::reset();
-    eventfd(5, 0);
-    let mut r = set(&[5]);
-    assert!(blocks(|| sys_select([6, mptr(&mut r), 0, 0, 0, 0])));
-}
-
-#[test]
-fn signals_restart_select_but_interrupt_pselect_with_a_mask() {
-    fake::reset();
-    eventfd(5, 0);
-    fake::SIGNAL_PENDING.set(true);
-    let mut r = set(&[5]);
-    assert_eq!(sys_select([6, mptr(&mut r), 0, 0, 0, 0]), ERESTARTSYS);
-    assert_eq!(sys_pselect6([6, mptr(&mut r), 0, 0, 0, 0]), ERESTARTSYS, "no mask: restarted");
-    let mask: u64 = 1 << 9;
-    let arg = [ptr(&mask), 8u64];
-    assert_eq!(sys_pselect6([6, mptr(&mut r), 0, 0, 0, ptr(&arg)]), EINTR);
-    assert_eq!(fake::proc::TEMP_MASKS.with_borrow(|v| v.clone()), vec![mask], "in force during the wait");
-    assert_eq!(fake::proc::RESTORED_MASKS.with_borrow(|v| v.clone()), vec![0x5a5a], "then the old one is back");
 }
 
 #[test]

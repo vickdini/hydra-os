@@ -125,15 +125,6 @@ pub trait CharDevice: Send + Sync {
     /// `true` if non-blocking mode is set; `false` otherwise.
     fn nonblock(&self) -> bool;
 
-    /// Retrieves the buffer behind a DMA-BUF descriptor.
-    ///
-    /// # Returns
-    ///
-    /// Dynamic reference to the underlying DMA-BUF object, or `None`.
-    fn dma_buf(&self) -> Option<Arc<dyn core::any::Any + Send + Sync>> {
-        None
-    }
-
     /// Dispatches socket calls on devices that represent sockets.
     ///
     /// # Arguments
@@ -174,10 +165,6 @@ pub trait CharDevice: Send + Sync {
         false
     }
 
-    /// The POSIX message queue behind this descriptor, if it is one.
-    fn as_mqueue(&self) -> Option<&super::mqueue::MqHandle> {
-        None
-    }
 
     /// `pread` at `offset`, for a device with positions (`/proc/<pid>/mem`); `None` if it
     /// has none.
@@ -206,10 +193,6 @@ pub trait CharDevice: Send + Sync {
         None
     }
 
-    /// The bpf object behind this descriptor, if it is one.
-    fn as_bpf(&self) -> Option<super::bpf::Obj> {
-        None
-    }
 
     /// The perf counter behind this descriptor, if it is one.
     fn as_perf(&self) -> Option<Arc<super::perf::Event>> {
@@ -256,10 +239,9 @@ pub trait CharDevice: Send + Sync {
 /// `Some(Ok(dev))` or `Some(Err(code))` if claimed by a driver, or `None` if unhandled.
 pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
     let (major, minor) = ((rdev >> 8) & 0xFFF, (rdev & 0xFF) | ((rdev >> 12) & 0xFFF00));
-    let nonblock = flags & 0o4000 != 0;
-    // wave8 GI begin: the event devices are the input service's while input is forwarded
-    // (a restarting service is waited for; the kernel copy serves only lx.input=kernel)
-    if major == 13 && crate::ipc::input::forwarded() {
+    // wave8 GI begin: the event devices are the input service's (a restarting service is
+    // waited for)
+    if major == 13 {
         return Some(crate::ipc::input::open(rdev, flags));
     }
     // wave8 GI end
@@ -273,10 +255,10 @@ pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
     if let Some(r) = crate::lx::dev_open(rdev, flags) {
         return Some(r);
     }
+    // (wave10 G10-C: DRM 226 and ALSA 116 are the display and sound services' alone; a
+    // major they have not claimed has no device)
     match major {
-        226 => Some(super::drm::open(minor, nonblock)),
-        13 => Some(super::evdev::open(minor, nonblock)),
-        116 => Some(super::snd::open(minor, nonblock)),
+        226 | 116 => Some(Err(ENODEV)),
         1 if minor == 11 => Some(super::admin::kmsg_open(flags)),
         _ => None,
     }
@@ -294,7 +276,7 @@ pub fn open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn CharDevice>, i64>> {
 /// `Some(result)` if handled, or `None` if `num` is not a device socket call.
 pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
     match num {
-        41 => super::netlink::socket(a),
+
         42..=55 | 288 | 299 | 307 => {
             let dev = crate::task::with_current_fds_mut(|fds| match fds.get(a[0] as usize) {
                 Some(crate::fs::FileDescriptor::Device(d)) => Some(d.clone()),

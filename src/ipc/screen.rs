@@ -46,7 +46,6 @@ use policy::{Event, Page};
 
 const EPERM: i64 = -1;
 const ENXIO: i64 = -6;
-const ENODEV: i64 = -19;
 const ENOMEM: i64 = -12;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
@@ -135,12 +134,10 @@ fn status_get(i: usize) -> u32 {
 }
 
 // wave8 GD begin: the routing call agreed with Group I (NOTES.md, wave 8): one place
-/// Input goes to the desktop session (`on`) or back to the console (held keys released).
+/// Input goes to the desktop session (`on`) or back to the console (the input service
+/// releases held keys when the routing goes off).
 fn route_input(on: bool) {
     crate::compat::linux::evdev::set_routing(on);
-    if !on {
-        crate::compat::linux::evdev::release_held_keys();
-    }
 }
 // wave8 GD end
 
@@ -444,11 +441,6 @@ fn wait(gen: u64, deadline_ns: u64) -> i64 {
 pub fn sys_screen(op: u64, a: u64, b: u64) -> i64 {
     if crate::task::current_service() != Some(ENDPOINT_DISPLAY_DEV) {
         return EPERM;
-    }
-    // `lx.display=kernel` / `lx=kernel`: the kernel's `drm.rs` has the screen; the service
-    // learns it from its first call and exits
-    if crate::lx::svc::mode(crate::ipc::protocol::LXS_DISPLAY) != crate::lx::svc::SvcMode::Forward || crate::lx::all_kernel() {
-        return ENODEV;
     }
     match op {
         SCREEN_INFO => info(a),

@@ -499,12 +499,6 @@ pub fn set_max_user_namespaces(buf: &[u8]) -> i64 {
     buf.len() as i64
 }
 
-/// Whether the calling process may not change its supplementary groups (`setgroups` is
-/// `deny` in its user namespace).
-pub fn setgroups_denied() -> bool {
-    current_ns().user.is_some_and(|u| u.setgroups_deny.load(Ordering::Relaxed))
-}
-
 /// The calling process's IPC namespace (0: the initial one), which scopes System V IPC.
 pub fn ipc_ns() -> u64 {
     current_ns().ipc
@@ -668,11 +662,6 @@ fn user_ns_within(inner: &Option<Arc<UserNs>>, outer: &Option<Arc<UserNs>>) -> b
 }
 
 // wave10 G8-1 begin: the ptrace rule's "capabilities count over the target"
-/// Whether process `target`'s user namespace is process `caller`'s or lies below it
-/// (`false` when `target` is gone).
-pub fn user_within(target: u64, caller: u64) -> bool {
-    user_within_in(&super::proc::PROCS.lock(), target, caller)
-}
 
 /// How process `target`'s user namespace stands to process `caller`'s (whose effective
 /// user is `euid`), on a process table the caller holds: (it is the caller's or lies below
@@ -706,12 +695,6 @@ pub fn user_rel_in(procs: &alloc::collections::BTreeMap<u64, alloc::boxed::Box<s
     Some((within, same, owned))
 }
 
-/// [`user_within`] on a process table the caller holds.
-pub fn user_within_in(procs: &alloc::collections::BTreeMap<u64, alloc::boxed::Box<super::proc::Process>>, target: u64, caller: u64) -> bool {
-    let Some(t) = procs.get(&target) else { return false };
-    let mine = procs.get(&caller).and_then(|p| p.ns.user.clone());
-    user_ns_within(&t.ns.user, &mine)
-}
 // wave10 G8-1 end
 
 // wave10 G7b-1 begin: what lx-proc's setns/unshare rules need (`LXP_NS_FD`, `LXP_NS_GET`)

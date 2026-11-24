@@ -16,44 +16,23 @@
 //!   otherwise `-EIO`); a request waiting for readiness wakes on the dead object's
 //!   `POLLERR | POLLHUP` and completes with the call's error. The ring is the kernel's and
 //!   survives.
-//! - **Switching back:** `lx=kernel` (nothing is forwarded at all) or the boot word
-//!   `lx.uring=kernel` (requests run in the kernel's code as before wave 9, the program's
-//!   own calls are still forwarded).
+//! - **No switch back** (wave 10 10-C, decision 34: the rings stay in the kernel as
+//!   mechanism; `lx.uring=kernel` is ignored with a boot-log line).
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::syscall::SyscallFrame;
 
-/// `lx.uring=kernel`: io_uring and aio requests run in the kernel's code.
-static KERNEL: AtomicBool = AtomicBool::new(false);
 /// Requests answered by a service (counted for `[lx] uring` and the tests).
 static FORWARDED: AtomicU64 = AtomicU64::new(0);
 /// Requests the kernel answered.
 static IN_KERNEL: AtomicU64 = AtomicU64::new(0);
 
-/// The boot word `lx.uring=kernel` (the `lx.` prefix already taken off): whether `w` was it
-/// (requests stay in the kernel from now on).
-pub fn boot_word(w: &[u8]) -> bool {
-    if w != b"uring=kernel" {
-        return false;
-    }
-    KERNEL.store(true, Ordering::Relaxed);
-    true
-}
-
-/// Whether requests stay in the kernel (`lx.uring=kernel`).
-pub fn in_kernel() -> bool {
-    KERNEL.load(Ordering::Relaxed)
-}
 
 /// Routes the request call in `frame` (call number and arguments in place) like the
 /// program's own call: `Some(result)` when its owner answered it, `None` when the kernel's
 /// code runs it.
 pub fn route(frame: &SyscallFrame) -> Option<i64> {
-    if in_kernel() {
-        IN_KERNEL.fetch_add(1, Ordering::Relaxed);
-        return None;
-    }
     let r = super::forward(frame);
     if r.is_some() { &FORWARDED } else { &IN_KERNEL }.fetch_add(1, Ordering::Relaxed);
     r

@@ -58,8 +58,6 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         305 => adjtimex(a[0], a[1]),
         164 => settimeofday(a[0], a[1]),
         227 => clock_settime(a[0], a[1]),
-        170 => set_uts(a[0], a[1], false),
-        171 => set_uts(a[0], a[1], true),
         329 => pkey_mprotect(a[0], a[1], a[2], a[3]),
         447 => memfd_secret(a[0]),
         453 => map_shadow_stack(a[0], a[1], a[2]),
@@ -295,30 +293,6 @@ pub fn uts_copy(from: u64, to: u64) {
     if let Some(v) = t.get(&from).cloned() {
         t.insert(to, v);
     }
-}
-
-/// `sethostname` / `setdomainname(name, len)` (`CAP_SYS_ADMIN` in the namespace's owner).
-fn set_uts(name: u64, len: u64, domain: bool) -> i64 {
-    if len > 64 {
-        return EINVAL;
-    }
-    let raw = match copy_in(name, len as usize) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-    if !crate::task::with_current_task_mut(|t| t.caps.effective & (1 << 21) != 0).unwrap_or(false) {
-        return EPERM;
-    }
-    let value = alloc::string::String::from_utf8_lossy(&raw).into_owned();
-    let id = super::proc::PROCS.lock().get(&super::proc::current_ids().1).map_or(0, |p| p.ns.uts);
-    let (mut host, mut dom) = uts_names();
-    if domain {
-        dom = value;
-    } else {
-        host = value;
-    }
-    UTS.lock().insert(id, (host, dom));
-    0
 }
 
 // ----------------------------------------------------------------------
@@ -821,17 +795,9 @@ pub(super) fn remote_copy(mm: &Arc<Mutex<crate::memory::vm::Mm>>, addr: u64, dat
 fn desc_ident(d: &FileDescriptor) -> usize {
     match d {
         FileDescriptor::PipeRead(a) | FileDescriptor::PipeWrite(a) => Arc::as_ptr(a) as *const u8 as usize,
-        FileDescriptor::Socket(a) => Arc::as_ptr(a) as *const u8 as usize,
         FileDescriptor::Epoll(a) => Arc::as_ptr(a) as *const u8 as usize,
-        FileDescriptor::EventFd(a) => Arc::as_ptr(a) as *const u8 as usize,
         FileDescriptor::MemFd { memfd, .. } => Arc::as_ptr(memfd) as *const u8 as usize,
         FileDescriptor::Vnode(a) => Arc::as_ptr(a) as *const u8 as usize,
-        FileDescriptor::Inet(a) => Arc::as_ptr(a) as *const u8 as usize,
-        FileDescriptor::Pty(a) => Arc::as_ptr(a) as *const u8 as usize,
-        FileDescriptor::SignalFd(a) => Arc::as_ptr(a) as *const u8 as usize,
-        FileDescriptor::Unix(a) => Arc::as_ptr(a) as *const u8 as usize,
-        FileDescriptor::TimerFd(a) => Arc::as_ptr(a) as *const u8 as usize,
-        FileDescriptor::PidFd(a) => Arc::as_ptr(a) as *const u8 as usize,
         FileDescriptor::Device(a) => Arc::as_ptr(a) as *const u8 as usize,
         _ => 0,
     }

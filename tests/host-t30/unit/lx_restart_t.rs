@@ -233,7 +233,7 @@ fn a_transparent_restart_of_the_network_service_keeps_the_watched_count() {
     assert!(!keeps_objects(LXS_NET));
     assert_eq!(crate::lx::WATCHED_NET.load(Ordering::Acquire), 0);
     crate::lx::svc::tests::reset();
-    crate::lx::svc::init(b"net=linux+ipc=linux");
+    crate::lx::svc::tests::init_colocated(b"net=linux+ipc=linux");
 }
 // wave8 GX2 end
 
@@ -259,6 +259,36 @@ fn an_ipc_crash_brings_the_login_screen_back() {
     assert!(sim.spawned().contains(&"lx-desktop"));
     crate::fake::rec(|r| r.display_manager = false);
     crate::lx::svc::tests::reset();
-    crate::lx::svc::init(b"net=linux+ipc=linux");
+    crate::lx::svc::tests::init_colocated(b"net=linux+ipc=linux");
 }
 // wave8 GX2 end
+
+// wave10 G10-C begin
+/// The cgroup device programs lx-sec handed to the kernel stay enforced while lx-sec
+/// restarts (Transparent, then FailObjects on the ladder); only a service the ladder gave up
+/// takes them away (an empty list is handed to the kernel).
+#[test]
+fn device_programs_stay_while_lx_sec_restarts() {
+    let sim = world();
+    crate::lx::svc::tests::reset();
+    crate::lx::svc::init(b"");
+    configure(LXS_SEC, RestartClass::Transparent);
+    let _s = start(&sim, LXS_SEC, 340, 1, true, handler(|_| (0, 0)));
+    assert_eq!(crate::lx::svc::host_of(LXS_SEC), LXS_SEC);
+    crate::fake::rec(|r| r.bpf_programs.clear());
+    // A Transparent restart, then a second crash within 30 s (FailObjects): kept
+    crate::lx::server_gone(LXS_SEC);
+    assert!(restarting(LXS_SEC));
+    online(LXS_SEC);
+    crate::lx::server_gone(LXS_SEC);
+    assert!(restarting(LXS_SEC));
+    assert!(crate::fake::rec(|r| r.bpf_programs.is_empty()), "nothing cleared while lx-sec restarts");
+    online(LXS_SEC);
+    // A third: given up: the programs go
+    crate::lx::server_gone(LXS_SEC);
+    assert!(down(LXS_SEC));
+    assert_eq!(crate::fake::rec(|r| r.bpf_programs.clone()), vec![Vec::<u8>::new()]);
+    crate::lx::svc::tests::reset();
+    crate::lx::svc::tests::init_colocated(b"net=linux+ipc=linux");
+}
+// wave10 G10-C end

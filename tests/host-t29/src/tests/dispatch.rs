@@ -6,7 +6,6 @@
 use super::common::*;
 use crate::arch::syscall::SyscallFrame;
 use crate::compat::linux::epoll::{LinuxEpollEvent, LinuxPollFd};
-use crate::compat::linux::socket::LinuxSockaddrUn;
 use crate::compat::linux::types::*;
 use crate::compat::linux::{self as lx, dispatch_checked, dispatch_linux_syscall};
 use crate::fs::{FileDescriptor, OpenFile};
@@ -52,7 +51,6 @@ fn calls_reach_their_modules() {
     // (number, the stub that answers, its return value)
     let direct: &[(u64, &str)] = &[
         (298, "perf::sys_perf_event_open"),
-        (321, "bpf::sys_bpf"),
         (103, "admin::dispatch"),
         (163, "admin::dispatch"),
         (300, "fanotify::dispatch"),
@@ -71,15 +69,11 @@ fn calls_reach_their_modules() {
     }
     // Option dispatchers: answered when they claim the call, otherwise the call goes on
     let optional: &[(u64, &str)] = &[
-        (64, "sysv::dispatch"),
-        (248, "keys::dispatch"),
-        (240, "mqueue::dispatch"),
+        (30, "sysv::dispatch"),
         (222, "ptimer::dispatch"),
         (100, "misc::dispatch"),
         (155, "mount::dispatch"),
         (999, "chardev::dispatch"),
-        (998, "unix::dispatch"),
-        (997, "inet::dispatch"),
         (996, "vfs::dispatch"),
     ];
     for &(nr, name) in optional {
@@ -255,7 +249,7 @@ fn read_write_and_descriptors() {
     assert_eq!(sc(8, [9, 0, 9, 0, 0, 0]), EINVAL);
     assert_eq!(sc(8, [9, -1i64 as u64, 0, 0, 0, 0]), EINVAL);
     let mut fds = [0i32; 2];
-    assert_eq!(sc(22, [mptr(&mut fds), 0, 0, 0, 0, 0]), 0);
+    assert_eq!(kpipe(&mut fds), 0);
     assert_eq!(sc(8, [fds[0] as u64, 0, 0, 0, 0, 0]), ESPIPE);
     assert_eq!(sc(8, [99, 0, 0, 0, 0, 0]), EBADF);
     // ftruncate
@@ -297,7 +291,7 @@ fn vector_and_positioned_io() {
     assert_eq!(sc(17, [3, mptr(&mut p), 0, 0, 0, 0]), 0);
     assert_eq!(sc(17, [99, mptr(&mut p), 4, 0, 0, 0]), EBADF);
     let mut fds = [0i32; 2];
-    assert_eq!(sc(22, [mptr(&mut fds), 0, 0, 0, 0, 0]), 0);
+    assert_eq!(kpipe(&mut fds), 0);
     assert_eq!(sc(17, [fds[0] as u64, mptr(&mut p), 4, 0, 0, 0]), ESPIPE);
     fake::INODES.with_borrow_mut(|m| m.insert(70, (0o100644, b"abcdefgh".to_vec())));
     install(5, FileDescriptor::Vnode(Arc::new(spin::Mutex::new(OpenFile { ino: 70, readable: true, writable: true, ..Default::default() }))));
@@ -349,12 +343,9 @@ fn stat_open_access_and_ioctl() {
     assert_eq!(sc(5, [10, mptr(&mut st), 0, 0, 0, 0]), 0);
     assert_eq!(st.st_mode, 0o20666);
     let mut fds = [0i32; 2];
-    sc(22, [mptr(&mut fds), 0, 0, 0, 0, 0]);
+    kpipe(&mut fds);
     assert_eq!(sc(5, [fds[0] as u64, mptr(&mut st), 0, 0, 0, 0]), 0);
     assert_eq!(st.st_mode, 0o10600);
-    install(11, FileDescriptor::Unix(Arc::new(crate::fs::FakeUnix::default())));
-    assert_eq!(sc(5, [11, mptr(&mut st), 0, 0, 0, 0]), 0);
-    assert_eq!(st.st_mode, 0o140777);
     install(12, FileDescriptor::EventFd(crate::fs::FakeObj::named("e")));
     assert_eq!(sc(5, [12, mptr(&mut st), 0, 0, 0, 0]), 0);
     assert_eq!(st.st_mode, 0o100644, "anything else");
@@ -387,95 +378,6 @@ fn stat_open_access_and_ioctl() {
     assert!(fake::called("yield_now()"));
 }
 
-#[test]
-fn legacy_unix_sockets() {
-    let _g = setup();
-    proc_(5060, 0);
-    assert_eq!(sc(41, [2, 1, 0, 0, 0, 0]), EAFNOSUPPORT);
-    let s = sc(41, [1, 1, 0, 0, 0, 0]);
-    assert!(s >= 0);
-    let mut addr = LinuxSockaddrUn::default();
-    addr.sun_family = 1;
-    addr.sun_path[..9].copy_from_slice(b"/tmp/sock");
-    let len = 2 + 10;
-    assert_eq!(sc(49, [s as u64, ptr(&addr), len, 0, 0, 0]), 0, "bind");
-    assert_eq!(sc(50, [s as u64, 5, 0, 0, 0, 0]), 0, "listen");
-    let mut bad = addr;
-    bad.sun_family = 2;
-    assert_eq!(sc(49, [s as u64, ptr(&bad), len, 0, 0, 0]), EAFNOSUPPORT);
-    assert_eq!(sc(49, [s as u64, 0, len, 0, 0, 0]), EFAULT);
-    assert_eq!(sc(49, [99, ptr(&addr), len, 0, 0, 0]), EBADF);
-    assert_eq!(sc(50, [99, 5, 0, 0, 0, 0]), EBADF);
-    let mut name = LinuxSockaddrUn::default();
-    let mut nlen = 0u32;
-    assert_eq!(sc(51, [s as u64, mptr(&mut name), mptr(&mut nlen), 0, 0, 0]), 0);
-    assert_eq!(&name.sun_path[..9], b"/tmp/sock");
-    assert_eq!(nlen, 12);
-    assert_eq!(sc(51, [99, mptr(&mut name), mptr(&mut nlen), 0, 0, 0]), EBADF);
-    assert_eq!(sc(51, [s as u64, 0, mptr(&mut nlen), 0, 0, 0]), EFAULT);
-    // connect from a second socket, accept the connection
-    let c = sc(41, [1, 1 | 0x800, 0, 0, 0, 0]);
-    assert_eq!(sc(42, [c as u64, ptr(&addr), len, 0, 0, 0]), 0, "connect");
-    assert_eq!(sc(42, [c as u64, ptr(&bad), len, 0, 0, 0]), EAFNOSUPPORT);
-    assert_eq!(sc(42, [c as u64, 0, len, 0, 0, 0]), EFAULT);
-    assert_eq!(sc(42, [99, ptr(&addr), len, 0, 0, 0]), EBADF);
-    let mut peer = LinuxSockaddrUn::default();
-    let mut plen = 0u32;
-    let a = sc(43, [s as u64, mptr(&mut peer), mptr(&mut plen), 0, 0, 0]);
-    assert!(a >= 0);
-    assert_eq!((peer.sun_family, plen), (1, 2));
-    assert_eq!(sc(43, [99, 0, 0, 0, 0, 0]), EBADF);
-    assert_eq!(sc(288, [s as u64, 0, 0, 0x800, 0, 0]), EAGAIN, "accept4, nonblocking: nobody waiting");
-    // Data both ways: sendto/recvfrom, sendmsg/recvmsg
-    assert_eq!(sc(44, [c as u64, ptr(b"ping"), 4, 0, 0, 0]), 4);
-    let mut buf = [0u8; 8];
-    assert_eq!(sc(45, [a as u64, mptr(&mut buf), 8, 0, 0, 0]), 4);
-    assert_eq!(&buf[..4], b"ping");
-    assert_eq!(sc(44, [c as u64, 0, 4, 0, 0, 0]), EFAULT);
-    assert_eq!(sc(44, [c as u64, ptr(b"x"), 0, 0, 0, 0]), 0);
-    assert_eq!(sc(44, [99, ptr(b"x"), 1, 0, 0, 0]), EBADF);
-    assert_eq!(sc(45, [a as u64, 0, 4, 0, 0, 0]), EFAULT);
-    assert_eq!(sc(45, [a as u64, mptr(&mut buf), 0, 0, 0, 0]), 0);
-    assert_eq!(sc(45, [99, mptr(&mut buf), 8, 0, 0, 0]), EBADF);
-    // sendmsg with SCM_RIGHTS: the receiver gets a new descriptor for the same file
-    install(30, FileDescriptor::file("/passed"));
-    let mut ctl = [0u8; 24];
-    let hdr = LinuxCmsghdr { cmsg_len: 20, cmsg_level: SOL_SOCKET, cmsg_type: SCM_RIGHTS };
-    unsafe { core::ptr::write_unaligned(ctl.as_mut_ptr() as *mut LinuxCmsghdr, hdr) };
-    ctl[16..20].copy_from_slice(&30i32.to_le_bytes());
-    let data = *b"msg";
-    let iov = [LinuxIovec { iov_base: ptr(&data), iov_len: 3 }];
-    let msg = LinuxMsghdr { msg_name: 0, msg_namelen: 0, msg_iov: iov.as_ptr() as *mut LinuxIovec, msg_iovlen: 1, msg_control: ctl.as_mut_ptr(), msg_controllen: 24, msg_flags: 0 };
-    assert_eq!(sc(46, [c as u64, ptr(&msg), 0, 0, 0, 0]), 3);
-    let mut rbuf = [0u8; 8];
-    let mut rctl = [0u8; 24];
-    let riov = [LinuxIovec { iov_base: mptr(&mut rbuf), iov_len: 8 }];
-    let mut rmsg = LinuxMsghdr { msg_name: 0, msg_namelen: 0, msg_iov: riov.as_ptr() as *mut LinuxIovec, msg_iovlen: 1, msg_control: rctl.as_mut_ptr(), msg_controllen: 24, msg_flags: 0 };
-    assert_eq!(sc(47, [a as u64, mptr(&mut rmsg), 0, 0, 0, 0]), 3);
-    assert_eq!(&rbuf[..3], b"msg");
-    assert_eq!(rmsg.msg_controllen, 20);
-    let newfd = i32::from_le_bytes(rctl[16..20].try_into().unwrap());
-    assert!(matches!(with_current_fds_mut(|f| f.get(newfd as usize).cloned()), Some(FileDescriptor::File { .. })));
-    // No descriptor waiting: msg_controllen 0
-    assert_eq!(sc(44, [c as u64, ptr(b"z"), 1, 0, 0, 0]), 1);
-    rmsg.msg_controllen = 24;
-    assert_eq!(sc(47, [a as u64, mptr(&mut rmsg), 0, 0, 0, 0]), 1);
-    assert_eq!(rmsg.msg_controllen, 0);
-    assert_eq!(sc(46, [c as u64, 0, 0, 0, 0, 0]), EFAULT);
-    assert_eq!(sc(47, [a as u64, 0, 0, 0, 0, 0]), EFAULT);
-    assert_eq!(sc(46, [99, ptr(&msg), 0, 0, 0, 0]), EBADF);
-    let mut m2 = rmsg;
-    m2.msg_control = core::ptr::null_mut();
-    assert_eq!(sc(47, [99, mptr(&mut m2), 0, 0, 0, 0]), EBADF);
-    // shutdown, socketpair
-    assert_eq!(sc(48, [c as u64, 2, 0, 0, 0, 0]), 0);
-    assert_eq!(sc(48, [99, 2, 0, 0, 0, 0]), EBADF);
-    let mut sv = [0i32; 2];
-    assert_eq!(sc(53, [1, 1, 0, mptr(&mut sv), 0, 0]), 0);
-    assert!(sv[0] > 0 && sv[1] > sv[0]);
-    assert_eq!(sc(53, [2, 1, 0, mptr(&mut sv), 0, 0]), EAFNOSUPPORT);
-    assert_eq!(sc(53, [1, 1, 0, 0, 0, 0]), EFAULT);
-}
 
 #[test]
 fn user_pointers_are_checked() {
@@ -491,15 +393,6 @@ fn user_pointers_are_checked() {
             (4u64, [k, k, 0, 0, 0, 0]),
             (5, [3, k, 0, 0, 0, 0]),
             (262, [0, k, k, 0, 0, 0]),
-            (22, [k, 0, 0, 0, 0, 0]),
-            (49, [s as u64, k, 12, 0, 0, 0]),
-            (42, [s as u64, k, 12, 0, 0, 0]),
-            (53, [1, 1, 0, k, 0, 0]),
-            (44, [s as u64, k, 4, 0, 0, 0]),
-            (45, [s as u64, k, 4, 0, 0, 0]),
-            (46, [s as u64, k, 0, 0, 0, 0]),
-            (47, [s as u64, k, 0, 0, 0, 0]),
-            (51, [s as u64, k, k, 0, 0, 0]),
             (63, [k, 0, 0, 0, 0, 0]),
             (79, [k, 10, 0, 0, 0, 0]),
             (318, [k, 16, 0, 0, 0, 0]),
@@ -524,47 +417,7 @@ fn identity_calls() {
         t.sgid = 100;
     });
     assert_eq!((sc(39, [0; 6]), sc(186, [0; 6]), sc(102, [0; 6]), sc(104, [0; 6]), sc(107, [0; 6]), sc(108, [0; 6])), (5070, 5070, 1000, 100, 1000, 100));
-    // Unprivileged setuid: only to the real or saved id
-    assert_eq!(sc(105, [5, 0, 0, 0, 0, 0]), EPERM);
-    assert_eq!(sc(105, [1000, 0, 0, 0, 0, 0]), 0);
-    assert_eq!(sc(106, [5, 0, 0, 0, 0, 0]), EPERM);
-    assert_eq!(sc(106, [100, 0, 0, 0, 0, 0]), 0);
-    // setreuid / setregid / setresuid / setresgid: unprivileged swaps among own ids
-    assert_eq!(sc(113, [-1i64 as u64, 1000, 0, 0, 0, 0]), 0);
-    assert_eq!(sc(113, [7, 7, 0, 0, 0, 0]), EPERM);
-    assert_eq!(sc(114, [-1i64 as u64, 100, 0, 0, 0, 0]), 0);
-    assert_eq!(sc(114, [7, 7, 0, 0, 0, 0]), EPERM);
-    assert_eq!(sc(117, [1000, 1000, 1000, 0, 0, 0]), 0);
-    assert_eq!(sc(117, [9, 9, 9, 0, 0, 0]), EPERM);
-    assert_eq!(sc(119, [100, 100, 100, 0, 0, 0]), 0);
-    assert_eq!(sc(119, [9, 9, 9, 0, 0, 0]), EPERM);
-    let mut ids = [0u32; 3];
-    assert_eq!(sc(118, [mptr(&mut ids[0]), mptr(&mut ids[1]), mptr(&mut ids[2]), 0, 0, 0]), 0);
-    assert_eq!(ids, [1000; 3]);
-    assert_eq!(sc(120, [mptr(&mut ids[0]), mptr(&mut ids[1]), mptr(&mut ids[2]), 0, 0, 0]), 0);
-    assert_eq!(ids, [100; 3]);
-    assert_eq!(sc(118, [0, 0, 0, 0, 0, 0]), 0, "null pointers are skipped");
-    // Root: everything, and dropping root drops the capabilities
-    proc_(5071, 0);
-    assert_eq!(sc(117, [10, 20, 30, 0, 0, 0]), 0);
-    assert_eq!(fake::task(5071, |t| (t.uid, t.euid, t.suid, t.caps.effective)), Some((10, 20, 30, 0)));
-    proc_(5072, 0);
-    assert_eq!(sc(113, [11, 12, 0, 0, 0, 0]), 0);
-    assert_eq!(fake::task(5072, |t| (t.uid, t.euid)), Some((11, 12)));
-    proc_(5073, 0);
-    assert_eq!(sc(114, [11, 12, 0, 0, 0, 0]), 0);
-    assert_eq!(sc(119, [1, 2, 3, 0, 0, 0]), 0);
-    assert_eq!(sc(106, [44, 0, 0, 0, 0, 0]), 0);
-    assert_eq!(fake::task(5073, |t| (t.gid, t.egid, t.sgid)), Some((44, 44, 44)));
-    assert_eq!(sc(105, [55, 0, 0, 0, 0, 0]), 0);
-    assert_eq!(fake::task(5073, |t| (t.uid, t.euid, t.suid)), Some((55, 55, 55)));
-    // capget / capset are process.rs's (mod.rs's own arms are never reached)
-    let v3 = [0x2008_0522u32, 0];
-    let mut data = [9u32; 6];
-    run(5073);
-    assert_eq!(sc(125, [ptr(&v3), mptr(&mut data), 0, 0, 0, 0]), 0);
-    fake::switch_to(0);
-    assert_eq!(sc(105, [1, 0, 0, 0, 0, 0]), EPERM, "no task");
+    // (wave10 G10-C: the setuid family is lx-proc's alone: tested with its rules in host-w10-proc)
 }
 
 #[test]
@@ -624,11 +477,6 @@ fn clocks_names_and_misc() {
     assert_eq!(sc(319, [long.as_ptr() as u64, 0, 0, 0, 0, 0]), EINVAL);
     let bad = [0xffu8, 0xfe, 0];
     assert_eq!(sc(319, [bad.as_ptr() as u64, 0, 0, 0, 0, 0]), EFAULT, "not UTF-8");
-    // pipe2 flags
-    let mut fds = [0i32; 2];
-    assert_eq!(sc(293, [mptr(&mut fds), 0o4000 | 0o2000000, 0, 0, 0, 0]), 0);
-    assert!(with_current_fds_mut(|f| f.cloexec(fds[0] as usize) && f.cloexec(fds[1] as usize)));
-    assert_eq!(sc(22, [0; 6]), EFAULT);
     // exit / exit_group (legacy arms are reached through the process calls)
     panics_with("task::exit_group", || {
         sc(231, [3, 0, 0, 0, 0, 0]);
@@ -645,7 +493,7 @@ fn poll_and_epoll() {
     proc_(5090, 0);
     install(3, FileDescriptor::file("/f"));
     let mut fds = [0i32; 2];
-    sc(22, [mptr(&mut fds), 0, 0, 0, 0, 0]);
+    kpipe(&mut fds);
     let (r, w) = (fds[0], fds[1]);
     // poll: a file is ready; an empty pipe's read end is not; a bad fd is POLLNVAL
     let mut p = [LinuxPollFd { fd: 3, events: 1, revents: 0 }, LinuxPollFd { fd: r, events: 1, revents: 0 }, LinuxPollFd { fd: 77, events: 1, revents: 0 }, LinuxPollFd { fd: -1, events: 1, revents: 7 }];
@@ -727,7 +575,7 @@ fn clone_fork_and_clone3() {
     let child = dispatch_checked(&mut f);
     assert_eq!(child, 1000, "fork");
     assert!(fake::called("spawn_clone(0x11,"));
-    assert!(fake::called("keys::on_fork(5100,1000,)") && fake::called("sysv::on_fork(5100,1000,)") && fake::called("lx::note("));
+    assert!(fake::called("sysv::on_fork(5100,1000,)") && fake::called("lx::note("));
     // A thread (CLONE_THREAD): no fork notes
     fake::take_calls();
     let t = sc(56, [0x10000 | 0x100 | 0x800, 0x7000, 0, 0, 0, 0]);
@@ -773,6 +621,18 @@ fn clone_fork_and_clone3() {
     assert!(c3 > 0);
     assert!(pidfd >= 0);
     assert!(fake::called(&format!("spawn_clone(0x11,0x7000)")));
+    // wave10 G10-C: lx-ipc failing the pidfd after the child exists: -1, never an errno
+    fake::set_ret("lx::call_plain", -5);
+    pidfd = 7;
+    assert!(sc(435, [ptr(&args), 88, 0, 0, 0, 0]) > 0);
+    assert_eq!(pidfd, -1);
+    fake::set_ret("lx::call_plain", 0);
+    // ... and lx-ipc not running at all: the clone fails before any child (EIO)
+    fake::set_ret("lx::ipc_usable", 1);
+    let spawned = fake::NEXT_TID.get();
+    assert_eq!(sc(435, [ptr(&args), 88, 0, 0, 0, 0]), -5);
+    assert_eq!(fake::NEXT_TID.get(), spawned, "no child");
+    fake::set_ret("lx::ipc_usable", 0);
     let mut bad = args;
     bad[4] = 65;
     assert_eq!(sc(435, [ptr(&bad), 88, 0, 0, 0, 0]), EINVAL, "exit signal");
@@ -797,4 +657,30 @@ fn clone_fork_and_clone3() {
     assert_eq!(sc(130, [0, 4, 0, 0, 0, 0]), EINVAL);
     assert!(sc(59, [0, 0, 0, 0, 0, 0]) < 0, "execve");
     assert!(sc(322, [-100i64 as u64, 0, 0, 0, 0, 0]) < 0, "execveat");
+}
+
+/// A kernel pipe in the caller's table (wave10 G10-C: Linux `pipe` is lx-ipc's; the kernel's
+/// pipes remain for native programs and are what these dispatch tests read and write).
+fn kpipe(fds: &mut [i32; 2]) -> i64 {
+    let p = crate::fs::pipe::PipeBuffer::new();
+    let r = with_current_fds_mut(|t| t.alloc_fd(FileDescriptor::PipeRead(p.clone())).unwrap());
+    let w = with_current_fds_mut(|t| t.alloc_fd(FileDescriptor::PipeWrite(p)).unwrap());
+    fds[0] = r as i32;
+    fds[1] = w as i32;
+    0
+}
+
+/// wave10 G10-C: the socket calls on a descriptor that is no socket answer ENOTSOCK (EBADF
+/// for no descriptor), setsockopt/getsockopt/recvmmsg/sendmmsg included; socket() of a family
+/// no service has answers EAFNOSUPPORT.
+#[test]
+fn socket_calls_on_other_descriptors() {
+    let _g = setup();
+    proc_(5090, 0);
+    install(3, FileDescriptor::ConsoleOut);
+    for nr in [42u64, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 54, 55, 288, 299, 307] {
+        assert_eq!(sc(nr, [3, 0, 0, 0, 0, 0]), -88, "{nr} on a non-socket");
+        assert_eq!(sc(nr, [99, 0, 0, 0, 0, 0]), -9, "{nr} on no descriptor");
+    }
+    assert_eq!(sc(41, [17, 3, 0, 0, 0, 0]), -97);
 }

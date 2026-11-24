@@ -404,7 +404,6 @@ struct State {
     bufs: Vec<(u64, u64)>,
     provided: BTreeMap<u16, VecDeque<(u64, u32, u16)>>,
     buf_rings: BTreeMap<u16, BufRing>,
-    eventfd: Option<(Arc<Mutex<super::eventfd::EventFd>>, bool)>,
     /// Group 13: a registered eventfd of linux-server (written later, by a kernel task:
     /// the ring's lock is held where completions are posted).
     server_eventfd: Option<Arc<dyn CharDevice>>,
@@ -510,13 +509,8 @@ impl Ring {
         }
         st.completions += 1;
         self.cq_wq.wake_all();
-        if let Some((efd, _)) = &st.eventfd {
-            // IORING_CQ_EVENTFD_DISABLED
-            if self.mem.get(CQ_FLAGS) & 1 == 0 {
-                let _ = efd.lock().write(&1u64.to_ne_bytes());
-            }
-        }
         if let Some(dev) = &st.server_eventfd {
+            // IORING_CQ_EVENTFD_DISABLED
             if self.mem.get(CQ_FLAGS) & 1 == 0 {
                 crate::lx::obj::write_later(dev.clone(), 1);
             }
@@ -1336,7 +1330,6 @@ fn setup(entries: u64, params: u64) -> i64 {
             bufs: Vec::new(),
             provided: BTreeMap::new(),
             buf_rings: BTreeMap::new(),
-            eventfd: None,
             server_eventfd: None,
             personalities: 0,
             enabled: flags & SETUP_R_DISABLED == 0,
@@ -1499,20 +1492,16 @@ fn register(fd: u64, opcode: u64, arg: u64, nr: u64) -> i64 {
             let Ok(raw) = copy_in(arg, 4) else { return EFAULT };
             let efd = i32::from_le_bytes(raw.try_into().unwrap());
             let e = crate::task::with_current_fds_mut(|fds| match fds.get(efd as usize) {
-                Some(crate::fs::FileDescriptor::EventFd(e)) => Some(Ok(e.clone())),
                 // Group 13: an eventfd of linux-server
-                Some(crate::fs::FileDescriptor::Device(d)) if d.as_server().is_some_and(|o| o.kind() == crate::ipc::protocol::LX_OBJ_KIND_EVENTFD) => Some(Err(d.clone())),
+                Some(crate::fs::FileDescriptor::Device(d)) if d.as_server().is_some_and(|o| o.kind() == crate::ipc::protocol::LX_OBJ_KIND_EVENTFD) => Some(d.clone()),
                 _ => None,
             });
             let Some(e) = e else { return EBADF };
             let mut st = ring.st.lock();
-            if st.eventfd.is_some() || st.server_eventfd.is_some() {
+            if st.server_eventfd.is_some() {
                 return EBUSY;
             }
-            match e {
-                Ok(e) => st.eventfd = Some((e, opcode == 7)),
-                Err(d) => st.server_eventfd = Some(d),
-            }
+            st.server_eventfd = Some(e);
             0
         }
         5 => {
@@ -1520,7 +1509,7 @@ fn register(fd: u64, opcode: u64, arg: u64, nr: u64) -> i64 {
                 let mut st = ring.st.lock();
                 st.server_eventfd.take().is_some()
             };
-            if ring.st.lock().eventfd.take().is_none() && !had {
+            if !had {
                 ENXIO
             } else {
                 0
