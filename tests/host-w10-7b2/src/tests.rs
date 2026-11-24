@@ -90,3 +90,69 @@ fn a_sequence_of_reads_and_rewinds() {
     pos = seek_to(pos, text.len() as u64, 0, 0).unwrap();
     assert_eq!(read(&text, &mut pos, 100), b"cpu 4 5 6 7\n");
 }
+
+// ---------------------------------------------------------------- wave11 GP: directories
+
+fn dir_text(entries: &[(u64, u8, &[u8])]) -> Vec<u8> {
+    let mut v = Vec::new();
+    for &(ino, t, n) in entries {
+        v.extend_from_slice(&ino.to_le_bytes());
+        v.push(t);
+        v.push(n.len() as u8);
+        v.extend_from_slice(n);
+    }
+    v
+}
+
+/// The (ino, d_off, type, name) of each linux_dirent64 record in `b`.
+fn records(b: &[u8]) -> Vec<(u64, u64, u8, String)> {
+    let mut v = Vec::new();
+    let mut at = 0;
+    while at < b.len() {
+        let ino = u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        let off = u64::from_le_bytes(b[at + 8..at + 16].try_into().unwrap());
+        let len = u16::from_le_bytes([b[at + 16], b[at + 17]]) as usize;
+        assert_eq!(len % 8, 0);
+        let t = b[at + 18];
+        let name = &b[at + 19..at + len];
+        let end = name.iter().position(|&c| c == 0).unwrap();
+        v.push((ino, off, t, String::from_utf8(name[..end].to_vec()).unwrap()));
+        at += len;
+    }
+    v
+}
+
+#[test]
+fn dir_entries_parse_and_stop_at_a_cut() {
+    let t = dir_text(&[(5, 4, b"12"), (6, 10, b"self")]);
+    let e = dir_entries(&t);
+    assert_eq!(e, vec![(5, 4, &b"12"[..]), (6, 10, &b"self"[..])]);
+    // a cut-off last entry is left out
+    assert_eq!(dir_entries(&t[..t.len() - 1]).len(), 1);
+    assert_eq!(dir_entries(&t[..5]).len(), 0);
+    assert!(dir_entries(&[]).is_empty());
+}
+
+#[test]
+fn dirent64_lists_dot_dotdot_then_entries_in_pieces() {
+    let t = dir_text(&[(5, 4, b"12"), (6, 10, b"self"), (7, 8, b"version")]);
+    let (all, next) = dirent64(&t, 1, 0, 4096).unwrap();
+    let r = records(&all);
+    assert_eq!(next, 5);
+    assert_eq!(r.iter().map(|x| x.3.as_str()).collect::<Vec<_>>(), [".", "..", "12", "self", "version"]);
+    assert_eq!(r[0].0, 1);
+    assert_eq!(r[2], (5, 3, 4, "12".to_string()));
+    assert_eq!(r[4].1, 5);
+    // a small buffer: one record at a time, continuing from the index
+    let (one, n1) = dirent64(&t, 1, 0, 24).unwrap();
+    assert_eq!((records(&one).len(), n1), (1, 1));
+    let (two, n2) = dirent64(&t, 1, n1, 48).unwrap();
+    assert_eq!((records(&two).len(), n2), (2, 3));
+    // not even one fits: EINVAL; at the end: nothing
+    assert_eq!(dirent64(&t, 1, 0, 10), Err(EINVAL));
+    assert_eq!(dirent64(&t, 1, 5, 4096), Ok((Vec::new(), 5)));
+    assert_eq!(dirent64(&t, 1, 99, 4096), Ok((Vec::new(), 99)));
+    // an empty directory still has . and ..
+    let (e, n) = dirent64(&[], 9, 0, 4096).unwrap();
+    assert_eq!((records(&e).len(), n), (2, 2));
+}

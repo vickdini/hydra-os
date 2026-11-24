@@ -615,6 +615,10 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
         SERVED.fetch_add(1, Ordering::Relaxed);
         return Some(fd.map_or_else(|e| e, |fd| fd as i64));
     }
+    // wave11 GP: relative to a `/proc` directory lx-proc listed: lx-proc's
+    if let Some(r) = proc_dirfd_call(nr, &args) {
+        return r;
+    }
     if take_mark(tid, nr) {
         return None;
     }
@@ -909,6 +913,9 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
     // counted by number as on the ordinary path)
     let mut vnode = sh != Shape::Handle;
     let r = match fds.try_lock() {
+        // wave11 GP: a call relative to a `/proc` directory snapshot takes the ordinary path
+        // (`proc_dirfd_call`)
+        Some(t) if at_proc_dir(nr, &t, c.args[0]) => Err(()),
         Some(t) => {
             vnode |= matches!(t.get(c.args[0] as i32 as usize), Some(FileDescriptor::Vnode(_)));
             fill(&mut c, &t, sh, false)
@@ -969,6 +976,49 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
         }
     }
 }
+
+// wave11 GP begin: calls relative to a `/proc` directory descriptor (with Group F)
+/// The calls lx-proc serves under `/proc` that take a directory descriptor first.
+fn proc_dirfd_nr(nr: u64) -> bool {
+    matches!(nr, 257 | 262 | 332 | 269 | 439 | 267)
+}
+
+/// Whether call `nr`'s directory descriptor `fd` (in table `t`) is a `/proc` directory
+/// lx-proc listed (a kernel-held directory snapshot).
+fn at_proc_dir(nr: u64, t: &crate::fs::FdTable, fd: u64) -> bool {
+    proc_dirfd_nr(nr)
+        && (fd as i32) >= 0
+        && matches!(t.get(fd as i32 as usize), Some(FileDescriptor::Device(d)) if d.proc_ident().is_some_and(|(_, mode, _)| mode & 0o170000 == 0o040000))
+}
+
+/// A path call relative to a `/proc` directory lx-proc listed goes straight to lx-proc, as
+/// if the file service had redirected it there (`redirs` 1, the walk's base named by
+/// [`LX_PROC_AT_DIRFD`](crate::ipc::protocol::LX_PROC_AT_DIRFD): lx-proc reads the
+/// descriptor's path). `None`: not such a call (an absolute or empty path, another
+/// descriptor); `Some(None)`: the kernel answers.
+fn proc_dirfd_call(nr: u64, args: &[u64; 6]) -> Option<Option<i64>> {
+    use crate::ipc::protocol::{LXS_PROC, LX_PROC_AT_DIRFD, LX_VFS_PSEUDO_PROC};
+    if !proc_dirfd_nr(nr) || !crate::task::with_current_fds_mut(|t| at_proc_dir(nr, t, args[0])) {
+        return None;
+    }
+    let path = crate::compat::linux::vfs::user_cstr(args[1]).ok()?;
+    if path.is_empty() || path[0] == b'/' {
+        return None;
+    }
+    let x = svc::host(svc::host_of(LXS_PROC))?;
+    let mut c = LxCall::EMPTY;
+    c.nr = nr;
+    c.args = *args;
+    c.svc = LXS_PROC as u32;
+    c.tgid = crate::task::with_current_task_mut(|t| t.tgid).unwrap_or(0);
+    super::fill_ctx(&mut c, true);
+    c.redirs = 1;
+    c.redir_obj = LX_VFS_PSEUDO_PROC | LX_PROC_AT_DIRFD;
+    c.redir_tail = 0;
+    let r = super::call_ident_raw(x, c, true);
+    Some(outcome(nr, r))
+}
+// wave11 GP end
 
 // wave8 GF begin: the mount calls (`mount`, `umount2`, `pivot_root`)
 /// `CAP_SYS_ADMIN`.

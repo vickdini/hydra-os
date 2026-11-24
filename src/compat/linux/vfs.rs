@@ -1762,6 +1762,21 @@ fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
     if fd < 0 {
         return EBADF;
     }
+    // wave11 GP begin: a `/proc` directory lx-proc listed (a kernel-held snapshot)
+    let dev = crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
+        Some(FileDescriptor::Device(d)) => Some(d.clone()),
+        _ => None,
+    });
+    if let Some(r) = dev.and_then(|d| d.getdents64(count)) {
+        return match r {
+            Ok(out) => match copy_out(buf, &out) {
+                Ok(()) => out.len() as i64,
+                Err(e) => e,
+            },
+            Err(e) => e,
+        };
+    }
+    // wave11 GP end
     if let Some((path, cursor)) = crate::task::with_current_fds_mut(|fds| {
         match fds.get(fd as usize) {
             Some(FileDescriptor::File { path, cursor, .. }) => Some((path.clone(), cursor.get())),
@@ -2179,11 +2194,16 @@ pub(crate) fn fd_link(abs: &str) -> Option<String> {
     }
     let fd: usize = fd.parse().ok()?;
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd).cloned())?;
-    Some(match desc {
+    Some(desc_link(pid, fd, desc))
+}
+
+/// wave11 GP: what descriptor `fd` of process `pid` (`desc`) links to: `/proc/<pid>/fd/<fd>`'s
+/// text (also lx-proc's, through `lx::procx`).
+pub(crate) fn desc_link(pid: u64, fd: usize, desc: FileDescriptor) -> String {
+    match desc {
         FileDescriptor::Vnode(f) => f.lock().path.clone(),
         FileDescriptor::File { path, shown, .. } => shown.unwrap_or(path),
         FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr => {
-            let pid = super::proc::current_ids().1;
             CONSOLE_SHOWN.lock().get(&(pid, fd)).cloned().unwrap_or_else(|| String::from("/dev/tty1"))
         }
         FileDescriptor::PipeRead(p) | FileDescriptor::PipeWrite(p) => {
@@ -2192,7 +2212,7 @@ pub(crate) fn fd_link(abs: &str) -> Option<String> {
         FileDescriptor::Epoll(_) => String::from("anon_inode:[eventpoll]"),
         FileDescriptor::MemFd { .. } => String::from("/memfd: (deleted)"),
         FileDescriptor::Device(d) => d.path(),
-    })
+    }
 }
 
 /// Reads the target of a symbolic link relative to `dirfd`.

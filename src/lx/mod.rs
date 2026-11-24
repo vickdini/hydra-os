@@ -126,6 +126,9 @@ pub mod restart_policy;
 // wave10 G7b-2 begin: kernel-held snapshots of the `/proc` files lx-proc serves
 pub mod procsnap;
 // wave10 G7b-2 end
+// wave11 GP begin: more `/proc` facts for lx-proc (op 82)
+pub mod procx;
+// wave11 GP end
 
 /// Whether calls to service `s` should be made: its host is online, or it is restarting and
 /// its callers wait for it (Transparent and FailObjects; never EndLinux).

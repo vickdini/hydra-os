@@ -240,3 +240,71 @@ pub fn maps(data: &[u8]) -> Vec<u8> {
     }
     out.into_bytes()
 }
+
+// wave11 GP begin: the rest of `/proc`
+/// `DT_DIR`, `DT_REG`, `DT_LNK` (a directory entry's type).
+pub const DT_DIR: u8 = 4;
+/// See [`DT_DIR`].
+pub const DT_REG: u8 = 8;
+/// See [`DT_DIR`].
+pub const DT_LNK: u8 = 10;
+
+/// A directory snapshot's text (`LX_PSNAP_DIRENT_HEAD`): per entry `ino` (8 bytes), type,
+/// name length, name. Names longer than 255 bytes are left out.
+pub fn dir_text(entries: &[(u64, u8, &[u8])]) -> Vec<u8> {
+    let mut v = Vec::new();
+    for &(ino, t, name) in entries {
+        if name.is_empty() || name.len() > 255 {
+            continue;
+        }
+        v.extend_from_slice(&ino.to_le_bytes());
+        v.push(t);
+        v.push(name.len() as u8);
+        v.extend_from_slice(name);
+    }
+    v
+}
+
+/// `/proc/<pid>/fdinfo/<fd>` from `LX_PX_FDINFO`'s words: position, flags (octal), mount
+/// id, inode, and a pidfd's `Pid:`/`NSpid:` (`pidfd`: its process + 1, `u64::MAX` gone).
+pub fn fdinfo(out: &[u64]) -> Vec<u8> {
+    let mut t = String::new();
+    let _ = write!(t, "pos:\t{}\nflags:\t0{:o}\nmnt_id:\t{}\nino:\t{}\n", out[0], out[1], out[2], out[3]);
+    match out[4] {
+        0 => {}
+        u64::MAX => t.push_str("Pid:\t-1\nNSpid:\t-1\n"),
+        p => {
+            let _ = write!(t, "Pid:\t{}\nNSpid:\t{}\n", p - 1, p - 1);
+        }
+    }
+    t.into_bytes()
+}
+
+/// `/proc/<pid>/cgroup` (cgroup v2 only) of a process in control group `path`.
+pub fn cgroup(path: &[u8]) -> Vec<u8> {
+    let mut v = b"0::".to_vec();
+    v.extend_from_slice(if path.is_empty() { b"/" } else { path });
+    v.push(b'\n');
+    v
+}
+
+/// `/proc/<pid>/ns/<kind>`'s link text (`pid_for_children` shows as `pid`).
+pub fn ns_link(kind: &str, ino: u64) -> String {
+    let shown = match kind {
+        "pid_for_children" => "pid",
+        "time_for_children" => "time",
+        k => k,
+    };
+    alloc::format!("{}:[{}]", shown, ino)
+}
+
+/// A number and a newline (`oom_score_adj`, `oom_score`).
+pub fn number_line(n: i64) -> Vec<u8> {
+    alloc::format!("{}\n", n).into_bytes()
+}
+
+/// The IDs of an `LX_PX_FDS`/`TASKS`/`PIDS` answer.
+pub fn u32s(raw: &[u8]) -> Vec<u64> {
+    raw.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u64).collect()
+}
+// wave11 GP end

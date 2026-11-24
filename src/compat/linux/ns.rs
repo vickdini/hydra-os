@@ -539,7 +539,14 @@ fn split(rest: &str) -> Option<(u64, &str)> {
 /// The link text, or `None` if the path is not a namespace link of a live process.
 pub fn ns_link(rest: &str) -> Option<String> {
     let (pid, file) = split(rest)?;
-    let kind = file.strip_prefix("ns/")?;
+    ns_link_of(pid, file.strip_prefix("ns/")?)
+}
+
+// wave11 GP begin: the namespace facts of a process named by its system-wide ID (lx-proc's
+// `/proc/<pid>/ns/*`, `uid_map`, ... through `lx::procx`)
+/// The inode number `/proc/<pid>/ns/<kind>` shows for process `pid` (`None`: no such
+/// process or kind, or a PID namespace for children whose init does not exist yet).
+pub fn ns_ino_of(pid: u64, kind: &str) -> Option<u64> {
     let ns = ns_of(pid)?;
     // A PID namespace for children has no name until its init exists (as on Linux)
     if kind == "pid_for_children" {
@@ -547,10 +554,25 @@ pub fn ns_link(rest: &str) -> Option<String> {
             PID_NS_INIT.lock().get(&id)?;
         }
     }
-    let id = ns.id_of(kind)?;
+    ns.id_of(kind)
+}
+
+/// The text of `/proc/<pid>/ns/<kind>` for process `pid` (`user:[4026531837]`).
+pub fn ns_link_of(pid: u64, kind: &str) -> Option<String> {
+    let id = ns_ino_of(pid, kind)?;
     let shown = if kind == "pid_for_children" { "pid" } else { kind };
     Some(alloc::format!("{}:[{}]", shown, id))
 }
+
+/// System user (`gid == false`) or group ID `id` as process `pid`'s user namespace sees it
+/// (unmapped: 65534); `id` itself for a process of the initial user namespace.
+pub fn id_seen_by(pid: u64, id: u32, gid: bool) -> u32 {
+    match ns_of(pid).and_then(|n| n.user) {
+        Some(ns) => map_down(&ns, id, gid).unwrap_or(OVERFLOW_ID),
+        None => id,
+    }
+}
+// wave11 GP end
 
 /// Contents of `/proc/<pid>/uid_map`, `gid_map` or `setgroups`.
 ///
@@ -561,6 +583,12 @@ pub fn ns_link(rest: &str) -> Option<String> {
 /// The file text (empty for a process that no longer exists).
 pub fn read_file(rest: &str) -> String {
     let Some((pid, file)) = split(rest) else { return String::new() };
+    read_file_of(pid, file)
+}
+
+/// wave11 GP: [`read_file`] for process `pid` (system-wide ID) and `file` (`uid_map`,
+/// `gid_map`, `setgroups`).
+pub fn read_file_of(pid: u64, file: &str) -> String {
     let Some(ns) = ns_of(pid) else { return String::new() };
     let line = |m: IdMap| alloc::format!("{:>10} {:>10} {:>10}\n", m.inner, m.outer, m.count);
     match (file, ns.user) {
