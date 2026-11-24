@@ -225,6 +225,20 @@ pub trait CharDevice: Send + Sync {
     fn edges(&self) -> Option<u64> {
         None
     }
+
+    // wave11 GP begin: `/proc` snapshots (`lx::procsnap`)
+    /// A `/proc` snapshot's identity, `st_mode` and shown path (lx-proc's walks relative to
+    /// a `/proc` directory descriptor); `None` for any other device.
+    fn proc_ident(&self) -> Option<([u64; 4], u32, String)> {
+        None
+    }
+
+    /// `getdents64` of a `/proc` directory snapshot: the `linux_dirent64` records that fit
+    /// in `count` bytes from its position (moved past them); `None`: not one.
+    fn getdents64(&self, _count: usize) -> Option<Result<alloc::vec::Vec<u8>, i64>> {
+        None
+    }
+    // wave11 GP end
 }
 
 /// Opens the driver behind character device `rdev`; `None` if no driver claims it.

@@ -51,6 +51,28 @@ pub fn to_caller(id: u64, init: Option<u64>) -> u64 {
     }
 }
 
+// wave11 GP begin: callers in a PID namespace of their own
+/// Whether process `pid` (in the PID namespaces whose inits are `inits`) is there for a
+/// caller whose PID namespace's init is `init` and who named it `who` (0: itself): in the
+/// first namespace every process is; in another one only its init and the processes below
+/// it, and the init only by the number 1 (as `/proc/1`), not by its system-wide ID.
+pub fn in_view(pid: u64, inits: &[u64], init: Option<u64>, who: u64) -> bool {
+    match init {
+        None => true,
+        Some(i) => (pid == i || inits.contains(&i)) && !(who == i && i != 1),
+    }
+}
+
+/// A list of IDs as `u32`s (little-endian), the `LX_PX_FDS`/`TASKS`/`PIDS` answers.
+pub fn u32_list(ids: &[u64]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(ids.len() * 4);
+    for &i in ids {
+        v.extend_from_slice(&(i.min(u32::MAX as u64) as u32).to_le_bytes());
+    }
+    v
+}
+// wave11 GP end
+
 /// Whether a caller may read another process's memory facts (`maps`; `cmdline` is open to
 /// all): Linux's `ptrace_may_access(PTRACE_MODE_READ_FSCREDS)`: itself; never a service's
 /// process; with `CAP_SYS_PTRACE`; or when the caller's file-system user ID (here the
@@ -116,13 +138,12 @@ pub fn may_read(same: bool, target_service: bool, caller: (u32, u32), caller_cap
 
 /// Whether the info primitives answer for a caller (`init`: its PID namespace's init, `None`
 /// in the first; `in_userns`: it is in a user namespace of its own) about a target (a
-/// service's process or not): only callers in the first PID and user namespace (linux-server
-/// sends the others' `/proc` to the kernel, which translates their IDs), never about a
-/// service (`ESRCH`: services are not Linux processes).
-pub fn may_query(init: Option<u64>, in_userns: bool, target_service: bool) -> Result<(), i64> {
-    if init.is_some() || in_userns {
-        return Err(EPERM);
-    }
+/// service's process or not): never about a service (`ESRCH`: services are not Linux
+/// processes). wave11 GP: callers in a PID or user namespace of their own are answered too
+/// (lx-proc serves their `/proc`): the IDs are translated ([`to_caller`], the user
+/// namespace's map) and processes outside the caller's PID namespace are not there
+/// ([`in_view`]).
+pub fn may_query(_init: Option<u64>, _in_userns: bool, target_service: bool) -> Result<(), i64> {
     if target_service {
         return Err(ESRCH);
     }
@@ -261,7 +282,7 @@ pub mod glue {
 
     /// Whether `op` is one of these operations.
     pub fn is_info(op: u64) -> bool {
-        (LX_INFO_TASK..=LX_INFO_EFIVAR).contains(&op)
+        (LX_INFO_TASK..=LX_INFO_EFIVAR).contains(&op) || op == crate::ipc::protocol::LX_INFO_PROCX // wave11 GP
     }
 
     /// `SYS_LX_OBJ` operations 56..=61 for host `h` (only the host of linux-server's
@@ -279,12 +300,14 @@ pub mod glue {
             LX_INFO_MAPS => maps(a, b & 0xFFFF_FFFF, c, b >> 32),
             LX_INFO_PIDS => pids(a, b),
             LX_INFO_EFIVAR => efivar(a, b & 0xFFFF_FFFF, c, b >> 32),
+            // wave11 GP: the rest of `/proc` (`lx::procx`)
+            crate::ipc::protocol::LX_INFO_PROCX if h == crate::lx::svc::host_of(LXS_PROC) => crate::lx::procx::ctl(a, b, c),
             _ => EINVAL,
         }
     }
 
     /// Copies plain struct `v` to linux-server's `ptr`.
-    fn out<T: Copy>(ptr: u64, v: &T) -> i64 {
+    pub(crate) fn out<T: Copy>(ptr: u64, v: &T) -> i64 {
         // SAFETY: `T` is a repr(C) struct of plain integers
         let raw = unsafe { core::slice::from_raw_parts(v as *const T as *const u8, core::mem::size_of::<T>()) };
         match lx::vfs::copy_out(ptr, raw) {
@@ -294,7 +317,7 @@ pub mod glue {
     }
 
     /// Copies at most `len` bytes of `data` to `buf`; answers `data`'s full length.
-    fn out_bytes(buf: u64, len: u64, data: &[u8]) -> i64 {
+    pub(crate) fn out_bytes(buf: u64, len: u64, data: &[u8]) -> i64 {
         let Ok(len) = check_len(len) else { return EINVAL };
         let n = data.len().min(len);
         if n > 0 && lx::vfs::copy_out(buf, &data[..n]).is_err() {
@@ -305,13 +328,13 @@ pub mod glue {
 
     /// The caller of request `id`: its thread, process, real uid, effective capabilities
     /// and PID namespace's init.
-    fn caller(id: u64) -> Result<Caller, i64> {
+    pub(crate) fn caller(id: u64) -> Result<Caller, i64> {
         let client = crate::lx::client_of(id).ok_or(ESRCH)?;
         // wave10 G7b-2: a `/proc` snapshot being made again answers with the rights of the
         // process that opened it (as Linux checks at open), not the reader's
         if let Some(o) = crate::lx::procsnap::glue::opener_of(client) {
             may_query(o.init, o.in_userns, false)?;
-            return Ok(Caller { tgid: o.tgid, euid: o.euid, egid: o.egid, caps: o.caps, init: o.init });
+            return Ok(Caller { tgid: o.tgid, euid: o.euid, egid: o.egid, caps: o.caps, init: o.init, in_userns: o.in_userns });
         }
         let (tgid, euid, egid, caps, in_userns) = crate::task::SCHEDULER
             .lock()
@@ -321,13 +344,13 @@ pub mod glue {
         let init = crate::lx::proc::pid_ns_init(tgid);
         // (only callers of the first namespaces: their IDs need no translation)
         may_query(init, in_userns, false)?;
-        Ok(Caller { tgid, euid, egid, caps, init })
+        Ok(Caller { tgid, euid, egid, caps, init, in_userns })
     }
 
     // wave10 G8-1 begin
     /// Process `pid`'s capability facts for the read rule of caller process `ctgid`
     /// (effective user `euid`), as `lx::trace` gathers them for the ptrace facts.
-    fn target_caps(pid: u64, ctgid: u64, euid: u32, perm: u64) -> TargetCaps {
+    pub(crate) fn target_caps(pid: u64, ctgid: u64, euid: u32, perm: u64) -> TargetCaps {
         if pid == ctgid {
             return TargetCaps { perm, ..TargetCaps::PLAIN };
         }
@@ -338,36 +361,68 @@ pub mod glue {
     // wave10 G8-1 end
 
     /// The caller of a request, as the operations check it.
-    struct Caller {
-        tgid: u64,
-        euid: u32,
-        egid: u32,
-        caps: u64,
-        init: Option<u64>,
+    pub(crate) struct Caller {
+        pub(crate) tgid: u64,
+        pub(crate) euid: u32,
+        pub(crate) egid: u32,
+        pub(crate) caps: u64,
+        pub(crate) init: Option<u64>,
+        /// wave11 GP: in a user namespace of its own (IDs shown through its map).
+        pub(crate) in_userns: bool,
     }
 
     /// Whether process `pid` is a service's (services are not Linux processes).
-    fn is_service(pid: u64) -> Option<bool> {
+    pub(crate) fn is_service(pid: u64) -> Option<bool> {
         crate::task::SCHEDULER.lock().with_process(pid, |t| t.service.is_some())
     }
 
     /// `LX_INFO_TASK`.
     fn task(id: u64, who: u64, ptr: u64) -> i64 {
-        let Caller { tgid: ctgid, init, .. } = match caller(id) {
+        let c = match caller(id) {
             Ok(c) => c,
             Err(e) => return e,
         };
+        let (ctgid, init) = (c.tgid, c.init);
         let (p, t) = split_who(who & !LX_INFO_TASK_NOMEM);
         let pid = resolve_pid(p, ctgid, init);
         let tid = if t == 0 { pid } else { resolve_pid(t, ctgid, init) };
         if let Err(e) = may_query(init, false, is_service(pid).unwrap_or(false)) {
             return e;
         }
+        // wave11 GP: a process outside the caller's PID namespace is not there
+        if !visible(pid, init, p) {
+            return ESRCH;
+        }
         match fill_task(pid, tid, init, who & LX_INFO_TASK_NOMEM == 0) {
-            Some(info) => out(ptr, &info),
+            Some(mut info) => {
+                // wave11 GP: the tree and the ids as the caller's namespaces show them
+                if init.is_some() {
+                    for v in [&mut info.ppid, &mut info.pgid, &mut info.sid] {
+                        *v = to_caller(*v, init);
+                    }
+                }
+                if c.in_userns {
+                    for (k, v) in info.ids.iter_mut().enumerate() {
+                        *v = lx::ns::id_seen_by(ctgid, *v, k >= 3);
+                    }
+                }
+                out(ptr, &info)
+            }
             None => ESRCH,
         }
     }
+
+    // wave11 GP begin
+    /// Whether process `pid`, named `who` by a caller whose PID namespace's init is `init`,
+    /// is there for it ([`in_view`]).
+    pub(crate) fn visible(pid: u64, init: Option<u64>, who: u64) -> bool {
+        if init.is_none() {
+            return true;
+        }
+        let inits = lx::proc::PROCS.lock().get(&pid).map(|p| p.ns.pid_inits.clone()).unwrap_or_default();
+        in_view(pid, &inits, init, who)
+    }
+    // wave11 GP end
 
     /// The facts of process `pid`, thread `tid`, for a caller whose namespace's init is
     /// `init` (the kernel's `/proc/<pid>/{stat,status,statm}` sources).
@@ -470,6 +525,9 @@ pub mod glue {
             Err(e) => return e,
         };
         let pid = resolve_pid(who, ctgid, init);
+        if !visible(pid, init, who) {
+            return ESRCH; // wave11 GP
+        }
         let Some((fallback, service)) = crate::task::SCHEDULER.lock().with_process(pid, |t| (t.cmdline.clone(), t.service.is_some())) else { return ESRCH };
         if let Err(e) = may_query(init, false, service) {
             return e;
@@ -482,11 +540,14 @@ pub mod glue {
     /// `LX_INFO_ARGS` with `LX_INFO_ARGS_ENV`: the environment (`/proc/<pid>/environ`), under
     /// the `ptrace` read rule as the maps (Linux: `PTRACE_MODE_READ_FSCREDS`).
     fn environ(id: u64, who: u64, buf: u64, len: u64) -> i64 {
-        let Caller { tgid: ctgid, euid, egid, caps, init } = match caller(id) {
+        let Caller { tgid: ctgid, euid, egid, caps, init, .. } = match caller(id) {
             Ok(c) => c,
             Err(e) => return e,
         };
         let pid = resolve_pid(who, ctgid, init);
+        if !visible(pid, init, who) {
+            return ESRCH; // wave11 GP
+        }
         // (wave10 G8-1: + the target's permitted capabilities)
         let Some((uids, gids, service, perm)) =
             crate::task::SCHEDULER.lock().with_process(pid, |t| ((t.uid, t.euid, t.suid), (t.gid, t.egid, t.sgid), t.service.is_some(), t.caps.permitted))
@@ -506,12 +567,15 @@ pub mod glue {
 
     /// `LX_INFO_MAPS`.
     fn maps(id: u64, who: u64, buf: u64, len: u64) -> i64 {
-        let Caller { tgid: ctgid, euid, egid, caps, init } = match caller(id) {
+        let Caller { tgid: ctgid, euid, egid, caps, init, .. } = match caller(id) {
             Ok(c) => c,
             Err(e) => return e,
         };
         let Ok(cap) = check_len(len) else { return EINVAL };
         let pid = resolve_pid(who, ctgid, init);
+        if !visible(pid, init, who) {
+            return ESRCH; // wave11 GP
+        }
         // (wave10 G8-1: + the target's permitted capabilities)
         let Some((uids, gids, service, mm, perm)) = crate::task::SCHEDULER
             .lock()

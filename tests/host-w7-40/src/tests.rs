@@ -56,10 +56,11 @@ fn may_see_follows_the_ptrace_read_rule() {
 #[test]
 fn may_query_answers_only_first_namespace_callers_about_linux_processes() {
     assert_eq!(may_query(None, false, false), Ok(()));
-    // a caller in a PID namespace of its own, or a user namespace: refused
-    assert_eq!(may_query(Some(300), false, false), Err(err::EPERM));
-    assert_eq!(may_query(None, true, false), Err(err::EPERM));
-    assert_eq!(may_query(Some(300), true, true), Err(err::EPERM));
+    // wave11 GP: a caller in a PID namespace of its own, or a user namespace: answered
+    // (lx-proc serves their /proc; the IDs are translated)
+    assert_eq!(may_query(Some(300), false, false), Ok(()));
+    assert_eq!(may_query(None, true, false), Ok(()));
+    assert_eq!(may_query(Some(300), true, true), Err(err::ESRCH));
     // a service's process is no Linux process
     assert_eq!(may_query(None, false, true), Err(err::ESRCH));
 }
@@ -203,14 +204,14 @@ fn classify_pid_files() {
     assert_eq!(p("self/maps"), f(Who::Caller, 0, PidFile::Maps));
     assert_eq!(p("123/task/124/stat"), f(Who::Pid(123), 124, PidFile::Stat));
     assert_eq!(p("self/task/9/comm"), f(Who::Caller, 9, PidFile::Comm));
-    // per-thread directories have no statm, cmdline or maps here
-    assert_eq!(p("123/task/124/statm"), Target::Kernel);
-    assert_eq!(p("123/task/124/cmdline"), Target::Kernel);
+    // per-thread directories have no statm, cmdline or maps here (wave11 GP: not there)
+    assert_eq!(p("123/task/124/statm"), Target::Missing);
+    assert_eq!(p("123/task/124/cmdline"), Target::Missing);
     // wave10 G7b-2: environ and limits (not per thread)
     assert_eq!(p("self/environ"), f(Who::Caller, 0, PidFile::Environ));
     assert_eq!(p("123/limits"), f(Who::Pid(123), 0, PidFile::Limits));
-    assert_eq!(p("123/task/124/environ"), Target::Kernel);
-    assert_eq!(p("123/task/124/limits"), Target::Kernel);
+    assert_eq!(p("123/task/124/environ"), Target::Missing);
+    assert_eq!(p("123/task/124/limits"), Target::Missing);
     assert_eq!(p("self/environ/"), Target::Kernel);
 }
 
@@ -228,10 +229,11 @@ fn classify_process_directories() {
     assert_eq!(p("123/task/124"), Target::Dir(Dir::Thread(Who::Pid(123), 124)));
     assert_eq!(p("123/task/0124"), Target::Missing);
     assert_eq!(p("0123"), Target::Missing);
-    assert_eq!(p("0"), Target::Kernel);
-    assert_eq!(p("123/task/0"), Target::Kernel);
-    assert_eq!(p("123/task/x"), Target::Kernel);
-    assert_eq!(p("2147483648"), Target::Kernel);
+    // (wave11 GP: names that are not there: lx-proc answers ENOENT)
+    assert_eq!(p("0"), Target::Missing);
+    assert_eq!(p("123/task/0"), Target::Missing);
+    assert_eq!(p("123/task/x"), Target::Missing);
+    assert_eq!(p("2147483648"), Target::Missing);
     assert_eq!(Dir::Thread(Who::Pid(5), 6).who(), Who::Pid(5));
     assert_eq!(Dir::Task(Who::Caller).who(), Who::Caller);
 }
@@ -241,10 +243,11 @@ fn classify_sysvipc_files() {
     assert_eq!(p("sysvipc/shm"), Target::File(File::SysvIpc(0)));
     assert_eq!(p("sysvipc/sem"), Target::File(File::SysvIpc(1)));
     assert_eq!(p("sysvipc/msg"), Target::File(File::SysvIpc(2)));
-    assert_eq!(p("sysvipc"), Target::Kernel);
-    assert_eq!(p("sysvipc/"), Target::Kernel);
+    // wave11 GP: the directory is lx-proc's; other names are not there
+    assert_eq!(p("sysvipc"), Target::Dir(crate::pseudo::path::Dir::SysvIpc));
+    assert_eq!(p("sysvipc/"), Target::Dir(crate::pseudo::path::Dir::SysvIpc));
     assert_eq!(p("sysvipc/shm/"), Target::Kernel);
-    assert_eq!(p("sysvipc/other"), Target::Kernel);
+    assert_eq!(p("sysvipc/other"), Target::Missing);
 }
 
 #[test]
@@ -277,7 +280,8 @@ fn identity_round_trips() {
 "), 1)[0], 0);
     assert_eq!(path::of_ident([0, 0, 0, 0]), None);
     // codes that name nothing, and process files without a (valid) process
-    for id in [[9, 0, 0, 0], [15, 0, 0, 0], [24, 1, 0, 0], [99, 1, 0, 0], [16, 0, 0, 1], [16, 1 << 31, 0, 1], [16, 5, 1 << 31, 1]] {
+    // (wave11 GP: 9..=13 and 24..=32 are wave 11's files now)
+    for id in [[14, 0, 0, 0], [15, 0, 0, 0], [33, 1, 0, 0], [99, 1, 0, 0], [16, 0, 0, 1], [16, 1 << 31, 0, 1], [16, 5, 1 << 31, 1], [13, 9, 0, 0], [48, 0, 3, 1]] {
         assert_eq!(path::of_ident(id), None, "{:?}", id);
     }
 }
@@ -300,17 +304,199 @@ fn limits_text_matches_the_kernels_layout() {
 
 #[test]
 fn classify_sends_the_rest_to_the_kernel() {
+    // wave11 GP: what is still the kernel's: walks through magic links, `..`, `net/`,
+    // `keys`, `max_user_namespaces`, another process's memory, `thread-self/`
     for t in [
-        "", "self", "self/fd", "self/fd/3", "self/exe", "self/cwd", "self/root", "self/mountinfo", "mounts", "net/tcp", "self/fdinfo/1",
-        "self/auxv", "self/cgroup", "self/oom_score_adj", "self/ns/mnt", "self/uid_map", "keys", "swaps", "locks", "filesystems",
-        "sys/kernel/random/boot_id", "sys/kernel/random/uuid", "sys/user/max_user_namespaces", "asound/cards", "0/stat", "-1/stat", "12345678901/stat",
-        "12a/stat", "123/task/0/stat", "123/task/x/stat", "self/../uptime", "../etc/passwd", "uptime/", "self/stat/", "sys/kernel/nothing", "nothing",
+        "net/tcp", "net", "self/net/tcp", "keys", "sys/user/max_user_namespaces", "self/mem", "self/task/5/mem", "self/fd/3/x", "self/cwd/etc",
+        "self/root/.flatpak-info", "self/exe/x", "asound/card0/pcm0p/sub0/status", "self/../uptime", "../etc/passwd", "uptime/", "self/stat/", "thread-self/",
     ] {
-        assert_eq!(p(t), if t == "self" { Target::SelfLink(false) } else { Target::Kernel }, "{:?}", t);
+        assert_eq!(p(t), Target::Kernel, "{:?}", t);
     }
+    // ... and what is not there at all (the kernel answered ENOENT for them too)
+    for t in ["nothing", "sys/kernel/nothing", "pressure/cpu", "self/ctty", "self/.directory", "self/smaps", "12a/stat", "-1/stat", "12345678901/stat", "0/stat", "123/task/x/stat", "123/task/0/stat", "self/fdinfo/x", "self/ns/nothing"] {
+        assert_eq!(p(t), Target::Missing, "{:?}", t);
+    }
+    assert_eq!(p("self"), Target::SelfLink(false));
     assert_eq!(p("thread-self"), Target::SelfLink(true));
     // not UTF-8
     assert_eq!(classify(LX_VFS_PSEUDO_PROC, b"\xff/stat"), Target::Kernel);
+}
+
+// ---------------------------------------------------------------- wave11 GP
+
+#[test]
+fn classify_wave11_files_dirs_and_links() {
+    use crate::pseudo::path::{Dir, Link};
+    let f = |who, file| Target::File(File::Pid { who, tid: 0, file });
+    assert_eq!(p(""), Target::Dir(Dir::Root));
+    assert_eq!(p("."), Target::Dir(Dir::Root));
+    assert_eq!(p("self/fd"), Target::Dir(Dir::Fd(Who::Caller)));
+    assert_eq!(p("12/fdinfo/"), Target::Dir(Dir::FdInfo(Who::Pid(12))));
+    assert_eq!(p("12/ns"), Target::Dir(Dir::Ns(Who::Pid(12))));
+    assert_eq!(p("self/fd/3"), Target::Link(Who::Caller, Link::Fd(3)));
+    assert_eq!(p("self/fd/0"), Target::Link(Who::Caller, Link::Fd(0)));
+    assert_eq!(p("self/fd/03"), Target::Missing);
+    assert_eq!(p("self/fd/3/"), Target::Kernel);
+    assert_eq!(p("12/exe"), Target::Link(Who::Pid(12), Link::Exe));
+    assert_eq!(p("12/cwd"), Target::Link(Who::Pid(12), Link::Cwd));
+    assert_eq!(p("12/root"), Target::Link(Who::Pid(12), Link::Root));
+    assert_eq!(p("12/root/"), Target::Kernel);
+    assert_eq!(p("self/ns/mnt"), Target::Link(Who::Caller, Link::Ns(2)));
+    assert_eq!(p("self/ns/pid_for_children"), Target::Link(Who::Caller, Link::Ns(5)));
+    assert_eq!(p("self/fdinfo/7"), Target::File(File::FdInfo { who: Who::Caller, fd: 7 }));
+    assert_eq!(p("self/auxv"), f(Who::Caller, PidFile::Auxv));
+    assert_eq!(p("self/cgroup"), f(Who::Caller, PidFile::Cgroup));
+    assert_eq!(p("self/mountinfo"), f(Who::Caller, PidFile::Mountinfo));
+    assert_eq!(p("12/mounts"), f(Who::Pid(12), PidFile::Mounts));
+    assert_eq!(p("mounts"), f(Who::Caller, PidFile::Mounts));
+    assert_eq!(p("self/uid_map"), f(Who::Caller, PidFile::UidMap));
+    assert_eq!(p("self/gid_map"), f(Who::Caller, PidFile::GidMap));
+    assert_eq!(p("self/setgroups"), f(Who::Caller, PidFile::Setgroups));
+    assert_eq!(p("self/oom_score_adj"), f(Who::Caller, PidFile::OomScoreAdj));
+    assert_eq!(p("self/oom_score"), f(Who::Caller, PidFile::OomScore));
+    assert_eq!(p("filesystems"), Target::File(File::Filesystems));
+    assert_eq!(p("swaps"), Target::File(File::Swaps));
+    assert_eq!(p("locks"), Target::File(File::Locks));
+    assert_eq!(p("sys/kernel/random/boot_id"), Target::File(File::BootId));
+    assert_eq!(p("sys/kernel/random/uuid"), Target::File(File::Uuid));
+    assert_eq!(p("asound"), Target::Dir(Dir::Asound));
+    assert_eq!(p("asound/cards"), Target::File(File::Asound(0)));
+    assert_eq!(p("asound/card0/codec#0"), Target::File(File::Asound(5)));
+    // the /proc/sys directories
+    let dirs = path::static_dirs();
+    for d in ["sys", "sys/kernel", "sys/kernel/random", "sys/fs/inotify", "sys/net/ipv4/conf/default", "sys/kernel/yama"] {
+        let i = dirs.iter().position(|x| *x == d).unwrap_or_else(|| panic!("{} missing", d));
+        assert_eq!(p(d), Target::Dir(Dir::Static(i as u16)), "{}", d);
+        assert_eq!(path::dir_tail(Dir::Static(i as u16)), d);
+    }
+    // per-thread: no auxv, fd links
+    assert_eq!(p("12/task/13/auxv"), Target::Missing);
+}
+
+#[test]
+fn file_modes_and_writes_wave11() {
+    let f = |file| File::Pid { who: Who::Caller, tid: 0, file };
+    assert_eq!(f(PidFile::Auxv).mode(), 0o400);
+    assert_eq!(f(PidFile::UidMap).mode(), 0o644);
+    assert_eq!(f(PidFile::OomScoreAdj).mode(), 0o644);
+    assert_eq!(f(PidFile::OomScore).mode(), 0o444);
+    assert!(f(PidFile::UidMap).writable() && f(PidFile::GidMap).writable() && f(PidFile::Setgroups).writable() && f(PidFile::OomScoreAdj).writable());
+    assert!(!f(PidFile::Stat).writable() && !File::Filesystems.writable());
+    assert!(!File::Pid { who: Who::Caller, tid: 5, file: PidFile::UidMap }.writable());
+    use crate::pseudo::path::Dir;
+    assert_eq!(Dir::Fd(Who::Caller).mode(), 0o500);
+    assert_eq!(Dir::FdInfo(Who::Caller).mode(), 0o500);
+    assert_eq!(Dir::Ns(Who::Caller).mode(), 0o511);
+    assert_eq!(Dir::Root.mode(), 0o555);
+    assert!(Dir::Fd(Who::Pid(3)).of_process() && !Dir::Root.of_process() && !Dir::SysvIpc.of_process());
+    assert_eq!(Dir::Root.who(), Who::Caller);
+    assert_eq!(Dir::Ns(Who::Pid(4)).who(), Who::Pid(4));
+}
+
+#[test]
+fn wave11_identities_round_trip() {
+    use crate::pseudo::path::Dir;
+    for f in [File::Filesystems, File::Swaps, File::Locks, File::Uuid, File::Asound(0), File::Asound(5)] {
+        let id = path::ident(f, 9);
+        assert_ne!(id[0], 0);
+        assert_eq!(path::of_ident(id), Some((f, 0)), "{:?}", f);
+    }
+    assert_eq!(path::ident(File::BootId, 1)[0], 0); // (one per boot: never made again)
+    assert_eq!(path::of_ident(path::ident(File::Asound(6), 0)), None);
+    let fi = File::FdInfo { who: Who::Pid(77), fd: 5 };
+    assert_eq!(path::of_ident(path::ident(fi, 123)), Some((fi, 123)));
+    for pf in [PidFile::Auxv, PidFile::Cgroup, PidFile::Mountinfo, PidFile::Mounts, PidFile::UidMap, PidFile::GidMap, PidFile::Setgroups, PidFile::OomScoreAdj, PidFile::OomScore] {
+        let f = File::Pid { who: Who::Pid(9), tid: 0, file: pf };
+        assert_eq!(path::of_ident(path::ident(f, 3)), Some((f, 3)), "{:?}", pf);
+    }
+    let n = path::static_dirs().len() as u16;
+    for d in [Dir::Root, Dir::Pid(Who::Pid(5)), Dir::Task(Who::Pid(5)), Dir::Thread(Who::Pid(5), 6), Dir::Fd(Who::Pid(5)), Dir::FdInfo(Who::Pid(5)), Dir::Ns(Who::Pid(5)), Dir::Static(0), Dir::Static(n - 1), Dir::SysvIpc, Dir::Asound] {
+        let start = if d.of_process() { 42 } else { 0 };
+        let id = path::dir_ident(d, start);
+        assert_eq!(path::dir_of_ident(id), Some((d, start)), "{:?}", d);
+        // never mistaken for a file
+        assert_eq!(path::of_ident(id), None, "{:?}", d);
+    }
+    // directories of no process, thread 0, a static index past the end, file codes
+    for id in [[65, 0, 0, 1], [67, 5, 0, 1], [71, n as u64, 0, 0], [74, 0, 0, 0], [16, 5, 0, 1], [63, 0, 0, 0]] {
+        assert_eq!(path::dir_of_ident(id), None, "{:?}", id);
+    }
+    assert_eq!(path::dir_tail(Dir::Root), "");
+    assert_eq!(path::dir_tail(Dir::Thread(Who::Pid(5), 6)), "5/task/6");
+    assert_eq!(path::dir_tail(Dir::Fd(Who::Caller)), "self/fd");
+    assert_eq!(path::dir_tail(Dir::FdInfo(Who::Pid(1))), "1/fdinfo");
+    assert_eq!(path::dir_tail(Dir::Ns(Who::Pid(1))), "1/ns");
+    assert_eq!(path::dir_tail(Dir::Task(Who::Pid(1))), "1/task");
+    assert_eq!(path::dir_tail(Dir::Pid(Who::Pid(1))), "1");
+    assert_eq!(path::dir_tail(Dir::SysvIpc), "sysvipc");
+    assert_eq!(path::dir_tail(Dir::Asound), "asound");
+}
+
+#[test]
+fn relative_tails() {
+    assert_eq!(path::relative_tail(b"/proc", b"123/stat").as_deref(), Some(&b"123/stat"[..]));
+    assert_eq!(path::relative_tail(b"/proc/123", b"stat").as_deref(), Some(&b"123/stat"[..]));
+    assert_eq!(path::relative_tail(b"/proc/123/fd", b"").as_deref(), Some(&b"123/fd"[..]));
+    assert_eq!(path::relative_tail(b"/proc/123", b"/etc"), None);
+    assert_eq!(path::relative_tail(b"/sys", b"x"), None);
+    assert_eq!(path::relative_tail(b"/procx", b"x"), None);
+}
+
+#[test]
+fn wave11_texts() {
+    let d = text::dir_text(&[(5, text::DT_DIR, b"12"), (6, text::DT_LNK, b"self"), (7, text::DT_REG, b""), (8, text::DT_REG, &[b'x'; 256])]);
+    assert_eq!(d.len(), 10 + 2 + 10 + 4);
+    assert_eq!(&d[..8], &5u64.to_le_bytes());
+    assert_eq!(&d[8..12], &[text::DT_DIR, 2, b'1', b'2']);
+    assert_eq!(&d[20..26], &[text::DT_LNK, 4, b's', b'e', b'l', b'f']);
+    let t = alloc::string::String::from_utf8(text::fdinfo(&[3, 0o2002, 2069, 77, 0, 0, 0, 0, 0, 0, 0])).unwrap();
+    assert_eq!(t, "pos:\t3\nflags:\t02002\nmnt_id:\t2069\nino:\t77\n");
+    let t = alloc::string::String::from_utf8(text::fdinfo(&[0, 2, 2069, 0, 43, 0, 0, 0, 0, 0, 0])).unwrap();
+    assert!(t.ends_with("Pid:\t42\nNSpid:\t42\n"));
+    let t = alloc::string::String::from_utf8(text::fdinfo(&[0, 2, 2069, 0, u64::MAX, 0, 0, 0, 0, 0, 0])).unwrap();
+    assert!(t.ends_with("Pid:\t-1\nNSpid:\t-1\n"));
+    assert_eq!(text::cgroup(b"/user.slice"), b"0::/user.slice\n");
+    assert_eq!(text::cgroup(b""), b"0::/\n");
+    assert_eq!(text::ns_link("pid_for_children", 4026531836), "pid:[4026531836]");
+    assert_eq!(text::ns_link("time_for_children", 1), "time:[1]");
+    assert_eq!(text::ns_link("mnt", 9), "mnt:[9]");
+    assert_eq!(text::number_line(-17), b"-17\n");
+    assert_eq!(text::u32s(&[1, 0, 0, 0, 2, 1, 0, 0, 9]), [1, 258]);
+}
+
+#[test]
+fn info_wave11_views() {
+    use crate::lx::info::{in_view, u32_list};
+    // the first namespace sees everyone, by any number
+    assert!(in_view(300, &[], None, 300));
+    // a namespace whose init is 300: the init (as 1, or as itself: 0) and those below it
+    assert!(in_view(300, &[], Some(300), 1));
+    assert!(in_view(300, &[], Some(300), 0));
+    assert!(!in_view(300, &[], Some(300), 300));
+    assert!(in_view(301, &[300], Some(300), 301));
+    assert!(!in_view(200, &[], Some(300), 200));
+    assert!(!in_view(400, &[350], Some(300), 400));
+    // an init that is 1 itself
+    assert!(in_view(1, &[], Some(1), 1));
+    assert_eq!(u32_list(&[1, 0x1_0000_0001, 7]), [1, 0, 0, 0, 255, 255, 255, 255, 7, 0, 0, 0]);
+}
+
+#[test]
+fn procx_rules() {
+    use crate::ipc::protocol::*;
+    use crate::lx::procx::{fdinfo_flags, guarded, per_process};
+    for w in [LX_PX_FDS, LX_PX_FDLINK, LX_PX_FDINFO, LX_PX_LINK, LX_PX_AUXV, LX_PX_NSINO] {
+        assert!(guarded(w) && per_process(w));
+    }
+    for w in [LX_PX_CGROUP, LX_PX_TASKS, LX_PX_IDMAP, LX_PX_OOM] {
+        assert!(!guarded(w) && per_process(w));
+    }
+    for w in [LX_PX_PIDS, LX_PX_TEXT, 99] {
+        assert!(!guarded(w) && !per_process(w));
+    }
+    assert_eq!(fdinfo_flags(0o2000002, false), 0o2);
+    assert_eq!(fdinfo_flags(0o2, true), 0o2000002);
+    assert_eq!(fdinfo_flags(0o4000, true), 0o2004000);
 }
 
 #[test]
@@ -572,14 +758,15 @@ fn classify_efivars_files() {
 fn classify_rejects_big_ids_and_dot_endings() {
     // IDs above 31 bits never reach the info primitives (they would spill into the other half)
     assert_eq!(p("2147483647/stat"), Target::File(File::Pid { who: Who::Pid(2147483647), tid: 0, file: PidFile::Stat }));
-    assert_eq!(p("2147483648/stat"), Target::Kernel);
-    assert_eq!(p("9999999999/stat"), Target::Kernel);
-    assert_eq!(p("1/task/4294967296/stat"), Target::Kernel);
+    // (wave11 GP: not there, as the kernel answered)
+    assert_eq!(p("2147483648/stat"), Target::Missing);
+    assert_eq!(p("9999999999/stat"), Target::Missing);
+    assert_eq!(p("1/task/4294967296/stat"), Target::Missing);
     // `/.` at the end: must be a directory (ENOTDIR for a file, the kernel's rules)
     assert_eq!(p("version/."), Target::Kernel);
     assert_eq!(p("self/."), Target::Dir(crate::pseudo::path::Dir::Pid(Who::Caller))); // (wave10 G7b-2: a directory)
     assert_eq!(p("self/stat/."), Target::Kernel);
-    assert_eq!(p("."), Target::Kernel);
+    assert_eq!(p("."), Target::Dir(crate::pseudo::path::Dir::Root)); // (wave11 GP: /proc itself)
     // `.` in the middle is fine
     assert_eq!(p("./self/./stat"), Target::File(File::Pid { who: Who::Caller, tid: 0, file: PidFile::Stat }));
 }

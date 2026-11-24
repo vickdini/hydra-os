@@ -25,6 +25,9 @@ pub mod lx {
     // wave10 G8-1: the ptrace rule `info::may_see` is built on
     #[path = "../../../../src/lx/ptrace_rules.rs"]
     pub mod ptrace_rules;
+    // wave11 GP: the rules of `LX_INFO_PROCX`
+    #[path = "../../../../src/lx/procx.rs"]
+    pub mod procx;
 }
 
 /// lx-proc's `/proc` logic (wave 10 Group 7b-2).

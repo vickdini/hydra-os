@@ -1197,3 +1197,59 @@ lx-proc also decides who may trace and observe whom; the kernel keeps the mechan
 - **Dumpable** (the rule's input): `PR_SET_DUMPABLE`; cleared when a credential change alters the effective ids or gains capabilities (`lx::proc::task_creds_set`, both modes, as Linux's `commit_creds`) and by an exec that gains privileges (7b-2); back to 1 at an ordinary exec.
 - **Restarts**: lx-proc only decides these calls (the kernel acts after the redirect), so a decision cut by a crash is made again (`restart_policy::idempotent`); an attached tracer never needs lx-proc again.
 - **Tests**: `tests/linux/ptperm.c` (suite: the permission matrix; `ptperm bench N` timings; `ptperm step S` single-steps a child and attaches anew every second, for kill tests), `tests/host-w10-81` (the rule, the facts and keys, lx-proc's half against a model of the kernel).
+
+### The rest of `/proc` (wave 11, Group P)
+
+Wave 11 moved what the kernel still served of `/proc` into lx-proc. Measured first (a
+temporary counter at the kernel's own `/proc` code, KDE login + Firefox + Dolphin on `/proc` +
+the system monitor + console tools + `unshare -pf --mount-proc`): 7,680 calls reached it; after
+the move fewer than 512 do in the same session.
+
+- **Directories** (`/proc`, `<pid>`, `task/`, `task/<tid>`, `fd/`, `fdinfo/`, `ns/`, the
+  `/proc/sys` directories, `sysvipc/`, `asound/`) are **directory snapshots**: the same
+  kernel-held `ProcSnap` as a file's, installed with `LX_PSNAP_INSTALL` and `mode` `S_IFDIR`;
+  its text is lx-proc's entry list (`ino`, type, name). The kernel's `getdents64` walks it
+  (`CharDevice::getdents64`, no round trip), `lseek(fd, 0, SEEK_SET)` (`rewinddir`) makes the
+  list again through `LX_KCALL_PREMAKE`, a read is `EISDIR`. Like the files they survive
+  lx-proc's restarts. Every snapshot (file or directory) reports its text's length as
+  `fstat`'s `st_size` (dbus-daemon reads `fdinfo` up to it and takes an early end as an error),
+  polls readable only, and is edge-triggered once in `epoll` (`CharDevice::edges`, as the
+  kernel's own files: a level-triggered `mountinfo` watch spun the SDDM greeter).
+- **Walks relative to a `/proc` directory descriptor** (the system monitor opens
+  `<pid>/stat` from its `/proc` descriptor; Chromium's sandbox walks `self/...`): such a call
+  goes from the kernel straight to lx-proc (`fileh::proc_dirfd_call`: a redirected call with
+  `LX_PROC_AT_DIRFD` in `redir_obj`); lx-proc reads the descriptor's path with
+  `LX_PSNAP_IDENT` (op 80 sub-op 3) and classifies `base/path`. vfs-server is not asked.
+- **Magic links** `fd/N`, `exe`, `cwd`, `root`, `ns/<kind>`: `readlink`, `lstat` and the
+  `fd/` listing are lx-proc's, under the `ptrace` read rule (`fd/` of another process now
+  works for `lsof`; the kernel's copy showed only the caller's own). `exe` and `root` stay
+  readable by everyone, as before (KWin reads a client's `exe`). `stat` of a namespace
+  link answers the namespace's inode number (nsfs device 0:4; the kernel's `fstat` of an
+  opened namespace descriptor says the same). **Following** a link (`open`, `stat`,
+  `execve`, `linkat` of `/proc/self/fd/N`, a walk through `root/` or `cwd/`, opening a
+  namespace file for `setns`) needs the handle it names: lx-proc answers with a redirect to the
+  kernel, whose handle resolution (`vfs::fd_link`/`desc_link`, `fs::proc_link`,
+  `magic_fd_target`, `ns.rs`'s namespace descriptors) is mechanism and stays.
+- **Files:** `fdinfo/N`, `auxv` (0400, read rule), `cgroup`, `mountinfo`, `mounts`
+  (`/proc/mounts`), `uid_map`/`gid_map`/`setgroups` and `oom_score`/`oom_score_adj` (reads),
+  `filesystems`, `swaps`, `locks`, `asound/*`, `sys/kernel/random/{boot_id,uuid}`. Their facts
+  come from **`SYS_LX_OBJ` op 82 `LX_INFO_PROCX`** (`src/lx/procx.rs`: descriptor list, link
+  texts, `fdinfo` fields, auxiliary vector, control group, namespace inode numbers, threads,
+  the caller's visible processes, id maps, OOM numbers, and tables other parts keep, relayed as
+  their owners write them). **Writes** to `uid_map`/`gid_map`/`setgroups`/`oom_score_adj` are
+  redirected to the kernel's namespace and OOM mechanism.
+- **Names that do not exist** (`pressure/*`, `<pid>/ctty`, `smaps`, unknown `/proc/sys`
+  files, Dolphin's `.directory`) are answered `ENOENT` by lx-proc (the kernel answered the
+  same).
+- **Callers in a PID or user namespace of their own** are lx-proc's now: the info primitives
+  answer them (`info::may_query` no longer refuses), translate the IDs (`to_caller` for pid,
+  tid, parent, group, session, tracer, the `/proc` listing; the user namespace's map for the
+  user and group ids) and hide processes outside the caller's PID namespace (`info::in_view`).
+- **Still the kernel's `/proc`:** the link resolution above; the sound card's stream files
+  (`asound/card0/pcm0p/sub0/status`, ...); `net/*` (the kernel relays
+  lx-net's and lx-ipc's tables and keeps the interface ones), `keys`,
+  `sys/user/max_user_namespaces`, `<pid>/mem`, `thread-self/` as a directory, `..` walks,
+  `chdir` into `/proc`, and boot before lx-proc runs.
+- **Tests:** `tests/linux/procrest.c` (suite; `procrest bench N`, `procrest hold SECS` for kill
+  tests), `tests/host-w7-40` (classify, identities, texts, the view rule, op 82's rules),
+  `tests/host-w10-7b2` (the directory records).

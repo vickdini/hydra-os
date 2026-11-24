@@ -2808,6 +2808,101 @@ impl LxSnapIo {
 }
 // wave10 G7b-2 end
 
+// wave11 GP begin: the rest of `/proc` in lx-proc (directories, links, fdinfo, auxv, ...)
+/// [`LX_OBJ_PSNAP`] sub-op: the identity and shown path of descriptor `ident[0]` of the
+/// request's caller, if it is a `/proc` snapshot (its [`LxSnapIo`] is filled: `ident`,
+/// `mode`, `name`); `ENOTDIR`/`EBADF` otherwise. lx-proc asks it for a call relative to a
+/// `/proc` directory descriptor ([`LX_PROC_AT_DIRFD`]).
+pub const LX_PSNAP_IDENT: u64 = 3;
+/// A directory snapshot ([`LxSnapIo::mode`] `S_IFDIR`): its text is a list of entries,
+/// each `ino: u64` (little-endian), `type: u8` (`DT_*`), `len: u8`, then `len` name bytes;
+/// the kernel's `getdents64` turns them into `linux_dirent64` records (`d_off` = the index
+/// of the next entry + 1), `lseek(fd, 0, SEEK_SET)` (rewinddir) makes the list again.
+pub const LX_PSNAP_DIRENT_HEAD: usize = 10;
+/// [`LxCall::redir_obj`] bit of a call the kernel sends straight to lx-proc (a redirected
+/// call, `redirs` 1, `redir_tail` 0): its path is relative to the `/proc` directory snapshot
+/// at the call's `dirfd` (`args[0]`), which lx-proc reads with [`LX_PSNAP_IDENT`].
+pub const LX_PROC_AT_DIRFD: u64 = 1 << 40;
+/// `SYS_LX_OBJ` op (the host of `LXS_PROC` only, for one of its own requests):
+/// `LX_INFO_PROCX(req, what, *LxProcxIo)`: more facts for `/proc` (`LX_PX_*`), for the
+/// request's caller (in a remake: the opener; IDs as the caller's PID and user namespaces
+/// show them). Returns the bytes a buffer answer needs (copied up to `cap`) or 0; `ESRCH`
+/// no such process (or not visible from the caller's PID namespace), `ENOENT` no such
+/// descriptor, `EACCES` the ptrace read rule refuses (`fd/`, `fdinfo/`, links, `auxv`).
+pub const LX_INFO_PROCX: u64 = 82;
+/// `LX_INFO_PROCX`: the process's open descriptors (`u32` each, ascending).
+pub const LX_PX_FDS: u64 = 1;
+/// `LX_INFO_PROCX`: what descriptor `arg` links to (`/proc/<pid>/fd/<arg>`'s text).
+pub const LX_PX_FDLINK: u64 = 2;
+/// `LX_INFO_PROCX`: descriptor `arg`'s `fdinfo` fields: `out[0]` position, `out[1]` open
+/// flags (with `O_CLOEXEC`), `out[2]` mount id, `out[3]` inode, `out[4]` a pidfd's process +
+/// 1 (`u64::MAX` gone, 0 not a pidfd); the buffer: extra lines the object adds.
+pub const LX_PX_FDINFO: u64 = 3;
+/// `LX_INFO_PROCX`: the text of link `arg` (0 `exe`, 1 `cwd`, 2 `root`).
+pub const LX_PX_LINK: u64 = 4;
+/// `LX_INFO_PROCX`: the auxiliary vector (bytes).
+pub const LX_PX_AUXV: u64 = 5;
+/// `LX_INFO_PROCX`: the control group's path (`/proc/<pid>/cgroup` is `0::<path>`).
+pub const LX_PX_CGROUP: u64 = 6;
+/// `LX_INFO_PROCX`: the namespace inode numbers `out[0..10]` in [`LX_PX_NS_NAMES`]'s order.
+pub const LX_PX_NSINO: u64 = 7;
+/// `LX_INFO_PROCX`: the process's threads (`u32` each, as the caller sees them).
+pub const LX_PX_TASKS: u64 = 8;
+/// `LX_INFO_PROCX`: the processes the caller sees in `/proc` (`u32` each, its IDs).
+pub const LX_PX_PIDS: u64 = 9;
+/// `LX_INFO_PROCX`: text of `uid_map` (`arg` 0), `gid_map` (1), `setgroups` (2).
+pub const LX_PX_IDMAP: u64 = 10;
+/// `LX_INFO_PROCX`: `out[0]` `oom_score_adj` (as `i64`), `out[1]` `oom_score`.
+pub const LX_PX_OOM: u64 = 11;
+/// `LX_INFO_PROCX`: the text of a table another part of the system keeps (`arg`,
+/// `LX_PX_T_*`): the kernel relays it as it is (no `/proc` code of its own).
+pub const LX_PX_TEXT: u64 = 12;
+/// `LX_PX_TEXT`: `/proc/filesystems`.
+pub const LX_PX_T_FILESYSTEMS: u64 = 0;
+/// `LX_PX_TEXT`: `/proc/swaps`.
+pub const LX_PX_T_SWAPS: u64 = 1;
+/// `LX_PX_TEXT`: `/proc/locks`.
+pub const LX_PX_T_LOCKS: u64 = 2;
+/// `LX_PX_TEXT`: `/proc/keys` (the key service's, for the caller).
+pub const LX_PX_T_KEYS: u64 = 3;
+/// `LX_PX_TEXT`: `/proc/<pid>/mountinfo` of the process's mount namespace.
+pub const LX_PX_T_MOUNTINFO: u64 = 4;
+/// `LX_PX_TEXT`: `/proc/<pid>/mounts`.
+pub const LX_PX_T_MOUNTS: u64 = 5;
+/// `LX_PX_TEXT`: `/proc/sys/user/max_user_namespaces`.
+pub const LX_PX_T_MAXUSERNS: u64 = 6;
+/// `LX_PX_TEXT`: `/proc/asound/<path>` (the path in the buffer on the way in, NUL-ended).
+pub const LX_PX_T_ASOUND: u64 = 7;
+/// `LX_PX_TEXT`: `/proc/sys/kernel/random/boot_id` (one per boot).
+pub const LX_PX_T_BOOTID: u64 = 8;
+/// `LX_PX_TEXT`: `/proc/sys/kernel/random/uuid` (a new one each time).
+pub const LX_PX_T_UUID: u64 = 9;
+/// `LX_PX_TEXT`: `/proc/net/<table>` (`LX_PX_T_NET + index` in `LX_PX_NET_NAMES`).
+pub const LX_PX_T_NET: u64 = 16;
+/// The `/proc/net` tables, in `LX_PX_T_NET`'s order.
+pub const LX_PX_NET_NAMES: [&str; 12] = ["tcp", "udp", "tcp6", "udp6", "dev", "unix", "route", "ipv6_route", "if_inet6", "arp", "snmp", "snmp6"];
+/// The namespace kinds of `/proc/<pid>/ns`, in [`LX_PX_NSINO`]'s order.
+pub const LX_PX_NS_NAMES: [&str; 10] = ["cgroup", "ipc", "mnt", "net", "pid", "pid_for_children", "time", "time_for_children", "user", "uts"];
+
+/// What [`LX_INFO_PROCX`] takes and gives (in lx-proc's memory).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LxProcxIo {
+    /// The process as the caller names it (0: the caller's own).
+    pub pid: u64,
+    /// The thread (`/proc/<pid>/task/<tid>`: 0 the process).
+    pub tid: u64,
+    /// Per operation (a descriptor number, a link or table number).
+    pub arg: u64,
+    /// A buffer in lx-proc's memory, and its capacity.
+    pub buf: u64,
+    /// See [`LxProcxIo::buf`].
+    pub cap: u64,
+    /// Words out.
+    pub out: [u64; 11],
+}
+// wave11 GP end
+
 // wave9 G6b-3 begin: Landlock and ABAC checks in the file service
 /// `SYS_LX_OBJ` op (the file service's host only): `LX_FH_LANDLOCK(req, buf, cap)` writes
 /// the Landlock domain of request `req`'s caller to `buf`: [`LxLlHead`], then per layer a

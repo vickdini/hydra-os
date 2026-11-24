@@ -305,7 +305,8 @@ fn proc_sysvipc_paths() {
     assert_eq!(c(b"sysvipc/sem"), Target::File(File::SysvIpc(1)));
     assert_eq!(c(b"sysvipc/msg"), Target::File(File::SysvIpc(2)));
     assert_eq!(c(b"sysvipc/shm/"), Target::Kernel, "a trailing slash: the kernel's rules");
-    assert_eq!(c(b"sysvipc"), Target::Kernel, "the directory: the kernel's");
-    assert_eq!(c(b"sysvipc/foo"), Target::Kernel);
+    // (wave11 GP: the directory is lx-proc's now; other names are not there)
+    assert_eq!(c(b"sysvipc"), Target::Dir(crate::pseudo::path::Dir::SysvIpc), "the directory");
+    assert_eq!(c(b"sysvipc/foo"), Target::Missing);
     assert_eq!(c(b"./sysvipc//shm"), Target::File(File::SysvIpc(0)));
 }

@@ -60,6 +60,61 @@ pub fn piece(len: usize, pos: u64, want: usize) -> core::ops::Range<usize> {
     start..start.saturating_add(want).min(len)
 }
 
+// wave11 GP begin: directory snapshots
+/// The length of a directory snapshot entry's head (`ino`, type, name length).
+pub const DIRENT_HEAD: usize = 10;
+
+/// The entries of a directory snapshot's text (`ino`, `DT_*` type, name); a cut-off entry
+/// at the end is left out.
+pub fn dir_entries(text: &[u8]) -> alloc::vec::Vec<(u64, u8, &[u8])> {
+    let mut v = alloc::vec::Vec::new();
+    let mut at = 0;
+    while at + DIRENT_HEAD <= text.len() {
+        let ino = u64::from_le_bytes(text[at..at + 8].try_into().unwrap_or([0; 8]));
+        let (t, n) = (text[at + 8], text[at + 9] as usize);
+        let Some(name) = text.get(at + DIRENT_HEAD..at + DIRENT_HEAD + n) else { break };
+        v.push((ino, t, name));
+        at += DIRENT_HEAD + n;
+    }
+    v
+}
+
+/// The `linux_dirent64` records of `text`'s entries from index `from` (with `.` and `..`
+/// first: indexes 0 and 1, inode `dot`) that fit in `count` bytes, and the index after the
+/// last one (`d_off` of each record is the index after it). `-EINVAL` when not even the
+/// first record fits.
+pub fn dirent64(text: &[u8], dot: u64, from: u64, count: usize) -> Result<(alloc::vec::Vec<u8>, u64), i64> {
+    let entries = dir_entries(text);
+    let total = entries.len() as u64 + 2;
+    let mut out = alloc::vec::Vec::new();
+    let mut i = from;
+    while i < total {
+        let (ino, t, name): (u64, u8, &[u8]) = match i {
+            0 => (dot, 4, b"."),
+            1 => (dot, 4, b".."),
+            k => entries[(k - 2) as usize],
+        };
+        let reclen = (19 + name.len() + 1 + 7) & !7;
+        if out.len() + reclen > count {
+            if out.is_empty() {
+                return Err(EINVAL);
+            }
+            break;
+        }
+        let start = out.len();
+        out.extend_from_slice(&ino.to_le_bytes());
+        out.extend_from_slice(&(i + 1).to_le_bytes());
+        out.extend_from_slice(&(reclen as u16).to_le_bytes());
+        out.push(t);
+        out.extend_from_slice(name);
+        out.push(0);
+        out.resize(start + reclen, 0);
+        i += 1;
+    }
+    Ok((out, i))
+}
+// wave11 GP end
+
 /// Whether a seek is a rewind that makes the text again (`lseek(fd, 0, SEEK_SET)`) for a
 /// snapshot of identity code `code` (0: fixed text, never made again).
 pub fn remakes_on_seek(code: u64, offset: i64, whence: u32) -> bool {
@@ -90,7 +145,7 @@ pub mod glue {
     use super::*;
     use crate::compat::linux::chardev::CharDevice;
     use crate::fs::FileDescriptor;
-    use crate::ipc::protocol::{lx_req_svc, LxSnapIo, SvcId, LXS_PROC, LX_KCALL_PREMAKE, LX_OBJ_NAME_MAX, LX_PSNAP_FILL, LX_PSNAP_INSTALL, LX_PSNAP_MAX};
+    use crate::ipc::protocol::{lx_req_svc, LxSnapIo, SvcId, LXS_PROC, LX_KCALL_PREMAKE, LX_OBJ_NAME_MAX, LX_PSNAP_FILL, LX_PSNAP_IDENT, LX_PSNAP_INSTALL, LX_PSNAP_MAX};
     use crate::task::wait::WaitSet;
     use crate::task::TaskId;
 
@@ -103,6 +158,11 @@ pub mod glue {
     const EMFILE: i64 = -24;
     const ENOTTY: i64 = -25;
     const ENODEV: i64 = -19;
+    const EISDIR: i64 = -21; // wave11 GP
+    const ENOTDIR: i64 = -20; // wave11 GP
+    /// wave11 GP: `S_IFMT`, `S_IFDIR`.
+    const S_IFMT: u32 = 0o170000;
+    const S_IFDIR: u32 = 0o040000;
 
     const O_RDONLY: u32 = 0;
     const O_WRONLY: u32 = 1;
@@ -263,10 +323,18 @@ pub mod glue {
             Ok(())
         }
 
+        /// wave11 GP: a directory snapshot (its text is a list of entries).
+        fn is_dir(&self) -> bool {
+            self.mode & S_IFMT == S_IFDIR
+        }
+
         /// A read at the position, after a pending remake.
         fn read_at_pos(&self, buf: &mut [u8]) -> i64 {
             if self.acc == O_WRONLY {
                 return EBADF;
+            }
+            if self.is_dir() {
+                return EISDIR; // wave11 GP
             }
             // (the piece is taken and the position moved under one lock: two readers of
             // one open file never get the same bytes)
@@ -299,6 +367,9 @@ pub mod glue {
             if self.acc == O_WRONLY {
                 return Some(EBADF);
             }
+            if self.is_dir() {
+                return Some(EISDIR); // wave11 GP
+            }
             if let Err(e) = self.refresh() {
                 return Some(e);
             }
@@ -320,7 +391,13 @@ pub mod glue {
         }
 
         fn poll_events(&self) -> u32 {
-            READY
+            // wave11 GP: readable; writable only when opened for writing (as the kernel's
+            // own `/proc` files: a watcher of `mountinfo` must not see it ready for writing)
+            if self.acc == O_RDONLY {
+                0x1 | 0x40
+            } else {
+                READY
+            }
         }
 
         fn add_wait_queues(&self, _waits: &mut WaitSet) {}
@@ -345,12 +422,39 @@ pub mod glue {
             self.nonblock.load(Ordering::Relaxed)
         }
 
+        // wave11 GP begin
+        fn edges(&self) -> Option<u64> {
+            // (always ready, as a file: an edge-triggered watch fires once, as the epoll code
+            // treats the kernel's own files; level-triggered, a watcher of `mountinfo` - the
+            // SDDM greeter's - spun and starved the compositor)
+            Some(0)
+        }
+
+        fn proc_ident(&self) -> Option<([u64; 4], u32, String)> {
+            Some((self.ident, self.mode, self.name.clone()))
+        }
+
+        fn getdents64(&self, count: usize) -> Option<Result<Vec<u8>, i64>> {
+            if !self.is_dir() {
+                return Some(Err(ENOTDIR));
+            }
+            if let Err(e) = self.refresh() {
+                return Some(Err(e));
+            }
+            let mut t = self.inner.lock();
+            Some(dirent64(&t.text, self.ino, t.pos, count).map(|(out, next)| {
+                t.pos = next;
+                out
+            }))
+        }
+        // wave11 GP end
+
         fn stat(&self) -> crate::compat::linux::types::LinuxStat {
             let mut st = crate::compat::linux::types::LinuxStat::default();
             st.st_mode = self.mode;
             st.st_uid = self.uid;
             st.st_gid = self.gid;
-            st.st_nlink = 1;
+            st.st_nlink = if self.is_dir() { 2 } else { 1 };
             st.st_ino = self.ino;
             st.st_dev = self.dev;
             st.st_size = self.size as i64;
@@ -362,6 +466,20 @@ pub mod glue {
             // A rewind marks the text for remaking at the next read (lseek itself always
             // works, as on Linux)
             let mut t = self.inner.lock();
+            // wave11 GP: a directory's position is an entry index (`d_off`, `seekdir`)
+            if self.is_dir() {
+                return Some(match whence {
+                    0 if offset >= 0 => {
+                        if remakes_on_seek(self.ident[0], offset, whence) {
+                            t.stale = true;
+                        }
+                        t.pos = offset as u64;
+                        offset
+                    }
+                    1 if offset == 0 => t.pos as i64,
+                    _ => EINVAL,
+                });
+            }
             Some(match seek_to(t.pos, t.text.len() as u64, offset, whence) {
                 Ok(new) => {
                     if remakes_on_seek(self.ident[0], offset, whence) {
@@ -377,6 +495,9 @@ pub mod glue {
         fn pread(&self, buf: &mut [u8], offset: u64) -> Option<i64> {
             if self.acc == O_WRONLY {
                 return Some(EBADF);
+            }
+            if self.is_dir() {
+                return Some(EISDIR); // wave11 GP
             }
             // (at 0: fresh text for this read only; the open's own text and position stay)
             let chunk = if offset == 0 && self.ident[0] != 0 {
@@ -410,6 +531,10 @@ pub mod glue {
         if d.len as usize > LX_PSNAP_MAX || d.name_len as usize > LX_OBJ_NAME_MAX {
             return EINVAL;
         }
+        // wave11 GP: the identity of one of the caller's descriptors (`d.ident[0]`)
+        if sub == LX_PSNAP_IDENT {
+            return ident_of(client, d.ident[0], io);
+        }
         // (a FILL only for a remake this thread is waiting for: nothing is allocated otherwise)
         if sub == LX_PSNAP_FILL && pending(|p| !p.contains_key(&client)) {
             return EINVAL;
@@ -433,6 +558,32 @@ pub mod glue {
             _ => EINVAL,
         }
     }
+
+    // wave11 GP begin
+    /// `LX_PSNAP_IDENT`: the identity, mode and shown path of thread `client`'s descriptor
+    /// `fd`, written to lx-proc's `io`.
+    fn ident_of(client: u64, fd: u64, io: u64) -> i64 {
+        let Some(fds) = crate::task::SCHEDULER.lock().with_task_mut(TaskId(client), |t| t.fds.clone()) else { return ESRCH };
+        let dev = match fds.lock().get(fd as i32 as usize) {
+            Some(FileDescriptor::Device(d)) if (fd as i32) >= 0 => d.clone(),
+            Some(_) => return ENOTDIR,
+            None => return EBADF,
+        };
+        let Some((ident, mode, name)) = dev.proc_ident() else { return ENOTDIR };
+        let mut d = LxSnapIo::EMPTY;
+        d.ident = ident;
+        d.mode = mode;
+        let n = name.len().min(LX_OBJ_NAME_MAX);
+        d.name[..n].copy_from_slice(&name.as_bytes()[..n]);
+        d.name_len = n as u32;
+        // SAFETY: a plain repr(C) struct of integers
+        let raw = unsafe { core::slice::from_raw_parts(&d as *const LxSnapIo as *const u8, core::mem::size_of::<LxSnapIo>()) };
+        match crate::compat::linux::vfs::copy_out(io, raw) {
+            Ok(()) => 0,
+            Err(_) => EFAULT,
+        }
+    }
+    // wave11 GP end
 
     /// The rights of thread `client` (a request's caller), kept with its snapshots.
     fn opener(client: u64) -> Option<Opener> {

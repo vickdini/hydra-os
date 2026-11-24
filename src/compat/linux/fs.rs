@@ -111,6 +111,19 @@ pub fn mountinfo_text() -> alloc::string::String {
     super::mount::mountinfo(super::proc::current_ids().1).unwrap_or_else(|| alloc::format!("{}{}", MOUNTINFO, super::fuse::ns0_mountinfo_text()))
 }
 
+// wave11 GP begin: lx-proc's `/proc/<pid>/mountinfo` and `mounts` (through `lx::procx`)
+/// `/proc/<pid>/mountinfo` of process `pid` (system-wide ID): its mount namespace's table,
+/// or Hydra's fixed layout.
+pub fn mountinfo_for(pid: u64) -> alloc::string::String {
+    super::mount::mountinfo(pid).unwrap_or_else(|| alloc::format!("{}{}", MOUNTINFO, super::fuse::ns0_mountinfo_text()))
+}
+
+/// `/proc/<pid>/mounts` of process `pid` (system-wide ID).
+pub fn mounts_for(pid: u64) -> alloc::string::String {
+    super::mount::mounts(pid).unwrap_or_else(|| alloc::format!("{}{}", MOUNTS, super::fuse::ns0_mounts_text()))
+}
+// wave11 GP end
+
 const MOUNTS: &str = "hydrapool/root / zfs rw,relatime,xattr 0 0
 proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
 sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
@@ -767,6 +780,15 @@ impl PseudoFile {
                 // ns/<kind> stats as the namespace (nsfs inodes are regular files, 0444)
                 statbuf.st_mode = S_IFREG | if rest.contains("/ns/") { 0o444 } else { 0o644 };
                 statbuf.st_size = 0;
+                // wave11 GP: its inode number and nsfs's device (0:4), as lx-proc's `stat`
+                // of the link shows them (programs compare them to tell namespaces apart)
+                if let Some((who, kind)) = rest.split_once("/ns/") {
+                    let pid = if who == "self" || who == "thread-self" { super::proc::current_ids().1 } else { who.parse().map(super::ns::pid_from_caller).unwrap_or(0) };
+                    if let Some(ino) = super::ns::ns_ino_of(pid, kind) {
+                        statbuf.st_ino = ino;
+                        statbuf.st_dev = 4;
+                    }
+                }
             }
             PseudoFile::ProcDir(path) => {
                 statbuf.st_mode = S_IFDIR | 0o555;
@@ -795,7 +817,7 @@ impl PseudoFile {
 static BOOT_ID: spin::Mutex<Option<[u8; 16]>> = spin::Mutex::new(None);
 
 /// A random (version 4) UUID as text with a newline: this boot's ID (`boot`), or a new one.
-fn uuid_text(boot: bool) -> alloc::string::String {
+pub(crate) fn uuid_text(boot: bool) -> alloc::string::String {
     let mut b = [0u8; 16];
     if boot {
         let mut id = BOOT_ID.lock();
