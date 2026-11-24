@@ -40,9 +40,10 @@ const EINVAL: i64 = -22;
 
 const S_IFREG: u32 = 0o100000;
 const S_IFLNK: u32 = 0o120000;
+const S_IFDIR: u32 = 0o040000;
 const O_ACCMODE: u64 = 3;
 const O_CREAT: u64 = 0o100;
-const O_TRUNC: u64 = 0o1000;
+
 const O_DIRECTORY: u64 = 0o200000;
 const O_PATH: u64 = 0o10000000;
 const O_TMPFILE: u64 = 0o20000000 | O_DIRECTORY;
@@ -142,17 +143,31 @@ fn stat(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
         _ => (a[2], a[4], true),
     };
     let nofollow = flags & 0x100 != 0;
+    // (`/proc/self` followed: the caller's directory)
+    let target = match target {
+        Target::SelfLink(false) if !nofollow => Target::Dir(path::Dir::Pid(Who::Caller)),
+        t => t,
+    };
     let (mode, size) = match target {
         Target::File(f) => (S_IFREG | f.mode(), size_of(f)),
         Target::SelfLink(_) if nofollow => (S_IFLNK | 0o777, 0),
+        // (the kernel's numbers for a /proc directory: 0555, 4096 bytes)
+        Target::Dir(_) => (S_IFDIR | 0o555, 4096),
         _ => return None,
     };
-    // A process's files: the process must exist; they belong to its effective user and group
-    let (uid, gid) = match owner(cx.id, target) {
-        Ok(o) => o,
-        Err(e) => return Some(e),
+    // A process's files and directories: the process must exist; they belong to its
+    // effective user and group
+    let (uid, gid, nlink) = match target {
+        Target::Dir(d) => match dir_facts(cx.id, d) {
+            Ok(f) => f,
+            Err(e) => return Some(e),
+        },
+        _ => match owner(cx.id, target) {
+            Ok((u, g)) => (u, g, 1),
+            Err(e) => return Some(e),
+        },
     };
-    let st = Stat { dev: LX_PSEUDO_DEV_PROC, ino: path::ino_of(obj, tail), mode, size, uid, gid };
+    let st = Stat { dev: LX_PSEUDO_DEV_PROC, ino: path::ino_of(obj, tail), mode, size, uid, gid, nlink };
     let r = if x { cx.copy_out(out, &st.statx()) } else { cx.copy_out(out, &st.stat()) };
     Some(r.err().unwrap_or(0))
 }
@@ -162,6 +177,19 @@ fn size_of(f: File) -> u64 {
     match f {
         File::Static(t) => t.len() as u64,
         _ => GEN_SIZE,
+    }
+}
+
+/// A process directory's owner and link count (2; `task/`: 2 + the threads, which Chromium
+/// counts this way); the process (and the thread) must exist: `ENOENT`.
+fn dir_facts(id: u64, d: path::Dir) -> Result<(u32, u32, u64), i64> {
+    let tid = match d {
+        path::Dir::Thread(_, t) => t,
+        _ => 0,
+    };
+    match task(id, d.who(), tid | LX_INFO_TASK_NOMEM >> 32) {
+        Ok(i) => Ok((i.ids[1], i.ids[4], if matches!(d, path::Dir::Task(_)) { 2 + i.threads } else { 2 })),
+        Err(_) => Err(ENOENT),
     }
 }
 
@@ -189,14 +217,15 @@ fn access(cx: &Cx, target: Target) -> i64 {
     let c = &cx.c;
     // (faccessat2's AT_EACCESS: the effective ids)
     let uid = if flags & 0x200 != 0 { c.euid } else { c.uid };
-    let dir = matches!(target, Target::SelfLink(_));
+    let dir = matches!(target, Target::SelfLink(_) | Target::Dir(_));
     if let Err(e) = path::access_rule(mode, if cx.nr == 439 { flags } else { 0 }, uid, dir) {
         return e;
     }
-    match owner(cx.id, target) {
-        Ok(_) => 0,
-        Err(e) => e,
-    }
+    let exists = match target {
+        Target::Dir(d) => dir_facts(cx.id, d).map(|_| ()),
+        _ => owner(cx.id, target).map(|_| ()),
+    };
+    exists.err().unwrap_or(0)
 }
 
 /// The fields of a pseudo file's `stat`.
@@ -207,6 +236,7 @@ struct Stat {
     size: u64,
     uid: u32,
     gid: u32,
+    nlink: u64,
 }
 
 impl Stat {
@@ -215,7 +245,7 @@ impl Stat {
         let mut b = [0u8; 144];
         b[0..8].copy_from_slice(&self.dev.to_le_bytes());
         b[8..16].copy_from_slice(&self.ino.to_le_bytes());
-        b[16..24].copy_from_slice(&1u64.to_le_bytes());
+        b[16..24].copy_from_slice(&self.nlink.to_le_bytes());
         b[24..28].copy_from_slice(&self.mode.to_le_bytes());
         b[28..32].copy_from_slice(&self.uid.to_le_bytes());
         b[32..36].copy_from_slice(&self.gid.to_le_bytes());
@@ -229,7 +259,7 @@ impl Stat {
         let mut b = [0u8; 256];
         b[0..4].copy_from_slice(&0x17FFu32.to_le_bytes());
         b[4..8].copy_from_slice(&4096u32.to_le_bytes());
-        b[16..20].copy_from_slice(&1u32.to_le_bytes());
+        b[16..20].copy_from_slice(&(self.nlink as u32).to_le_bytes());
         b[20..24].copy_from_slice(&self.uid.to_le_bytes());
         b[24..28].copy_from_slice(&self.gid.to_le_bytes());
         b[28..30].copy_from_slice(&(self.mode as u16).to_le_bytes());
@@ -377,13 +407,13 @@ fn pid_word(who: Who) -> u64 {
 fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
     let Target::File(mut file) = target else { return None };
     let flags = if cx.nr == 2 { cx.args[1] } else { cx.args[2] };
-    // (writing: the files are read-only, 0444 or 0400: refused for everyone but root, whose
-    // opens the kernel answers as before)
-    if flags & O_ACCMODE != 0 && cx.c.euid != 0 && flags & (O_CREAT | O_DIRECTORY | O_PATH | O_TMPFILE) == 0 {
-        return Some(EACCES);
-    }
-    if flags & O_ACCMODE != 0 || flags & (O_CREAT | O_TRUNC | O_DIRECTORY | O_PATH | O_TMPFILE) != 0 {
+    if flags & (O_CREAT | O_DIRECTORY | O_PATH | O_TMPFILE) != 0 || flags & O_ACCMODE == 3 {
         return None;
+    }
+    // Writing: the files are read-only (0444, `environ` 0400): refused for everyone but root
+    // (as Linux: root's open works, its writes fail with `EIO`)
+    if flags & O_ACCMODE != 0 && cx.c.euid != 0 {
+        return Some(EACCES);
     }
     // A process's file: the process (its start time pins it for later remakes) and owner;
     // no such process: the kernel answers (as before). `stat`, `status` and `statm` are made
@@ -430,7 +460,7 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
     d.text = text.as_ptr() as u64;
     d.len = text.len() as u64;
     d.ident = path::ident(file, start);
-    d.flags = (flags & (O_NONBLOCK | O_CLOEXEC)) as u32;
+    d.flags = (flags & (O_NONBLOCK | O_CLOEXEC | O_ACCMODE)) as u32;
     d.mode = S_IFREG | file.mode();
     d.uid = uid;
     d.gid = gid;
@@ -447,11 +477,13 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
 }
 
 /// `LX_KCALL_PREMAKE`: the text of a snapshot made again for the reader (a rewind, a
-/// `pread` at 0), from its identity in `args[0..4]`. A process file whose process ended, or
+/// `pread` at 0), from its identity in `args[0]`, `args[3..6]`: written to the kernel's
+/// buffer (`args[1]`, `args[2]` bytes) when it fits (answer: its length + 1), else given
+/// with `LX_PSNAP_FILL` (answer 0). A process file whose process ended, or
 /// whose ID now names another process (start time), fails with `ESRCH`; a reader the
 /// primitives do not answer for (another namespace) gets their error.
 pub fn remake(cx: &Cx) -> Answer {
-    let Some((file, start)) = path::of_ident([cx.args[0], cx.args[1], cx.args[2], cx.args[3]]) else { return (EINVAL, 0) };
+    let Some((file, start)) = path::of_ident([cx.args[0], cx.args[3], cx.args[4], cx.args[5]]) else { return (EINVAL, 0) };
     if let File::Pid { who, tid, .. } = file {
         match task(cx.id, who, tid | LX_INFO_TASK_NOMEM >> 32) {
             Ok(i) if i.start.max(1) == start => {}
@@ -463,6 +495,12 @@ pub fn remake(cx: &Cx) -> Answer {
         Ok(t) => t,
         Err(e) => return (e, 0),
     };
+    if text.len() as u64 <= cx.args[2] {
+        return match cx.copy_out_any(cx.args[1], &text) {
+            Ok(()) => (text.len() as i64 + 1, 0),
+            Err(e) => (e, 0),
+        };
+    }
     let mut d = LxSnapIo::EMPTY;
     d.text = text.as_ptr() as u64;
     d.len = text.len() as u64;

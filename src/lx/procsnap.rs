@@ -80,12 +80,15 @@ pub mod glue {
 
     const EPERM: i64 = -1;
     const ESRCH: i64 = -3;
+    const EIO: i64 = -5;
     const EBADF: i64 = -9;
     const EFAULT: i64 = -14;
     const EMFILE: i64 = -24;
     const ENOTTY: i64 = -25;
     const ENODEV: i64 = -19;
 
+    const O_RDONLY: u32 = 0;
+    const O_WRONLY: u32 = 1;
     const O_NONBLOCK: u32 = 0o4000;
     const O_CLOEXEC: u32 = 0o2000000;
     /// `POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM`: a regular file is always ready.
@@ -110,6 +113,8 @@ pub mod glue {
         size: u64,
         name: String,
         nonblock: AtomicBool,
+        /// The open's access mode (`O_ACCMODE`).
+        acc: u32,
     }
 
     /// Remakes under way: the reader's thread -> the text lx-proc gave (`None`: not yet).
@@ -122,21 +127,31 @@ pub mod glue {
     impl ProcSnap {
         /// Fresh text from lx-proc for the current thread (the reader), or its error.
         fn remake(&self) -> Result<Vec<u8>, i64> {
+            // (a text that fits comes back in the call's kernel buffer; a longer one
+            // through `LX_PSNAP_FILL`)
             let me = crate::task::CURRENT_TID.load(Ordering::Relaxed);
             pending(|p| p.insert(me, None));
-            let r = crate::lx::call_plain(LX_KCALL_PREMAKE, [self.ident[0], self.ident[1], self.ident[2], self.ident[3], 0, 0]);
+            let mut kbuf = alloc::vec![0u8; crate::ipc::protocol::LX_DATA_SIZE];
+            let r = crate::lx::call_kbuf_plain(LX_KCALL_PREMAKE, self.ident, &mut kbuf);
             let text = pending(|p| p.remove(&me)).flatten();
             match (r, text) {
                 (r, _) if r < 0 => Err(r),
-                (_, Some(t)) => Ok(t),
+                (r, _) if r > 0 && (r - 1) as usize <= kbuf.len() => {
+                    kbuf.truncate((r - 1) as usize);
+                    Ok(kbuf)
+                }
+                (0, Some(t)) => Ok(t),
                 // (lx-proc answered without giving the text)
-                (_, None) => Err(-5),
+                _ => Err(-5),
             }
         }
     }
 
     impl CharDevice for ProcSnap {
         fn read(&self, buf: &mut [u8]) -> i64 {
+            if self.acc == O_WRONLY {
+                return EBADF;
+            }
             // (the piece is taken and the position moved under one lock: two readers of
             // one open file never get the same bytes)
             let chunk = {
@@ -150,7 +165,13 @@ pub mod glue {
         }
 
         fn write(&self, _data: &[u8]) -> i64 {
-            EBADF
+            // (opened for writing, which only root may: the file takes no writes, as Linux's
+            // `/proc` files without a write handler)
+            if self.acc == O_RDONLY {
+                EBADF
+            } else {
+                EIO
+            }
         }
 
         fn ioctl(&self, _cmd: u64, _arg: u64) -> i64 {
@@ -221,6 +242,9 @@ pub mod glue {
         }
 
         fn pread(&self, buf: &mut [u8], offset: u64) -> Option<i64> {
+            if self.acc == O_WRONLY {
+                return Some(EBADF);
+            }
             // (at 0: fresh text for this read only; the open's own text and position stay)
             let chunk = if offset == 0 && self.ident[0] != 0 {
                 match self.remake() {
@@ -285,6 +309,7 @@ pub mod glue {
             size: d.size,
             name: String::from_utf8_lossy(&d.name[..d.name_len as usize]).into_owned(),
             nonblock: AtomicBool::new(d.flags & O_NONBLOCK != 0),
+            acc: d.flags & 3,
         });
         let dev: Arc<dyn CharDevice> = snap;
         let r = {

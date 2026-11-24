@@ -86,8 +86,19 @@ static void checks(void) {
     /* opening for writing: refused for users (lx-proc: EACCES; the kernel's copy lets the
      * open through, but no write is taken) */
     g = open("/proc/stat", O_RDWR);
-    if (g < 0) CHECK(errno == EACCES, "open for writing: EACCES");
-    else { CHECK(write(g, "x", 1) < 0, "write to /proc/stat refused"); close(g); }
+    if (geteuid() != 0) CHECK(g < 0 && errno == EACCES, "a user's open for writing: EACCES");
+    else {
+        /* root: the open works (as Linux), writes fail with EIO, reads work */
+        CHECK(g >= 0, "root's open for writing");
+        CHECK(write(g, "x", 1) == -1 && errno == EIO, "root's write: EIO");
+        CHECK(read(g, buf2, 4) == 4, "read of a read-write open");
+        close(g);
+    }
+    g = open("/proc/stat", O_WRONLY | O_TRUNC);
+    if (geteuid() == 0 && g >= 0) {
+        CHECK(read(g, buf2, 4) == -1 && errno == EBADF, "read of a write-only open: EBADF");
+        close(g);
+    }
 
     /* the caller's files: self is named by pid */
     f = open("/proc/self/status", O_RDONLY);
@@ -147,6 +158,15 @@ static void checks(void) {
     CHECK(lseek(f, 0, SEEK_CUR) == 3, "child moved the shared position");
     close(f);
 
+    /* process directories: owned by the process's effective ids; task/ counts threads */
+    snprintf(pidpath, sizeof pidpath, "/proc/%d", getpid());
+    CHECK(stat(pidpath, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == geteuid() && st.st_gid == getegid(), "pid dir owner %u", st.st_uid);
+    CHECK(stat("/proc/self", &st2) == 0 && S_ISDIR(st2.st_mode) && st2.st_uid == geteuid(), "/proc/self followed");
+    CHECK(lstat("/proc/self", &st2) == 0 && S_ISLNK(st2.st_mode), "/proc/self is a link");
+    CHECK(stat("/proc/self/task", &st2) == 0 && st2.st_nlink >= 3, "task nlink %lu", (unsigned long)st2.st_nlink);
+    CHECK(access(pidpath, R_OK | X_OK) == 0, "pid dir access");
+    CHECK(stat("/proc/999999999", &st2) == -1 && errno == ENOENT, "missing pid dir");
+
     /* the version file is fixed text */
     CHECK(slurp("/proc/version", buf, sizeof buf) > 0 && !strncmp(buf, "Linux version", 13), "version");
 }
@@ -197,6 +217,19 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc > 2 && !strcmp(argv[1], "hold")) return hold(atoi(argv[2]));
     if (argc > 2 && !strcmp(argv[1], "top")) return top(atoi(argv[2]));
+    /* the kernel's own copy of /proc (lx.proc=kernel, lx=kernel) keeps per-process files
+     * as memfd copies and has no environ: only the basic reads are checked there */
+    int f = open("/proc/self/status", O_RDONLY);
+    char want[64], link[256];
+    snprintf(want, sizeof want, "/proc/self/fd/%d", f);
+    ssize_t l = readlink(want, link, sizeof link - 1);
+    close(f);
+    if (l <= 0 || (link[l] = 0, strncmp(link, "/proc/", 6))) {
+        CHECK(slurp("/proc/stat", buf, sizeof buf) > 0 && !strncmp(buf, "cpu ", 4), "/proc/stat");
+        CHECK(slurp("/proc/self/status", buf, sizeof buf) > 0 && strstr(buf, "Pid:"), "/proc/self/status");
+        if (!fails) printf("PROCSNAP PASS (the kernel's /proc: basic checks only)\n");
+        return fails != 0;
+    }
     checks();
     if (!fails) printf("PROCSNAP PASS\n");
     return fails != 0;

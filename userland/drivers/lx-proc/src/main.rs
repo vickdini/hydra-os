@@ -124,6 +124,11 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
     if c.nr == LX_KCALL_PREMAKE {
         return procfs::remake(&cx);
     }
+    // vfs-server's walk test call redirected here (`/proc`): the redirect's facts, as
+    // linux-server answers it for `/dev` (the suite's vfswalk)
+    if c.nr == LX_VFS_WALK_NR && c.redirs != 0 {
+        return (0x10000 * c.svc as i64 + 0x100 * (c.redir_obj & 0xFF) as i64 + (c.redir_tail & 0xFF) as i64, 0);
+    }
     // wave10 G7b-2 end
     let call = Call { nr: c.nr, args: c.args, tgid: c.tgid, caps: c.caps, ids: [c.uid, c.euid, c.suid, c.gid, c.egid, c.sgid] };
     match policy::serve(&Sys { req: c.id }, &CallerMem(&cx), &call) {

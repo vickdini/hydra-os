@@ -135,6 +135,26 @@ pub fn of_ident(id: [u64; 4]) -> Option<(File, u64)> {
 }
 // wave10 G7b-2 end
 
+/// wave10 G7b-2: a process directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dir {
+    /// `/proc/<pid>`.
+    Pid(Who),
+    /// `/proc/<pid>/task` (its link count is 2 + the threads, as Linux).
+    Task(Who),
+    /// `/proc/<pid>/task/<tid>`.
+    Thread(Who, u64),
+}
+
+impl Dir {
+    /// The process.
+    pub fn who(&self) -> Who {
+        match *self {
+            Dir::Pid(w) | Dir::Task(w) | Dir::Thread(w, _) => w,
+        }
+    }
+}
+
 /// What a redirected path is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -142,6 +162,9 @@ pub enum Target {
     File(File),
     /// `/proc/self` (`false`) or `/proc/thread-self` (`true`) itself: a symbolic link.
     SelfLink(bool),
+    /// wave10 G7b-2: a process's directory (`stat` and `access` are served; listing it and
+    /// opening it are the kernel's).
+    Dir(Dir),
     /// The kernel answers.
     Kernel,
     /// Nothing there (`ENOENT`): a process or thread number with leading zeros (Linux's
@@ -272,6 +295,13 @@ pub fn classify(obj: u64, tail: &[u8]) -> Target {
         })),
         ["self"] if !trailing => Target::SelfLink(false),
         ["thread-self"] if !trailing => Target::SelfLink(true),
+        // wave10 G7b-2: a process's directory (`self/`: the caller's)
+        ["self"] => Target::Dir(Dir::Pid(Who::Caller)),
+        [n] => match number(n) {
+            Some(p) if p != 0 => Target::Dir(Dir::Pid(Who::Pid(p))),
+            _ if zero_led(n) => Target::Missing,
+            _ => Target::Kernel,
+        },
         [who, rest @ ..] if !rest.is_empty() => {
             let who = match *who {
                 "self" | "thread-self" => Who::Caller,
@@ -288,6 +318,13 @@ pub fn classify(obj: u64, tail: &[u8]) -> Target {
                 },
             };
             match rest {
+                // wave10 G7b-2: the process's thread directories
+                ["task"] => Target::Dir(Dir::Task(who)),
+                ["task", t] => match number(t) {
+                    Some(tid) if tid != 0 => Target::Dir(Dir::Thread(who, tid)),
+                    _ if zero_led(t) => Target::Missing,
+                    _ => Target::Kernel,
+                },
                 [f] => pid_file(f, false).map_or(Target::Kernel, |f| file(File::Pid { who, tid: 0, file: f })),
                 ["task", t, f] => match (number(t), pid_file(f, true)) {
                     (Some(tid), Some(f)) if tid != 0 => file(File::Pid { who, tid, file: f }),

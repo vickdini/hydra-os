@@ -213,6 +213,26 @@ fn classify_pid_files() {
 // ---------------------------------------------------------------- wave10 G7b-2
 
 #[test]
+fn classify_process_directories() {
+    use crate::pseudo::path::Dir;
+    assert_eq!(p("123"), Target::Dir(Dir::Pid(Who::Pid(123))));
+    assert_eq!(p("123/"), Target::Dir(Dir::Pid(Who::Pid(123))));
+    assert_eq!(p("self/"), Target::Dir(Dir::Pid(Who::Caller)));
+    assert_eq!(p("thread-self/"), Target::Kernel);
+    assert_eq!(p("123/task"), Target::Dir(Dir::Task(Who::Pid(123))));
+    assert_eq!(p("self/task/"), Target::Dir(Dir::Task(Who::Caller)));
+    assert_eq!(p("123/task/124"), Target::Dir(Dir::Thread(Who::Pid(123), 124)));
+    assert_eq!(p("123/task/0124"), Target::Missing);
+    assert_eq!(p("0123"), Target::Missing);
+    assert_eq!(p("0"), Target::Kernel);
+    assert_eq!(p("123/task/0"), Target::Kernel);
+    assert_eq!(p("123/task/x"), Target::Kernel);
+    assert_eq!(p("2147483648"), Target::Kernel);
+    assert_eq!(Dir::Thread(Who::Pid(5), 6).who(), Who::Pid(5));
+    assert_eq!(Dir::Task(Who::Caller).who(), Who::Caller);
+}
+
+#[test]
 fn classify_sysvipc_files() {
     assert_eq!(p("sysvipc/shm"), Target::File(File::SysvIpc(0)));
     assert_eq!(p("sysvipc/sem"), Target::File(File::SysvIpc(1)));
@@ -277,7 +297,7 @@ fn limits_text_matches_the_kernels_layout() {
 #[test]
 fn classify_sends_the_rest_to_the_kernel() {
     for t in [
-        "", "self", "self/", "123", "123/", "self/fd", "self/fd/3", "self/exe", "self/cwd", "self/root", "self/mountinfo", "mounts", "net/tcp", "self/fdinfo/1",
+        "", "self", "self/fd", "self/fd/3", "self/exe", "self/cwd", "self/root", "self/mountinfo", "mounts", "net/tcp", "self/fdinfo/1",
         "self/auxv", "self/cgroup", "self/oom_score_adj", "self/ns/mnt", "self/uid_map", "keys", "swaps", "locks", "filesystems",
         "sys/kernel/random/boot_id", "sys/kernel/random/uuid", "sys/user/max_user_namespaces", "asound/cards", "0/stat", "-1/stat", "12345678901/stat",
         "12a/stat", "123/task/0/stat", "123/task/x/stat", "self/../uptime", "../etc/passwd", "uptime/", "self/stat/", "sys/kernel/nothing", "nothing",
@@ -553,7 +573,7 @@ fn classify_rejects_big_ids_and_dot_endings() {
     assert_eq!(p("1/task/4294967296/stat"), Target::Kernel);
     // `/.` at the end: must be a directory (ENOTDIR for a file, the kernel's rules)
     assert_eq!(p("version/."), Target::Kernel);
-    assert_eq!(p("self/."), Target::Kernel);
+    assert_eq!(p("self/."), Target::Dir(crate::pseudo::path::Dir::Pid(Who::Caller))); // (wave10 G7b-2: a directory)
     assert_eq!(p("self/stat/."), Target::Kernel);
     assert_eq!(p("."), Target::Kernel);
     // `.` in the middle is fine

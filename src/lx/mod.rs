@@ -873,6 +873,64 @@ pub fn call_obj_pseudo(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>,
 }
 // wave7 G7-4 end
 
+// wave10 G7b-2 begin
+/// Kernel call `nr` (no descriptor object) with four words to the service `plain_svc` names,
+/// for the current thread, with a kernel output buffer: the call's `args` are `[w0,
+/// LX_KBUF_ADDR, room, w1, w2, w3]`, and what the service writes at `args[1]` lands in `out`
+/// (at most `LX_DATA_SIZE` bytes). The caller holds the kernel lock (an ordinary system call
+/// path); the service restarting is waited for as for any call. (`procsnap`'s remakes.)
+pub fn call_kbuf_plain(nr: u64, args: [u64; 4], out: &mut [u8]) -> i64 {
+    use crate::ipc::protocol::LX_KBUF_ADDR;
+    let s = plain_svc(nr, &[args[0], 0, 0, args[1], args[2], args[3]]);
+    let Some(x) = svc::host(svc::host_of(s)).filter(|x| host_usable(x)) else { return ENOSYS };
+    let n = out.len().min(LX_DATA_SIZE);
+    let mut c = LxCall::EMPTY;
+    c.nr = nr;
+    c.args = [args[0], LX_KBUF_ADDR, n as u64, args[1], args[2], args[3]];
+    c.svc = s as u32;
+    let mut buf = copy::CopyBuf::EMPTY;
+    buf.used = n;
+    buf.hdr.out_off[1] = LX_DATA_OFF as u16;
+    buf.hdr.out_cap[1] = n as u16;
+    let mut sched = crate::task::SCHEDULER.lock();
+    let my_idx = sched.current_index();
+    let me = sched.current_task_mut(|t| {
+        c.tid = t.id.0;
+        c.tgid = t.tgid;
+        c.uid = t.uid;
+        c.euid = t.euid;
+        c.suid = t.suid;
+        c.gid = t.gid;
+        c.egid = t.egid;
+        c.sgid = t.sgid;
+        c.caps = if t.caps.in_userns { 0 } else { t.caps.effective };
+        t.id.0
+    });
+    drop(sched);
+    let Some(me) = me else { return ENOSYS };
+    let mark = restart::install_mark();
+    let mut r;
+    loop {
+        c.note_seq = x.notes_head();
+        let mut redir = (0, 0);
+        r = x86_64::instructions::interrupts::without_interrupts(|| call_and_wait(x, me, my_idx, c, copy::Src::Kernel(&buf), true, Some(&mut out[..n]), &mut redir));
+        match after_restart(x, r, &c, mark) {
+            Ok(()) => continue,
+            Err(e) => r = e,
+        }
+        break;
+    }
+    if !crate::arch::smp::bkl_held() {
+        crate::arch::smp::bkl_enter();
+        crate::task::scheduler::wait_out_handoff();
+    }
+    if r == LX_REDIRECTED {
+        return EIO;
+    }
+    r
+}
+// wave10 G7b-2 end
+
 /// [`call_obj_kbuf_nr`] with arguments 3..6 (wave7 G7-4).
 fn call_obj_kbuf_x(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>, nr: u64, write: bool, data: &[u8], out: &mut [u8], extra: [u64; 3]) -> i64 {
     use crate::ipc::protocol::{LX_KBUF_ADDR, LX_OBJ_FLAGS_KBUF};

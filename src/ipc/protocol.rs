@@ -2737,9 +2737,11 @@ pub const LX_PSNAP_INSTALL: u64 = 1;
 /// [`LX_OBJ_PSNAP`] sub-op: the text for a [`LX_KCALL_PREMAKE`] request (`text`, `len`).
 pub const LX_PSNAP_FILL: u64 = 2;
 /// The kernel's call to lx-proc: make a snapshot's text again (a rewind, `lseek(fd, 0,
-/// SEEK_SET)`, or a `pread` at 0, as Linux's seq_file does) for the reader: `args[0..4]` the
-/// snapshot's identity ([`LxSnapIo::ident`]). lx-proc answers 0 after [`LX_PSNAP_FILL`], or
-/// an error (`-ESRCH`: the pinned process is gone).
+/// SEEK_SET)`, or a `pread` at 0, as Linux's seq_file does) for the reader: `args[0]`,
+/// `args[3..6]` the snapshot's identity ([`LxSnapIo::ident`]), `args[1]` a kernel buffer of
+/// `args[2]` bytes. lx-proc writes a text that fits there and answers its length + 1; a
+/// longer one it gives with [`LX_PSNAP_FILL`] and answers 0; or an error (`-ESRCH`: the
+/// pinned process is gone).
 pub const LX_KCALL_PREMAKE: u64 = 0x6793;
 /// The largest snapshot text (bytes).
 pub const LX_PSNAP_MAX: usize = 16 << 20;
@@ -2758,7 +2760,9 @@ pub struct LxSnapIo {
     /// lx-proc's identity of the file, given back in a remake: `[file code, process,
     /// thread, process start time]` (code 0: fixed text, never made again).
     pub ident: [u64; 4],
-    /// `O_CLOEXEC`/`O_NONBLOCK` of the open.
+    /// `O_CLOEXEC`/`O_NONBLOCK` and the access mode (`O_ACCMODE`) of the open (a file
+    /// opened for writing, by root, answers `write` with `-EIO`, as Linux's read-only
+    /// `/proc` files).
     pub flags: u32,
     /// `st_mode`.
     pub mode: u32,
