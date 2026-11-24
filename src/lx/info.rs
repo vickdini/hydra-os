@@ -228,6 +228,8 @@ pub mod glue {
         match op {
             LX_INFO_TASK => task(a, b, c),
             LX_INFO_SYS => out(a, &sys(b)),
+            // (wave10 G7b-2: the environment with `LX_INFO_ARGS_ENV` in the pid word)
+            LX_INFO_ARGS if b & crate::ipc::protocol::LX_INFO_ARGS_ENV != 0 => environ(a, b & 0x7FFF_FFFF, c, b >> 32),
             LX_INFO_ARGS => args(a, b & 0xFFFF_FFFF, c, b >> 32),
             LX_INFO_MAPS => maps(a, b & 0xFFFF_FFFF, c, b >> 32),
             LX_INFO_PIDS => pids(a, b),
@@ -411,6 +413,26 @@ pub mod glue {
         let text = lx::fs::live_cmdline(pid).unwrap_or_else(|| fallback.map(|c| c.to_vec()).unwrap_or_default());
         out_bytes(buf, len, &text)
     }
+
+    // wave10 G7b-2 begin
+    /// `LX_INFO_ARGS` with `LX_INFO_ARGS_ENV`: the environment (`/proc/<pid>/environ`), under
+    /// the `ptrace` read rule as the maps (Linux: `PTRACE_MODE_READ_FSCREDS`).
+    fn environ(id: u64, who: u64, buf: u64, len: u64) -> i64 {
+        let Caller { tgid: ctgid, euid, egid, caps, init } = match caller(id) {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
+        let pid = resolve_pid(who, ctgid, init);
+        let Some((uids, gids, service)) = crate::task::SCHEDULER.lock().with_process(pid, |t| ((t.uid, t.euid, t.suid), (t.gid, t.egid, t.sgid), t.service.is_some())) else { return ESRCH };
+        if let Err(e) = may_query(init, false, service) {
+            return e;
+        }
+        if !may_see(pid == ctgid, service, (euid, egid), caps, uids, gids) {
+            return EACCES;
+        }
+        out_bytes(buf, len, &lx::fs::live_environ(pid).unwrap_or_default())
+    }
+    // wave10 G7b-2 end
 
     /// `LX_INFO_MAPS`.
     fn maps(id: u64, who: u64, buf: u64, len: u64) -> i64 {

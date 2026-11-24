@@ -69,6 +69,19 @@ static double b_open_dir_close(long n) { /* what find does per directory, before
 static double b_proc_stat_read(long n) { /* a pseudo file: open, read, close /proc/self/stat */
     LOOP(n, { int f = open("/proc/self/stat", O_RDONLY); read(f, buf, 4096); close(f); });
 }
+/* wave10 G7b-2: more /proc shapes (ps, top, free) */
+static double b_proc_status_read(long n) { LOOP(n, { int f = open("/proc/self/status", O_RDONLY); read(f, buf, 4096); close(f); }); }
+static double b_proc_meminfo_read(long n) { LOOP(n, { int f = open("/proc/meminfo", O_RDONLY); read(f, buf, 4096); close(f); }); }
+static double b_proc_sysstat_read(long n) { LOOP(n, { int f = open("/proc/stat", O_RDONLY); read(f, buf, 4096); close(f); }); }
+static double b_proc_cmdline_read(long n) { LOOP(n, { int f = open("/proc/self/cmdline", O_RDONLY); read(f, buf, 4096); close(f); }); }
+static int procstat_fd = -1;
+static double b_proc_stat_rewind(long n) { /* what top does with /proc/stat: rewind, read */
+    LOOP(n, { lseek(procstat_fd, 0, SEEK_SET); read(procstat_fd, buf, 4096); });
+}
+static double b_proc_stat_pread0(long n) { LOOP(n, pread(procstat_fd, buf, 4096, 0)); }
+static double b_proc_fd_read2(long n) { /* a read past the start of an open /proc file: no new text */
+    LOOP(n, pread(procstat_fd, buf, 64, 8));
+}
 
 /* --- descriptor calls --- */
 static double b_fstat(long n) { struct stat st; LOOP(n, fstat(bashfd, &st)); }
@@ -112,6 +125,13 @@ static struct test tests[] = {
     {"open_close_rel", b_open_close_rel, 20000, 0},
     {"open_dir_close", b_open_dir_close, 20000, 0},
     {"proc_stat_read", b_proc_stat_read, 10000, 0},
+    {"proc_status_read", b_proc_status_read, 10000, 0},
+    {"proc_meminfo_read", b_proc_meminfo_read, 10000, 0},
+    {"proc_sysstat_read", b_proc_sysstat_read, 10000, 0},
+    {"proc_cmdline_read", b_proc_cmdline_read, 10000, 0},
+    {"proc_stat_rewind", b_proc_stat_rewind, 10000, 0},
+    {"proc_stat_pread0", b_proc_stat_pread0, 10000, 0},
+    {"proc_fd_read2", b_proc_fd_read2, 100000, 0},
     {"fstat", b_fstat, 100000, 0},
     {"fcntl_getfd", b_fcntl_getfd, 200000, 0},
     {"dup_close", b_dup_close, 100000, 0},
@@ -138,6 +158,7 @@ static int stubs_ok(void) {
 int main(int argc, char **argv) {
     usrbin = open("/usr/bin", O_RDONLY | O_DIRECTORY);
     bashfd = open("/usr/bin/bash", O_RDONLY);
+    procstat_fd = open("/proc/stat", O_RDONLY);
     mkdir("/tmp/vfsb.dir", 0755);
     for (int i = 0; i < 20; i++) {
         char p[64];

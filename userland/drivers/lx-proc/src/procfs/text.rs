@@ -1,6 +1,7 @@
-//! The text of the pseudo files linux-server serves, from the kernel's info primitives
-//! (plain Rust, host-tested in `tests/host-w7-40`). Each layout is the in-kernel copy's
-//! (`src/compat/linux/fs.rs`), so a file reads the same whoever serves it.
+//! The text of the `/proc` files lx-proc serves, from the kernel's info primitives (plain
+//! Rust, host-tested in `tests/host-w7-40`; wave 10 Group 7b-2 moved it from linux-server).
+//! Each layout is the in-kernel copy's (`src/compat/linux/fs.rs`, `limits.rs`), so a file
+//! reads the same whoever serves it.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -165,14 +166,41 @@ pub fn cpuinfo(n: u64) -> Vec<u8> {
     text.into_bytes()
 }
 
-/// `/sys/devices/system/cpu/online` (and `possible`, `present`) for `n` CPUs.
-pub fn cpu_range(n: u64) -> Vec<u8> {
-    if n > 1 {
-        alloc::format!("0-{}\n", n - 1).into_bytes()
-    } else {
-        b"0\n".to_vec()
+// wave10 G7b-2 begin
+/// The resource limits (`RLIMIT_*` order).
+pub const NLIMITS: usize = 16;
+/// `RLIM_INFINITY`.
+const RLIM_INFINITY: u64 = u64::MAX;
+
+/// `/proc/<pid>/limits` from the (soft, hard) pairs in `RLIMIT_*` order (the kernel's
+/// `limits::limits_text` layout).
+pub fn limits(l: &[(u64, u64); NLIMITS]) -> Vec<u8> {
+    const NAMES: [(&str, &str); NLIMITS] = [
+        ("Max cpu time", "seconds"),
+        ("Max file size", "bytes"),
+        ("Max data size", "bytes"),
+        ("Max stack size", "bytes"),
+        ("Max core file size", "bytes"),
+        ("Max resident set", "bytes"),
+        ("Max processes", "processes"),
+        ("Max open files", "files"),
+        ("Max locked memory", "bytes"),
+        ("Max address space", "bytes"),
+        ("Max file locks", "locks"),
+        ("Max pending signals", "signals"),
+        ("Max msgqueue size", "bytes"),
+        ("Max nice priority", ""),
+        ("Max realtime priority", ""),
+        ("Max realtime timeout", "us"),
+    ];
+    let v = |x: u64| if x == RLIM_INFINITY { String::from("unlimited") } else { alloc::format!("{}", x) };
+    let mut s = alloc::format!("{:<25} {:<20} {:<20} {:<10}\n", "Limit", "Soft Limit", "Hard Limit", "Units");
+    for (i, (name, unit)) in NAMES.iter().enumerate() {
+        s.push_str(&alloc::format!("{:<25} {:<20} {:<20} {:<10}\n", name, v(l[i].0), v(l[i].1), unit));
     }
+    s.into_bytes()
 }
+// wave10 G7b-2 end
 
 /// `/proc/<pid>/maps` from `LX_INFO_MAPS` records (`data`, as many bytes as were written).
 pub fn maps(data: &[u8]) -> Vec<u8> {

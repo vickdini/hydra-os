@@ -262,6 +262,28 @@ pub(crate) fn live_cmdline(pid: u64) -> Option<alloc::vec::Vec<u8>> {
     Some(text)
 }
 
+// wave10 G7b-2 begin
+/// A process's environment as it is now in its memory (`/proc/<pid>/environ`: the area
+/// after the arguments, at most 128 KiB). `None` when the process has no address space or
+/// its exec did not record the area.
+pub(crate) fn live_environ(pid: u64) -> Option<alloc::vec::Vec<u8>> {
+    let mm = crate::task::SCHEDULER.lock().with_process(pid, |t| t.mm.clone()).flatten()?;
+    let (start, end, env_end) = mm.lock().args;
+    if start == 0 || env_end <= end {
+        return None;
+    }
+    let to = env_end.min(end + 128 * 1024);
+    let mut out = alloc::vec::Vec::with_capacity((to - end) as usize);
+    let mut at = end;
+    while at < to {
+        let n = (to - at).min(4096 - at % 4096);
+        out.extend_from_slice(&super::extra::remote_copy(&mm, at, None, n)?);
+        at += n;
+    }
+    Some(out)
+}
+// wave10 G7b-2 end
+
 /// Whether `rest` (a path after `/proc/`) names `<pid>/cmdline`, `<pid>/comm` or
 /// `<pid>/fdinfo/<fd>`, with `<pid>` also `self` or `thread-self`. Takes no locks: path
 /// lookups run under the scheduler lock.

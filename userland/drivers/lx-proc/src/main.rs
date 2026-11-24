@@ -17,6 +17,13 @@
 //! one copy for both). `lx.proc=kernel` (or `lx=kernel`) sends the calls back to the
 //! kernel's own copy until 10-C deletes it.
 //!
+//! ## `/proc` (wave 10, Group 7b-2)
+//!
+//! lx-proc also serves `/proc` ([`procfs`], moved here from linux-server): the file service
+//! redirects lookups under `/proc` to `LXS_PROC`; an opened file's text is handed to the
+//! kernel as a snapshot it keeps (`src/lx/procsnap.rs`), so reads never come here and open
+//! files survive restarts; rewinds come back as `LX_KCALL_PREMAKE`.
+//!
 //! ## Restarts
 //!
 //! lx-proc keeps nothing (every datum is the kernel's), so it restarts invisibly
@@ -30,6 +37,8 @@
 extern crate alloc;
 
 mod policy;
+// wave10 G7b-2: `/proc` (moved here from linux-server)
+mod procfs;
 
 /// The protocol's names (the kernel's `ipc/protocol.rs`).
 pub mod proto {
@@ -53,6 +62,7 @@ fn main(args: &[&str]) {
         println!("[lx-proc] no service id names endpoint {:#x}: not started (process calls are the kernel's)", ENDPOINT_LX_PROC);
         sys::exit(0);
     }
+    procfs::init(args); // wave10 G7b-2
     let cfg = svcrt::Config { name: "lx-proc", endpoint: ENDPOINT_LX_PROC, workers: svcrt::workers_arg(args, 2), subscribe: None };
     let mut svc = match svcrt::start(&cfg, serve) {
         Ok(s) => s,
@@ -106,6 +116,15 @@ impl Mem for CallerMem<'_> {
 /// Serves one forwarded call.
 fn serve(c: &LxCall, page: *mut u8) -> Answer {
     let cx = Cx::from_call(c, page);
+    // wave10 G7b-2 begin: `/proc` path calls the file service redirected here, and the
+    // kernel's remakes of open `/proc` files
+    if c.redirs != 0 && procfs::is_path_call(c.nr) {
+        return procfs::redirected(&cx);
+    }
+    if c.nr == LX_KCALL_PREMAKE {
+        return procfs::remake(&cx);
+    }
+    // wave10 G7b-2 end
     let call = Call { nr: c.nr, args: c.args, tgid: c.tgid, caps: c.caps, ids: [c.uid, c.euid, c.suid, c.gid, c.egid, c.sgid] };
     match policy::serve(&Sys { req: c.id }, &CallerMem(&cx), &call) {
         Out::Ret(r) => (r, 0),

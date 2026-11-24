@@ -168,6 +168,8 @@ pub fn stale_errno(kind: u32) -> i64 {
 
 /// Hydra's test call (`LX_NULL_NR`).
 const LX_NULL_NR: u64 = 0x6710;
+// wave10 G7b-2: `LX_KCALL_PREMAKE` (`ipc/protocol.rs`)
+const LX_KCALL_PREMAKE: u64 = 0x6793;
 /// The test service's call (`LX_TEST_NR`).
 const LX_TEST_NR: u64 = 0x6711;
 
@@ -235,6 +237,8 @@ pub fn idempotent(nr: u64, args: &[u64; 6]) -> bool {
         4 | 5 | 6 | 21 | 89 | 79 | 137 | 138 | 191..=196 | 267 | 262 | 269 | 332 | 439 => true,
         // pread64, preadv, preadv2: no file offset moves (a pipe answers ESPIPE both times)
         17 | 295 | 327 => true,
+        // wave10 G7b-2: a `/proc` snapshot made again (lx-proc only makes text)
+        LX_KCALL_PREMAKE => true,
         // open / openat without O_CREAT, O_TRUNC, O_TMPFILE (the descriptor of a lost answer
         // is closed before the call is sent again)
         2 => args[1] & OPEN_CHANGES == 0,

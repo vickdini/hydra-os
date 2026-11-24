@@ -109,6 +109,9 @@ pub mod uring;
 // wave6 G21 begin: restart support for every service (design section 5)
 pub mod restart;
 pub mod restart_policy;
+// wave10 G7b-2 begin: kernel-held snapshots of the `/proc` files lx-proc serves
+pub mod procsnap;
+// wave10 G7b-2 end
 
 /// Whether calls to service `s` should be made: its host is online, or it is restarting and
 /// its callers wait for it (Transparent and FailObjects; never EndLinux).
@@ -301,15 +304,10 @@ fn proc_answered(nr: u64) {
     }
 }
 
-/// The host that serves a redirect to service `s`: `/proc` (`LXS_PROC`'s file system)
-/// stays in linux-server until stage 2 (7b-2) moves it into lx-proc, while lx-proc already
-/// serves the process calls.
+/// The host that serves a redirect to service `s` (wave10 G7b-2: `/proc`, `LXS_PROC`'s
+/// file system, is lx-proc's own now: no exception left).
 fn redirect_host(s: SvcId) -> SvcId {
-    if s == crate::ipc::protocol::LXS_PROC {
-        svc::host_of(LXS_LINUX)
-    } else {
-        svc::host_of(s)
-    }
+    svc::host_of(s)
 }
 // wave10 G7b-1 end
 
@@ -767,6 +765,9 @@ fn plain_svc(nr: u64, args: &[u64; 6]) -> SvcId {
         // wave9 G6b-1 begin: a fanotify permission question (`notifyfwd::on_open`)
         crate::ipc::protocol::LX_KCALL_FANPERM => crate::ipc::protocol::LXS_VFS,
         // wave9 G6b-1 end
+        // wave10 G7b-2 begin: a `/proc` snapshot made again (`procsnap`)
+        crate::ipc::protocol::LX_KCALL_PREMAKE => crate::ipc::protocol::LXS_PROC,
+        // wave10 G7b-2 end
         _ => entry_svc(entry(nr)),
     }
 }
@@ -1182,7 +1183,7 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
                 // service while that one is switched back, `lx.ipc=kernel`)
                 return fileh::LX_TO_KERNEL;
             }
-            // (wave10 G7b-1: `/proc` redirects to linux-server until 7b-2)
+            // (wave10 G7b-1/G7b-2: `/proc` redirects go to lx-proc)
             let Some(nx) = svc::host(redirect_host(s)).filter(|h| host_usable(h)) else { return ENOSYS };
             if nx.id != x.id {
                 // (an object slot means nothing to another host)
