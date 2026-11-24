@@ -32,6 +32,8 @@ extern crate alloc;
 #[allow(dead_code)]
 mod ldisc;
 mod lock;
+// wave10 GV2: /dev/pts, redirected here by vfs-server
+mod devpts;
 #[allow(dead_code)]
 mod ttys;
 
@@ -271,6 +273,8 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
     svcrt::notes::drain_to(c.note_seq);
     let cx = Cx::from_call(c, page);
     let r = match c.nr {
+        // wave10 GV2: a path call vfs-server redirected here (`/dev/pts`)
+        _ if c.redirs > 0 && c.redir_obj & 0xFF == LX_VFS_PSEUDO_DEVPTS => pts_call(&cx),
         LX_KCALL_TTY => kcall(&cx),
         0 | 19 if c.obj != LX_OBJ_NONE => obj_read(&cx),
         1 | 20 if c.obj != LX_OBJ_NONE => obj_write(&cx),
@@ -280,6 +284,141 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
     flush();
     r
 }
+
+// wave10 GV2 begin: /dev/pts path calls
+/// A path call under `/dev/pts` (vfs-server's redirect; `redir_tail` is where `pts` starts):
+/// the stat family, access, readlink, open, chmod, chown. What is not decided here goes to
+/// the kernel (service 0: nothing happened here).
+fn pts_call(cx: &Cx) -> Answer {
+    use devpts::Pts;
+    const ENOENT: i64 = -2;
+    const EPERM: i64 = -1;
+    const EACCES: i64 = -13;
+    const ENOTDIR: i64 = -20;
+    const O_DIRECTORY: u64 = 0o200000;
+    const O_PATH: u64 = 0o10000000;
+    let a = cx.args;
+    // (vfs-server's walk test call, redirected here: as linux-server answers it)
+    if cx.nr == LX_VFS_WALK_NR {
+        return (0x10000 * cx.c.svc as i64 + 0x100 * (cx.c.redir_obj & 0xFF) as i64 + (cx.c.redir_tail & 0xFF) as i64, 0);
+    }
+    let kernel = || svcrt::redirect(cx.page(), 0, 0, 0);
+    let path_ptr = match cx.nr {
+        2 | 4 | 6 | 21 | 89 | 90 | 92 | 94 | 137 => a[0],
+        _ => a[1],
+    };
+    let Ok(p) = cx.user_cstr(path_ptr) else { return kernel() };
+    let Some(tail) = p.get(cx.c.redir_tail as usize..) else { return kernel() };
+    // (review 3: a walk that started in /dev/pts: the rest is below `pts`)
+    let target = if cx.c.redir_obj & devpts::PTS_BELOW != 0 {
+        let mut t = b"pts/".to_vec();
+        t.extend_from_slice(tail);
+        devpts::parse(&t)
+    } else {
+        devpts::parse(tail)
+    };
+    let node = match target {
+        Pts::Kernel => return kernel(),
+        Pts::Missing if matches!(cx.nr, 2 | 257) && (if cx.nr == 2 { a[1] } else { a[2] }) & 0o100 != 0 => return (EPERM, 0),
+        Pts::Missing => return (ENOENT, 0),
+        Pts::NotDir => return (ENOTDIR, 0),
+        Pts::Dir => None,
+        // (review 5: /dev/pts/ptmx: char 5:2, mode 0 (root opens it), inode 2)
+        Pts::Ptmx => {
+            return match cx.nr {
+                4 | 6 | 262 | 332 => {
+                    let (out, x) = match cx.nr {
+                        4 | 6 => (a[1], false),
+                        262 => (a[2], false),
+                        _ => (a[4], true),
+                    };
+                    let rdev = (5 << 8) | 2;
+                    let r = if x { cx.copy_out(out, &devpts::statx_bytes(2, 0o020000, 0, 0, rdev, 1)) } else { cx.copy_out(out, &devpts::stat_bytes(2, 0o020000, 0, 0, rdev, 1)) };
+                    (r.err().unwrap_or(0), 0)
+                }
+                2 | 257 => {
+                    let flags = if cx.nr == 2 { a[1] } else { a[2] };
+                    if flags & O_PATH != 0 {
+                        return kernel();
+                    }
+                    if flags & 0o200 != 0 && flags & 0o100 != 0 {
+                        return (-17, 0); // EEXIST
+                    }
+                    if cx.c.euid != 0 {
+                        return (EACCES, 0);
+                    }
+                    (open(cx, (5 << 8) | 2, flags, &caller(cx, true)), 0)
+                }
+                21 | 269 | 439 => (if cx.c.euid == 0 { 0 } else { EACCES }, 0),
+                89 | 267 => (-22, 0),
+                137 => (cx.copy_out(a[1], &devpts::statfs_bytes()).err().unwrap_or(0), 0),
+                _ => (EPERM, 0),
+            };
+        }
+        Pts::Node(i) => match TTYS.lock().stat(i) {
+            Some(n) => Some((i, n)),
+            // (review 5: devpts makes no names: O_CREAT of a missing one is EPERM)
+            None if matches!(cx.nr, 2 | 257) && (if cx.nr == 2 { a[1] } else { a[2] }) & 0o100 != 0 => return (EPERM, 0),
+            None => return (ENOENT, 0),
+        },
+    };
+    // (mode with type, uid, gid, inode, device number, links)
+    let (mode, uid, gid, ino, rdev, nlink) = match node {
+        None => (0o040755, 0, 0, 1u64, 0u64, 2u32),
+        Some((i, (m, u, g))) => (0o020000 | (m & 0o7777), u, g, i as u64 + 3, pts_rdev(i as u64), 1),
+    };
+    let r = match cx.nr {
+        4 | 6 | 262 | 332 => {
+            let (out, x) = match cx.nr {
+                4 | 6 => (a[1], false),
+                262 => (a[2], false),
+                _ => (a[4], true),
+            };
+            let r = if x { cx.copy_out(out, &devpts::statx_bytes(ino, mode, uid, gid, rdev, nlink)) } else { cx.copy_out(out, &devpts::stat_bytes(ino, mode, uid, gid, rdev, nlink as u64)) };
+            r.err().unwrap_or(0)
+        }
+        21 | 269 | 439 => {
+            let (want, flags) = match cx.nr {
+                21 => (a[1] as u32, 0),
+                269 => (a[2] as u32, 0),
+                _ => (a[2] as u32, a[3]),
+            };
+            // (AT_EACCESS: the effective ids; else the real ones)
+            let id = if flags & 0x200 != 0 { cx.c.euid } else { cx.c.uid };
+            if want & 7 == 0 || devpts::may(mode, uid, gid, id, want & 7, &|g| cx.in_group(g)) { 0 } else { EACCES }
+        }
+        89 | 267 => -22, // EINVAL: no links here
+        137 => cx.copy_out(a[1], &devpts::statfs_bytes()).err().unwrap_or(0),
+        2 | 257 => {
+            let flags = if cx.nr == 2 { a[1] } else { a[2] };
+            match node {
+                // (a directory handle to list, an O_PATH handle: the kernel's)
+                None => return kernel(),
+                Some(_) if flags & O_PATH != 0 => return kernel(),
+                Some(_) if flags & O_DIRECTORY != 0 => ENOTDIR,
+                // (review 5: O_CREAT|O_EXCL of an existing slave)
+                Some(_) if flags & 0o300 == 0o300 => -17, // EEXIST
+                Some(_) => open(cx, rdev, flags, &caller(cx, true)),
+            }
+        }
+        90 | 268 | 452 | 92 | 94 | 260 => match node {
+            None => EPERM,
+            Some((i, _)) => {
+                let opt = |v: u64| if v as u32 == u32::MAX { None } else { Some(v as u32) };
+                let (m, u, g) = match cx.nr {
+                    90 => (Some(a[1] as u32), None, None),
+                    268 | 452 => (Some(a[2] as u32), None, None),
+                    92 | 94 => (None, opt(a[1]), opt(a[2])),
+                    _ => (None, opt(a[2]), opt(a[3])),
+                };
+                TTYS.lock().setattr(i, cx.c.euid, m, u, g, &|g| cx.in_group(g))
+            }
+        },
+        _ => EPERM,
+    };
+    (r, 0)
+}
+// wave10 GV2 end
 
 /// An [`Ans`] as the worker's answer.
 fn answer(a: Ans) -> Answer {

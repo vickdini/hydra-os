@@ -27,6 +27,9 @@ pub mod acl;
 mod make;
 mod xattr;
 mod change;
+// wave10 GV2: chdir, fchdir; the names other services serve in `/sys` and `/dev`
+mod cwd;
+pub mod served;
 // (crate-visible: 7-3's mount calls use the same caller context)
 pub(crate) mod ctxt;
 mod dir;
@@ -59,6 +62,8 @@ pub const CLAIMED: &[u64] = &[
     // wave10 GV1: creat, mknod, mknodat, link, linkat, the xattr calls, utime, utimes,
     // futimesat, fchmodat2, fstatfs
     85, 133, 259, 86, 265, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 132, 235, 261, 452, 138,
+    // wave10 GV2: chdir, fchdir
+    80, 81,
 ];
 
 /// Calls served here but claimed only on request (`calls=...`): getdents64, getdents.
@@ -76,10 +81,12 @@ const PSEUDO_TAG: u64 = 0x9 << 60;
 /// `/proc` and `/sys` (when the rest of the path is the argument's suffix), else [`KERNEL`].
 /// [`answer`] makes the redirect, for the calls linux-server serves.
 pub fn pseudo_redirect(r: &crate::walk::Redirect) -> i64 {
-    use crate::proto::{LXS_LINUX, LXS_PROC, LX_VFS_PSEUDO_PROC, LX_VFS_PSEUDO_SYS};
+    use crate::proto::{LXS_LINUX, LXS_PROC, LXS_TTY, LX_VFS_PSEUDO_DEVPTS, LX_VFS_PSEUDO_PROC, LX_VFS_PSEUDO_SYS};
     let obj = r.obj & 0xFFFF_FFFF;
+    // (wave10 GV2: and `/dev/pts`, the terminal service's)
+    let known = ((r.svc == LXS_PROC || r.svc == LXS_LINUX) && (obj == LX_VFS_PSEUDO_PROC || obj == LX_VFS_PSEUDO_SYS)) || (r.svc == LXS_TTY && obj & 0xFF == LX_VFS_PSEUDO_DEVPTS);
     match r.tail {
-        Some(t) if !PSEUDO_OFF.load(Ordering::Relaxed) && (r.svc == LXS_PROC || r.svc == LXS_LINUX) && (obj == LX_VFS_PSEUDO_PROC || obj == LX_VFS_PSEUDO_SYS) && t < 1 << 20 => {
+        Some(t) if !PSEUDO_OFF.load(Ordering::Relaxed) && known && t < 1 << 20 => {
             (PSEUDO_TAG | (r.svc as u64) << 48 | obj << 36 | t as u64) as i64
         }
         _ => KERNEL,
@@ -97,12 +104,20 @@ fn pseudo_of(e: i64) -> Option<(u8, u64, u32)> {
 fn pseudo_served(nr: u64) -> bool {
     matches!(nr, 4 | 6 | 262 | 332 | 21 | 269 | 439 | 89 | 267 | 2 | 257)
 }
+
+/// wave10 GV2: calls the terminal service serves under `/dev/pts` (also chmod, chown); the
+/// others are refused there (`EPERM`, as devpts refuses making and removing names).
+fn pts_served(nr: u64) -> bool {
+    pseudo_served(nr) || matches!(nr, 90 | 268 | 452 | 92 | 94 | 260 | 137)
+}
 // wave7 G7-4 end
 
 /// Calls answered here, and sent back to the kernel, since start.
 pub static SERVED: AtomicU64 = AtomicU64::new(0);
 /// See [`SERVED`].
 pub static TO_KERNEL: AtomicU64 = AtomicU64::new(0);
+/// wave10 GV2: device opens answered with the device's number (`LX_REDIR_DEV`) since start.
+pub static DEV_OPENS: AtomicU64 = AtomicU64::new(0);
 
 /// Claims every call of [`CLAIMED`] (once online; `calls=0` among the program's arguments
 /// leaves them all to the kernel). `calls=4,6,...`: only these (also [`EXTRA`]). Returns how many the kernel took.
@@ -139,6 +154,9 @@ pub fn serve(cx: &Cx) -> Option<Answer> {
         188..=199 => xattr::serve(cx),
         138 => stat::fstatfs(cx),
         // wave10 GV1 end
+        // wave10 GV2: chdir, fchdir
+        80 => cwd::chdir(cx),
+        81 => cwd::fchdir(cx),
         83 | 258 => change::mkdir(cx),
         88 | 266 => change::symlink(cx),
         87 | 84 | 263 => change::unlink(cx),
@@ -175,11 +193,17 @@ pub fn answer(cx: &Cx, r: Result<i64, i64>) -> Answer {
     // wave7 G7-4: a walk into `/proc` or `/sys`: linux-server serves the call
     if let Err(e) = r {
         if let Some((svc, obj, tail)) = pseudo_of(e) {
+            // wave10 GV2: under /dev/pts: the terminal service's calls, the others refused
+            let pts = svc == crate::proto::LXS_TTY;
+            if pts && !pts_served(cx.nr) && !(cx.c.ll_dom != 0 && matches!(cx.nr, 2 | 257)) {
+                SERVED.fetch_add(1, Ordering::Relaxed);
+                return (-1, 0);
+            }
             // (wave9 G6b-3: a landlocked caller's open there is the kernel's: its lexical chain)
-            if pseudo_served(cx.nr) && !(cx.c.ll_dom != 0 && matches!(cx.nr, 2 | 257)) {
+            if (pseudo_served(cx.nr) || (pts && pts_served(cx.nr))) && !(cx.c.ll_dom != 0 && matches!(cx.nr, 2 | 257)) {
                 let n = TO_PSEUDO.fetch_add(1, Ordering::Relaxed) + 1;
                 if n == 1 || (n >= 1024 && n.is_power_of_two()) {
-                    hydra_rt::println!("[vfs-server] {} calls redirected to linux-server (/proc, /sys)", n);
+                    hydra_rt::println!("[vfs-server] {} calls redirected to the Linux services (/proc, /sys, /dev/pts)", n);
                 }
                 return svcrt::redirect(cx.page(), svc, obj, tail);
             }

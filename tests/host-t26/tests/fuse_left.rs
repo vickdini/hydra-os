@@ -44,7 +44,7 @@ fn the_initial_namespaces_mount_list() {
     let _e = setup();
     let root = 1u64 << 62 | 0x8002 << 40 | 1;
     assert!(!fuse::ns0_any());
-    fuse::ns0_add(fuse::Ns0Mount { mountpoint: 77, root, path: "/run/user/1000/doc".into(), fstype: "fuse.portal".into(), source: "portal".into(), opts: "rw,nosuid,nodev,relatime,user_id=1000,group_id=1000".into() });
+    fuse::ns0_add(fuse::Ns0Mount { mountpoint: 77, root, path: "/run/user/1000/doc".into(), fstype: "fuse.portal".into(), source: "portal".into(), opts: "rw,nosuid,nodev,relatime,user_id=1000,group_id=1000".into(), flags: 6 });
     assert!(fuse::ns0_any());
     assert_eq!(fuse::ns0_list(), vec![(77, root, 0)]);
     assert_eq!(fuse::ns0_mnt_of(root | 9), 1);

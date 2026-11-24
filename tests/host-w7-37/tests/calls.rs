@@ -149,7 +149,11 @@ fn which_opens_are_served_here() {
     // the kernel's)
     assert!(!servable(O_TMPFILE_MASK | O_RDWR_FLAG));
     assert!(!servable(O_TMPFILE_MASK | O_DIRECTORY | O_CREAT | O_RDWR_FLAG));
-    assert!(!servable(O_CREAT | O_DIRECTORY));
+    // (wave10 GV2: answered here, EINVAL: `creat_dir_flags`)
+    assert!(servable(O_CREAT | O_DIRECTORY));
+    assert!(creat_dir_flags(O_CREAT | O_DIRECTORY));
+    assert!(!creat_dir_flags(O_CREAT));
+    assert!(!creat_dir_flags(O_TMPFILE_MASK | O_DIRECTORY | O_CREAT));
 }
 
 const O_RDWR_FLAG: u32 = 2;
@@ -165,9 +169,14 @@ fn open_checks_types_in_the_kernels_order() {
     assert_eq!(decide(0o100644, O_DIRECTORY), Err(ENOTDIR));
     // A link (O_NOFOLLOW met one): ELOOP before anything else
     assert_eq!(decide(0o120777, O_DIRECTORY | O_WRONLY), Err(ELOOP));
-    // Devices, FIFOs, sockets go to the kernel; with O_DIRECTORY they are ENOTDIR first
+    // FIFOs go to the kernel (wave10 GV2: devices are served, the device opened by number;
+    // a socket is ENXIO); with O_DIRECTORY they are ENOTDIR first
+    assert_eq!(decide(0o010644, O_RDONLY), Err(KERNEL));
+    assert_eq!(decide(0o020666, O_RDWR_FLAG), Ok(MAY_READ | MAY_WRITE));
+    assert_eq!(decide(0o060660, O_RDONLY), Ok(MAY_READ));
+    assert_eq!(decide(0o020666, O_WRONLY | O_TRUNC), Ok(MAY_WRITE));
+    assert_eq!(decide(0o140755, O_RDONLY), Err(-6));
     for m in [0o020666, 0o060660, 0o010644, 0o140755] {
-        assert_eq!(decide(m, O_RDONLY), Err(KERNEL), "{m:o}");
         assert_eq!(decide(m, O_DIRECTORY), Err(ENOTDIR), "{m:o}");
     }
 }
@@ -262,4 +271,26 @@ fn readdir_requests_are_bounded() {
     assert_eq!(readdir_max(23), 1);
     assert_eq!(readdir_max(32768), 1365);
     assert_eq!(readdir_max(u32::MAX as usize), 4096);
+}
+
+// wave10 GV2 (review 8): the console's terminals stat as fstat of a console descriptor shows
+#[test]
+fn console_nodes_stat_as_the_console() {
+    let tty2 = Attr { ino: 99, mode: 0o020620, rdev: (4 << 8) | 2, ..Attr::default() };
+    let mut b = stat(&tty2);
+    fix_console_stat(&tty2, &mut b, false);
+    assert_eq!(u64::from_le_bytes(b[0..8].try_into().unwrap()), CONSOLE_DEV);
+    assert_eq!(u64::from_le_bytes(b[8..16].try_into().unwrap()), CONSOLE_INO);
+    assert_eq!(u64::from_le_bytes(b[40..48].try_into().unwrap()), (4 << 8) | 1);
+    let mut x = statx(&tty2);
+    fix_console_stat(&tty2, &mut x, true);
+    assert_eq!(u64::from_le_bytes(x[32..40].try_into().unwrap()), CONSOLE_INO);
+    assert_eq!(u32::from_le_bytes(x[132..136].try_into().unwrap()), 1);
+    // /dev/console (5:1), other devices, files: unchanged
+    for a in [Attr { ino: 5, mode: 0o020600, rdev: (5 << 8) | 1, ..Attr::default() }, Attr { ino: 6, mode: 0o020666, rdev: (1 << 8) | 3, ..Attr::default() }, Attr { ino: 7, mode: 0o100644, rdev: (4 << 8) | 1, ..Attr::default() }] {
+        let mut b = stat(&a);
+        let o = b;
+        fix_console_stat(&a, &mut b, false);
+        assert_eq!(b, o);
+    }
 }

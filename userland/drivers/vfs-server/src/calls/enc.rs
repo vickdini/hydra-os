@@ -130,6 +130,54 @@ pub fn statfs(total: u64, free: u64, objs: u64, fsid: [u32; 2]) -> [u8; STATFS_S
     b
 }
 
+// wave10 GV2 begin
+/// `st_dev` and `st_ino` of the console as `fstat` of a console descriptor shows them (the
+/// kernel's `console_stat`: devpts + 1, 0x401, char 4:1).
+pub const CONSOLE_DEV: u64 = 0x19;
+/// See [`CONSOLE_DEV`].
+pub const CONSOLE_INO: u64 = 0x401;
+
+/// Whether device number `rdev` is one of the console's virtual terminals (
+/// 4:0..63: the kernel opens them all as the console; `/dev/console` keeps 5:1, as Linux).
+pub fn console_rdev(rdev: u64) -> bool {
+    let (major, minor) = ((rdev >> 8) & 0xFFF, (rdev & 0xFF) | ((rdev >> 12) & 0xFFF00));
+    matches!((major, minor), (4, 0..=63))
+}
+
+/// `stat`/`statx` bytes `b` of a console node `a` (review 8): the numbers `fstat` of a
+/// console descriptor reports, so `ttyname` (glibc compares device, inode and device number)
+/// finds `/dev/ttyN` for it, as the kernel's by-name stat did.
+pub fn fix_console_stat(a: &Attr, b: &mut [u8], statx: bool) {
+    if a.mode & 0o170000 != 0o020000 || !console_rdev(a.rdev) {
+        return;
+    }
+    let rdev = (4u64 << 8) | 1;
+    if statx {
+        b[32..40].copy_from_slice(&CONSOLE_INO.to_le_bytes());
+        b[128..132].copy_from_slice(&4u32.to_le_bytes());
+        b[132..136].copy_from_slice(&1u32.to_le_bytes());
+        b[136..140].copy_from_slice(&(((CONSOLE_DEV >> 8) & 0xFFF) as u32).to_le_bytes());
+        b[140..144].copy_from_slice(&((CONSOLE_DEV & 0xFF) as u32).to_le_bytes());
+        b[144..152].copy_from_slice(&(20 + (CONSOLE_DEV & 0xFFFF)).to_le_bytes());
+    } else {
+        b[0..8].copy_from_slice(&CONSOLE_DEV.to_le_bytes());
+        b[8..16].copy_from_slice(&CONSOLE_INO.to_le_bytes());
+        b[40..48].copy_from_slice(&rdev.to_le_bytes());
+    }
+}
+
+/// `struct statfs` of a file system shown by its type only (sysfs, cgroup2, efivarfs,
+/// devpts: the kernel's `statfs_out` for them): block size 1024 for devpts, else 4096.
+pub fn statfs_named(magic: i64) -> [u8; STATFS_SIZE] {
+    let mut b = [0u8; STATFS_SIZE];
+    put64(&mut b, 0, magic as u64);
+    put64(&mut b, 8, if magic == 0x1cd1 { 1024 } else { 4096 });
+    put64(&mut b, 64, 255);
+    put64(&mut b, 72, 4096);
+    b
+}
+// wave10 GV2 end
+
 // wave10 GV1 begin
 /// `f_type` of a tmpfs (`TMPFS_MAGIC`).
 pub const TMPFS_MAGIC: i64 = 0x0102_1994;

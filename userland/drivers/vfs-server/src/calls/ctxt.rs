@@ -44,6 +44,8 @@ pub struct Walker {
     pub ll: bool,
     /// wave9 G6b-3: the call (its walk's last step is remembered for it).
     pub req: u64,
+    /// wave10 GV2: the call's number (efivars: only an open is redirected).
+    pub nr: u64,
 }
 
 impl Walker {
@@ -100,12 +102,20 @@ impl Backend for Walker {
         crate::policy::abac(cx, dir, perm::MAY_EXEC, false, b"")
     }
     // wave9 G6b-3 end
+    // wave10 GV2 begin
+    fn may_serve(&self, name: &[u8]) -> bool {
+        super::served::may_serve(name)
+    }
+    fn served(&self, cx: &Ctx, dir: Node, name: &[u8], rest: &[&[u8]]) -> Option<(crate::proto::SvcId, u64)> {
+        super::served::check(self, cx, dir, name, rest, matches!(self.nr, 2 | 257 | 85))
+    }
+    // wave10 GV2 end
 }
 
 /// The walker of call `c`: the copy of its caller's mount table at least as new as the
 /// call (`LxCall::mnt_gen`).
 pub fn walker(c: &LxCall) -> Result<Walker, i64> {
-    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)?, fuse: crate::fuse::rerunnable(c.nr) && !(c.ll_dom != 0 && matches!(c.nr, 2 | 257)), euid: c.euid, ll: c.ll_dom != 0, req: c.id })
+    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)?, fuse: crate::fuse::rerunnable(c.nr) && !(c.ll_dom != 0 && matches!(c.nr, 2 | 257)), euid: c.euid, ll: c.ll_dom != 0, req: c.id, nr: c.nr })
 }
 
 /// The caller's root in table `v`: inode `c.root` (0: the pool's root, or in another

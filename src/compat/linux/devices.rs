@@ -483,6 +483,35 @@ fn populate_tree(t: &mut Tree, s: &mut ZfsServer) -> Result<(), i64> {
     // FUSE: anyone may open it (fusermount3 mounts for users); fusermount3 reads the
     // mount table as /etc/mtab
     t.node_mode(s, "/dev/fuse", super::fuse::RDEV, 0, 0o666)?;
+    // wave10 GV2 begin: the devices the kernel served by name are nodes like the others
+    // (vfs-server walks /dev in the pool and opens a device by its number; Linux's modes and
+    // owners); /dev/pts is the terminal service's (redirected at lookup), its directory is
+    // here for listings
+    let tty = group_id(s, t.root, "tty", 5);
+    for (name, major, minor, gid, perm) in [
+        ("null", 1, 3, 0, 0o666),
+        ("zero", 1, 5, 0, 0o666),
+        ("full", 1, 7, 0, 0o666),
+        ("random", 1, 8, 0, 0o666),
+        ("urandom", 1, 9, 0, 0o666),
+        ("tty", 5, 0, tty, 0o666),
+        ("console", 5, 1, 0, 0o600),
+        ("ptmx", 5, 2, tty, 0o666),
+    ] {
+        t.node_mode(s, &alloc::format!("/dev/{}", name), super::chardev::makedev(major, minor), gid, perm)?;
+    }
+    for n in 0..64u64 {
+        t.node_mode(s, &alloc::format!("/dev/tty{}", n), super::chardev::makedev(4, n), tty, 0o620)?;
+    }
+    t.dir(s, "/dev/pts")?;
+    // (review 3: the cpu ranges as files too, so a walk relative to the cpu directory finds
+    // them; an absolute path is still linux-server's, which shows the same text)
+    let n = crate::arch::smp::online();
+    let range = if n > 1 { alloc::format!("0-{}\n", n - 1) } else { String::from("0\n") };
+    for f in ["online", "possible", "present"] {
+        t.file(s, &alloc::format!("/sys/devices/system/cpu/{}", f), &range)?;
+    }
+    // wave10 GV2 end
     t.link(s, "/etc/mtab", "../proc/self/mounts")?;
     let path_tag: String = v.slot.chars().map(|c| if c == ':' || c == '.' { '_' } else { c }).collect();
     t.link(s, &alloc::format!("/dev/dri/by-path/pci-{}-card", v.slot), "../card0")?;

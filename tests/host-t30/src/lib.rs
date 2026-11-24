@@ -922,6 +922,10 @@ pub mod compat {
             /// *stub* vfs-server's chroot moves the caller's CLONE_FS peers (wave 7, Group
             /// 7-3): no peers on the host.
             pub fn chroot_peers(_pid: u64, _root: u64, _root_mnt: usize) {}
+            /// *stub* wave10 GV2: a device opened by its number (no devices on the host).
+            pub fn open_device(_rdev: u64, _block: bool, _flags: u32, _shown: &str) -> Result<usize, i64> {
+                Err(-6)
+            }
             /// Host memory is user memory; null and bad pages fault.
             pub fn copy_in(ptr: u64, len: usize) -> Result<alloc::vec::Vec<u8>, i64> {
                 if ptr < 0x10000 || !crate::fake::prefault(ptr, len as u64) {
@@ -1080,6 +1084,18 @@ pub mod compat {
         pub mod fuse {
             pub fn ns0_any() -> bool {
                 crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 16 != 0
+            }
+            /// *stub* wave10 GV2: the ns-0 FUSE list vfs-server writes through (recorded
+            /// for the tests).
+            pub static NS0_RECORDS: spin::Mutex<alloc::vec::Vec<(u64, u64, alloc::string::String)>> = spin::Mutex::new(alloc::vec::Vec::new());
+            pub fn ns0_record(mountpoint: u64, root: u64, path: alloc::string::String, _fstype: alloc::string::String, _source: alloc::string::String, _flags: u64, _owner: (u32, u32, bool)) {
+                NS0_RECORDS.lock().push((mountpoint, root, path));
+            }
+            pub fn ns0_forget(root: u64) -> bool {
+                let mut l = NS0_RECORDS.lock();
+                let n = l.len();
+                l.retain(|r| r.1 != root);
+                l.len() != n
             }
         }
         pub mod landlock {

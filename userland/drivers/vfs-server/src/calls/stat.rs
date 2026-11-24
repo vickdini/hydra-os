@@ -6,6 +6,7 @@ use hydra_rt::svcrt::Cx;
 use super::ctxt::{self, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW};
 use super::enc;
 use crate::walk::Backend;
+use crate::fstree; // wave10 GV2
 
 const EINVAL: i64 = -22;
 const EACCES: i64 = -13;
@@ -35,10 +36,12 @@ pub fn stat(cx: &Cx) -> Result<i64, i64> {
     if x {
         let mut b = enc::statx(&attr);
         crate::fuse::fix_stat(&attr, &mut b, true); // wave9 G6b-2
+        enc::fix_console_stat(&attr, &mut b, true); // wave10 GV2
         cx.copy_out(out, &b)?;
     } else {
         let mut b = enc::stat(&attr);
         crate::fuse::fix_stat(&attr, &mut b, false); // wave9 G6b-2
+        enc::fix_console_stat(&attr, &mut b, false); // wave10 GV2
         cx.copy_out(out, &b)?;
     }
     Ok(0)
@@ -104,9 +107,35 @@ pub fn statfs(cx: &Cx) -> Result<i64, i64> {
     let c = &cx.c;
     ctxt::check(c, 0)?;
     let path = ctxt::path(cx, cx.args[0], false)?;
-    let who = ctxt::caller(c)?;
-    let (n, _) = ctxt::find(c, &who, &path, true)?;
+    // wave10 GV2: the tree the walk ended in (sysfs, cgroup2, efivarfs, devpts by type)
+    let k = ctxt::call(c)?;
+    let start = k.start(c, &path)?;
+    let (n, track) = match crate::walk::walk_track(&k.w, &k.who, start, &path, 0)? {
+        (crate::walk::Walked::Found { node, .. }, t) => (node, t),
+        (crate::walk::Walked::Redirect(r), _) => return Err(super::pseudo_redirect(&r)),
+    };
+    let names: alloc::vec::Vec<&[u8]> = track.names.iter().map(|n| &n[..]).collect();
+    let tree = if track.abs {
+        fstree::class_of_names(&names)
+    } else {
+        // (relative: from the working directory's or the descriptor's tree, which the kernel
+        // sends; going up out of it is not followed: rare)
+        let from = if c.at_kind == crate::proto::LX_AT_CWD { fstree::cwd_of(c.fs_flags) } else { fstree::at_of(c.fh_flags) };
+        if track.ups == 0 { fstree::class_below(from, &names) } else { from }
+    };
+    if let Some(r) = statfs_tree(cx, tree, cx.args[1]) {
+        return r;
+    }
     statfs_of(cx, n, cx.args[1])
+}
+
+/// `statfs` of tree `tree` when it is one shown by its type (`None`: the pool's).
+fn statfs_tree(cx: &Cx, tree: u32, out: u64) -> Option<Result<i64, i64>> {
+    let magic = fstree::magic_of(tree);
+    if magic == 0 {
+        return None;
+    }
+    Some(cx.copy_out(out, &enc::statfs_named(magic)).map(|_| 0))
 }
 
 // wave10 GV1 begin
@@ -115,6 +144,10 @@ pub fn fstatfs(cx: &Cx) -> Result<i64, i64> {
     let c = &cx.c;
     ctxt::check(c, 0)?;
     let n = ctxt::handle(c)?;
+    // wave10 GV2: a handle in `/sys` (its tree comes from the kernel, which knows its path)
+    if let Some(r) = statfs_tree(cx, fstree::at_of(c.fh_flags), cx.args[1]) {
+        return r;
+    }
     statfs_of(cx, n, cx.args[1])
 }
 
@@ -123,9 +156,12 @@ pub fn fstatfs(cx: &Cx) -> Result<i64, i64> {
 /// mount: a mount with flags answers as the others.)
 fn statfs_of(cx: &Cx, n: crate::ctx::Node, out: u64) -> Result<i64, i64> {
     let c = &cx.c;
-    // (a FUSE file system: the daemon's figures, the kernel's)
+    // (a FUSE file system: the daemon's figures; wave10 GV2: asked here, the call waits for
+    // the daemon and runs again, `fuse::be_statfs`)
     if crate::fuse::wire::split(n.ino).is_some() {
-        return Err(ctxt::KERNEL);
+        let r = crate::fuse::be_statfs(n, c.euid)?;
+        cx.copy_out(out, &crate::fuse::statfs_bytes(n.ino, &r))?;
+        return Ok(0);
     }
     if n.mnt != 0 && ctxt::walker(c)?.view.is_tmpfs(n.mnt) {
         let usage = crate::tmem::mount_id(c.mnt_ns, n.mnt).and_then(crate::tmem::usage);

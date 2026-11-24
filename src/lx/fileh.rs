@@ -72,6 +72,10 @@ pub const T_VFS: u32 = 1 << 31;
 /// A result only the forwarding code sees: the service redirected the call to the kernel.
 pub(super) const LX_TO_KERNEL: i64 = -4102;
 
+// wave10 GV2: which tree (`/sys`, `/dev`, ...) a handle's or working directory's path is in
+#[path = "fstree.rs"]
+pub mod fstree;
+
 /// Where a call's descriptor and path arguments are.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Shape {
@@ -204,10 +208,11 @@ pub fn plain_ino(ino: u64) -> bool {
 }
 
 /// Whether `path` (as the kernel shows it) lies where the kernel serves files by name
-/// (`/proc`, `/sys`, `/dev`): lookups relative to it are the kernel's until those trees
-/// are served by their services (group 7-4).
+/// (`/proc`): lookups relative to it are the kernel's until those trees are served by their
+/// services (group 7-4). (wave10 GV2: `/sys` and `/dev` are pool trees vfs-server walks,
+/// redirecting the names other services serve at lookup: their handles are pool handles.)
 pub fn pseudo_path(path: &str) -> bool {
-    ["/proc", "/sys", "/dev"].iter().any(|d| path.strip_prefix(d).is_some_and(|r| r.is_empty() || r.starts_with('/')))
+    path.strip_prefix("/proc").is_some_and(|r| r.is_empty() || r.starts_with('/'))
 }
 
 /// The handle data of an open file: `None` when it is not a plain pool object (opened
@@ -219,7 +224,9 @@ pub fn info_of_open(f: &OpenFile) -> Option<AtInfo> {
     }
     // wave9 G6b-3: and whether Landlock refused truncating it at the open
     let notrunc = if f.no_truncate { crate::ipc::protocol::LX_FH_NOTRUNC } else { 0 };
-    Some(AtInfo { kind: if f.is_dir { LX_AT_DIR } else { LX_AT_FILE }, ino: f.ino, mnt: f.mnt as u32, off: f.offset, flags: f.flags | notrunc })
+    // wave10 GV2: and the tree its path is in (`statfs` shows sysfs, cgroup2, ...)
+    let tree = fstree::at_bits(&f.path);
+    Some(AtInfo { kind: if f.is_dir { LX_AT_DIR } else { LX_AT_FILE }, ino: f.ino, mnt: f.mnt as u32, off: f.offset, flags: f.flags | notrunc | tree })
 }
 
 /// What descriptor `fd` of table `t` is for a file-service call, and the open file to hold
@@ -326,6 +333,7 @@ pub(super) fn fill(c: &mut LxCall, t: &FdTable, sh: Shape, wait: bool) -> Result
     if !plain_ino(t.root_ino) || !plain_ino(t.cwd_ino) || pseudo_path(&t.cwd_path) || t.cwd_path.ends_with("/proc") {
         c.fs_flags |= LX_FS_FOREIGN;
     }
+    c.fs_flags |= fstree::cwd_bits(&t.cwd_path); // wave10 GV2
     let mut held: Held = [None, None];
     // wave9 G6b-1 begin: the instance or group the call acts on: vfs-server's object, or
     // the kernel answers (an instance the kernel made while vfs-server was away)
@@ -465,8 +473,8 @@ fn kernel_only(c: &LxCall) -> bool {
     // (wave7 G7-7: mounts of a namespace's table are the service's too now; in the initial
     // namespace a root or working directory on a mount is a FUSE one)
     // (wave8 GF: the initial namespace's mounts are fixed apart from FUSE, which is the
-    // kernel's: its mount calls stay here)
-    let mounts = c.mnt_ns == 0 && (c.root_mnt != 0 || c.cwd_mnt != 0 || is_mount_call(c.nr)) && !is_notify_call(c.nr); // (wave9 G6b-1)
+    // kernel's: its mount calls stay here; wave10 GV2: vfs-server decides them, FUSE too)
+    let mounts = c.mnt_ns == 0 && (c.root_mnt != 0 || c.cwd_mnt != 0) && !is_notify_call(c.nr); // (wave9 G6b-1)
     if hit == 0 && !mounts {
         return false;
     }
@@ -597,8 +605,12 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
     let tid = crate::task::CURRENT_TID.load(Ordering::Relaxed);
     // wave9 GP2: a handle the lock-free path got for this very call
     let args = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
-    if let Some(h) = fh_take(tid, nr, &args) {
-        let d = fh_desc(nr, &args, h).ok()?;
+    if let Some(code) = take_code(tid, nr, &args) {
+        // wave10 GV2: or a device node it found (`LX_REDIR_DEV`)
+        if let Some(dv) = dev_decode(code) {
+            return Some(dev_open(nr, &args, dv));
+        }
+        let d = fh_desc(nr, &args, fh_decode(code)?).ok()?;
         let fd = crate::task::with_current_fds_mut(|t| install_in(t, &d));
         SERVED.fetch_add(1, Ordering::Relaxed);
         return Some(fd.map_or_else(|e| e, |fd| fd as i64));
@@ -692,6 +704,10 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
         SERVED.fetch_add(1, Ordering::Relaxed);
         return Some(fd.map_or_else(|e| e, |fd| fd as i64));
     }
+    // wave10 GV2: a device node vfs-server found and checked: the device opens here
+    if let Some(dv) = dev_decode(r) {
+        return Some(dev_open(nr, &args, dv));
+    }
     outcome(nr, r)
 }
 
@@ -728,11 +744,17 @@ fn fh_key(nr: u64, args: &[u64; 6]) -> (u64, u64) {
 
 /// Keeps handle `h` of call (`tid`, `nr`, `args`) for [`fh_take`] on this CPU.
 fn fh_stash(tid: u64, nr: u64, args: &[u64; 6], (ino, mnt, dir): (u64, u32, bool)) {
+    stash_code(tid, nr, args, (1u64 << 63 | (dir as u64) << 61 | (mnt as u64) << 45 | ino) as i64);
+}
+
+/// Keeps answer `code` of call (`tid`, `nr`, `args`) (an [`fh_answer`] or, wave10 GV2, a
+/// [`dev_answer`]) for [`take_code`] on this CPU.
+fn stash_code(tid: u64, nr: u64, args: &[u64; 6], code: i64) {
     let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
     let s = &FH_STASH[cpu];
     let (p, f) = fh_key(nr, args);
     s[1].store(nr, Ordering::Relaxed);
-    s[2].store(1u64 << 63 | (dir as u64) << 61 | (mnt as u64) << 45 | ino, Ordering::Relaxed);
+    s[2].store(code as u64, Ordering::Relaxed);
     s[3].store(p, Ordering::Relaxed);
     s[4].store(f, Ordering::Relaxed);
     s[5].store(crate::arch::pit::ticks(), Ordering::Relaxed);
@@ -742,6 +764,11 @@ fn fh_stash(tid: u64, nr: u64, args: &[u64; 6], (ino, mnt, dir): (u64, u32, bool
 /// The handle [`fh_stash`] kept on this CPU for exactly this call (same thread, number,
 /// path pointer, flags and directory descriptor, within a tick); taken in any case.
 fn fh_take(tid: u64, nr: u64, args: &[u64; 6]) -> Option<(u64, u32, bool)> {
+    fh_decode(take_code(tid, nr, args)?)
+}
+
+/// The answer [`stash_code`] kept on this CPU for exactly this call (as [`fh_take`]).
+fn take_code(tid: u64, nr: u64, args: &[u64; 6]) -> Option<i64> {
     let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
     let s = &FH_STASH[cpu];
     if tid == 0 || s[0].load(Ordering::Acquire) != tid {
@@ -753,7 +780,7 @@ fn fh_take(tid: u64, nr: u64, args: &[u64; 6]) -> Option<(u64, u32, bool)> {
     if s[1].load(Ordering::Relaxed) != nr || s[3].load(Ordering::Relaxed) != p || s[4].load(Ordering::Relaxed) != f || !fresh {
         return None;
     }
-    fh_decode(s[2].load(Ordering::Relaxed) as i64)
+    Some(s[2].load(Ordering::Relaxed) as i64)
 }
 
 /// `(inode, mount, directory)` of an [`fh_answer`] result.
@@ -792,6 +819,64 @@ pub fn fh_desc(nr: u64, args: &[u64; 6], (ino, mnt, dir): (u64, u32, bool)) -> R
 }
 // wave9 GP2 end
 
+// wave10 GV2 begin: a device node vfs-server found and checked (`LX_REDIR_DEV`)
+/// Device answers are coded as `-(DEV_CODE + payload)`: below every errno and the
+/// kernel's own markers, above every [`fh_answer`] code.
+const DEV_CODE: i64 = 1 << 60;
+/// The payload of a device answer: the device number (below 2^40) and the block bit.
+const DEV_PAYLOAD: u64 = (1 << 41) - 1;
+
+/// The answer of call `c` redirected to `LX_REDIR_DEV` with `redir.1` = the device number
+/// `| LX_REDIR_DEV_BLOCK`: coded for [`dev_open`]; only an open may get one (anything else:
+/// the kernel answers, nothing happened in vfs-server).
+pub(super) fn dev_answer(c: &LxCall, redir: (u64, u64)) -> i64 {
+    if !matches!(c.nr, 2 | 257 | 85) || redir.1 & !DEV_PAYLOAD != 0 {
+        return LX_TO_KERNEL;
+    }
+    -(DEV_CODE + redir.1 as i64)
+}
+
+/// `(device number, block)` of a [`dev_answer`] code.
+pub fn dev_decode(r: i64) -> Option<(u64, bool)> {
+    let p = r.checked_neg()?.checked_sub(DEV_CODE)?;
+    if !(0..=DEV_PAYLOAD as i64).contains(&p) {
+        return None;
+    }
+    let p = p as u64;
+    Some((p & (crate::ipc::protocol::LX_REDIR_DEV_BLOCK - 1), p & crate::ipc::protocol::LX_REDIR_DEV_BLOCK != 0))
+}
+
+/// The open flags of `open`/`openat`/`creat` (`nr`, `args`).
+fn open_flags(nr: u64, args: &[u64; 6]) -> u32 {
+    match nr {
+        2 => args[1] as u32,
+        85 => 0o100 | 0o1 | 0o1000, // O_CREAT | O_WRONLY | O_TRUNC
+        _ => args[2] as u32,
+    }
+}
+
+/// Opens the device of a [`dev_answer`] for open call (`nr`, `args`): its result. Reads the
+/// caller's memory (the path, shown for the console): never with a table locked.
+fn dev_open(nr: u64, args: &[u64; 6], (rdev, block): (u64, bool)) -> i64 {
+    let flags = open_flags(nr, args);
+    // (the shown path is made as for a handle; `creat` takes the path as its first argument)
+    let a = if nr == 85 { [args[0], 0, 0, 0, 0, 0] } else { *args };
+    let shown = match fh_desc(if nr == 85 { 2 } else { nr }, &a, (0, 0, false)) {
+        Ok(d) => crate::task::with_current_fds_mut(|t| shown_path(t, &d)).unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    SERVED.fetch_add(1, Ordering::Relaxed);
+    DEV_OPENS.fetch_add(1, Ordering::Relaxed);
+    match crate::compat::linux::vfs::open_device(rdev, block, flags, &shown) {
+        Ok(fd) => fd as i64,
+        Err(e) => e,
+    }
+}
+
+/// Devices opened from vfs-server's answer since boot.
+pub static DEV_OPENS: AtomicU64 = AtomicU64::new(0);
+// wave10 GV2 end
+
 /// The lock-free path (interrupts off, no kernel lock) for a call whose entry has
 /// [`T_VFS`]: `None` the ordinary path takes it (a busy lock, the service offline, the
 /// kernel answers).
@@ -820,8 +905,14 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
         return None;
     }
     let (fds, _) = super::cached_fds(id)?;
+    // (wave10 GV2: and whether a call on a descriptor is on a file of the file code at all,
+    // counted by number as on the ordinary path)
+    let mut vnode = sh != Shape::Handle;
     let r = match fds.try_lock() {
-        Some(t) => fill(&mut c, &t, sh, false),
+        Some(t) => {
+            vnode |= matches!(t.get(c.args[0] as i32 as usize), Some(FileDescriptor::Vnode(_)));
+            fill(&mut c, &t, sh, false)
+        }
         None => Err(()),
     };
     super::drop_last(fds);
@@ -830,7 +921,9 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
         // A call on a descriptor that is not a handle: the kernel, without asking again
         Ok(None) => {
             KEPT.fetch_add(1, Ordering::Relaxed);
-            count_kernel(nr, false);
+            if vnode {
+                count_kernel(nr, false);
+            }
             set_mark(id.tid, nr);
             return None;
         }
@@ -863,6 +956,11 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
         return None;
     }
     // wave9 GP2 end
+    // wave10 GV2: a device opens on the ordinary path too (its owner may be asked)
+    if dev_decode(r).is_some() {
+        stash_code(id.tid, nr, &c.args, r);
+        return None;
+    }
     match outcome(nr, r) {
         Some(r) => Some(r),
         None => {
@@ -1322,6 +1420,52 @@ fn tmem(sub: u64, a: u64, b: u64) -> i64 {
 }
 // wave9 GM end
 
+// wave10 GV2 begin: the initial namespace's FUSE mounts, decided by vfs-server
+/// [`crate::ipc::protocol::LX_FH_NS0FUSE`] sub-op `sub` with argument `a`; `own`: whether a
+/// request is the calling service's.
+fn ns0fuse(sub: u64, a: u64, own: &dyn Fn(u64) -> bool) -> i64 {
+    use crate::ipc::protocol::{LxNs0Fuse, LX_NS0FUSE_ADD, LX_NS0FUSE_NAME_MAX, LX_NS0FUSE_REMOVE};
+    match sub {
+        LX_NS0FUSE_ADD => {
+            let Ok(raw) = crate::compat::linux::vfs::copy_in(a, core::mem::size_of::<LxNs0Fuse>()) else { return EFAULT };
+            // SAFETY: `raw` holds exactly one `LxNs0Fuse` (plain integers and bytes)
+            let m: LxNs0Fuse = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const LxNs0Fuse) };
+            if !own(m.req) {
+                return ESRCH;
+            }
+            let text = |b: &[u8], n: u32, max: usize| String::from_utf8_lossy(&b[..(n as usize).min(max)]).into_owned();
+            let p = &m.path[..(m.path_len as usize).min(LX_FH_PATH_MAX)];
+            let path = match m.path_kind {
+                LX_FHP_ABS => join_path("/", p),
+                LX_FHP_CWD => match client_fds(m.req) {
+                    Ok(fds) => join_path(&fds.lock().cwd_path, p),
+                    Err(e) => return e,
+                },
+                _ => return EINVAL,
+            };
+            crate::compat::linux::fuse::ns0_record(
+                m.mountpoint,
+                m.root,
+                path,
+                text(&m.fstype, m.fstype_len, LX_NS0FUSE_NAME_MAX),
+                text(&m.source, m.source_len, LX_NS0FUSE_NAME_MAX),
+                m.flags,
+                (m.uid, m.gid, m.other != 0),
+            );
+            0
+        }
+        LX_NS0FUSE_REMOVE => {
+            if crate::compat::linux::fuse::ns0_forget(a) {
+                0
+            } else {
+                ENOENT
+            }
+        }
+        _ => EINVAL,
+    }
+}
+// wave10 GV2 end
+
 /// `SYS_LX_OBJ` operations 32.. of service host `h` (called by `obj::obj_ctl`).
 pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
     // Only the file service's host
@@ -1348,6 +1492,7 @@ pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
         crate::ipc::protocol::LX_FH_TMPFSID => tmpfsid(a),
         // wave8 GF end
         crate::ipc::protocol::LX_FH_TMEM => tmem(a, b, c), // wave9 GM
+        crate::ipc::protocol::LX_FH_NS0FUSE => ns0fuse(a, b, &own), // wave10 GV2
         LX_FH_INSTALL | LX_FH_CHDIR | LX_FH_CHROOT => {
             if !own(a) {
                 return ESRCH;

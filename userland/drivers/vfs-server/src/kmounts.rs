@@ -32,6 +32,8 @@ pub const MS_RDONLY: u32 = 1;
 pub const MS_NOSUID: u32 = 2;
 /// `MS_NOEXEC`.
 pub const MS_NOEXEC: u32 = 8;
+/// `MS_NODEV` (wave10 GV2, review 1).
+pub const MS_NODEV: u32 = 4;
 
 /// The copy of one namespace's table.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

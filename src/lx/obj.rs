@@ -707,6 +707,10 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
         return super::fileh::ctl(h, op, a, b, c);
     }
     // wave9 GM end
+    // wave10 GV2: the initial namespace's FUSE mounts vfs-server decides (81)
+    if op == crate::ipc::protocol::LX_FH_NS0FUSE {
+        return super::fileh::ctl(h, op, a, b, c);
+    }
     // wave10 G8-2 begin: System V shared memory's attachments (`shm`, op 79)
     if op == crate::ipc::protocol::LX_OBJ_SHM {
         return super::shm::ctl(h, a, b, c);

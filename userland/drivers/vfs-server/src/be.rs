@@ -27,8 +27,10 @@ impl Backend for ZfsBackend {
         if let Some(t) = mount::tmpfs_of(self.ns, dir.mnt) {
             return mount::tmpfs_lookup(t, dir, name);
         }
-        // (`..` is not cached: a rename of the directory would have to forget it)
-        let cached = !self.nocache && name != b"..";
+        // (wave10 GV2: `..` is cached too — /sys's links are full of `../..`; a rename of the
+        // directory forgets the names in it, `..` among them: `change::rename` and the
+        // kernel's change notes both name the moved object, `Cache::forget_object`)
+        let cached = !self.nocache;
         if cached {
             if let Some(r) = CACHE.name(dir, name) {
                 return r.ok_or(ENOENT);
@@ -115,5 +117,12 @@ impl Backend for ZfsBackend {
 
     fn mounts(&self) -> &dyn Mounts {
         &mount::TABLES
+    }
+    // wave10 GV2: the names other services serve in /sys and /dev (as the calls' walker)
+    fn may_serve(&self, name: &[u8]) -> bool {
+        crate::calls::served::may_serve(name)
+    }
+    fn served(&self, cx: &crate::ctx::Ctx, dir: Node, name: &[u8], rest: &[&[u8]]) -> Option<(crate::proto::SvcId, u64)> {
+        crate::calls::served::check(self, cx, dir, name, rest, false)
     }
 }

@@ -351,6 +351,12 @@ fn last_flags() -> u64 {
     table(id).and_then(|t| t.lock().get(mnt).map(|m| m.flags)).unwrap_or(0)
 }
 
+/// wave10 GV2 (review 1): whether the last lookup ended in a `nodev` mount of the caller's
+/// namespace (a device node there does not open).
+pub fn last_nodev() -> bool {
+    last_flags() & MS_NODEV != 0
+}
+
 /// `0`, or `-EROFS` if the last lookup ended in a read-only mount (call after resolving
 /// what a write changes).
 pub fn check_write() -> i64 {
@@ -365,7 +371,10 @@ pub fn check_write() -> i64 {
 pub fn exec_flags_of_path(abs: &str) -> (bool, bool) {
     let id = current_ns_id();
     if id == 0 {
-        return (false, false);
+        // wave10 GV2 (review 1): the initial namespace's FUSE mounts (fusermount3 mounts them
+        // nosuid,nodev for users)
+        let f = super::fuse::ns0_flags_for_path(abs);
+        return (f & MS_NOEXEC != 0, f & MS_NOSUID != 0);
     }
     let Some(t) = table(id) else { return (false, false) };
     let t = t.lock();
@@ -2097,8 +2106,9 @@ pub fn vfs_table(ns: u64) -> Result<(u64, u32, Vec<VfsMount>), i64> {
     const EOPNOTSUPP: i64 = -95;
     if ns == 0 {
         let gen = NS0_GEN.load(Ordering::Acquire);
-        let list = super::fuse::ns0_list();
-        let mounts = list.iter().map(|&(mountpoint, root, _)| VfsMount { kind: if super::fuse_svc::is_remote(root) { crate::ipc::protocol::LX_MNT_FUSE } else { VFS_KERNEL }, flags: 0, parent: 0, mountpoint, root }).collect();
+        // (wave10 GV2, review 1: with their flags: nodev for device opens there)
+        let list = super::fuse::ns0_list_flags();
+        let mounts = list.iter().map(|&(mountpoint, root, flags)| VfsMount { kind: if super::fuse_svc::is_remote(root) { crate::ipc::protocol::LX_MNT_FUSE } else { VFS_KERNEL }, flags: flags as u32, parent: 0, mountpoint, root }).collect();
         return Ok((gen, 0, mounts));
     }
     let gen = GENS.lock().get(&ns).map(|g| g.0).ok_or(ESRCH)?;

@@ -42,6 +42,9 @@ mod mtab;
 mod ktab;
 #[path = "../../../../src/compat/linux/mntrec.rs"]
 mod mntrec;
+// wave10 GV2: which tree (`/sys`, `/dev`) a path is in, shared with the kernel
+#[path = "../../../../src/lx/fstree.rs"]
+mod fstree;
 // wave8 GF end
 mod tmpfs;
 mod tmpfs_mem;

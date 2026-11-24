@@ -27,7 +27,7 @@ pub const EACCES: i64 = -13;
 pub const ESTALE: i64 = -116;
 use crate::fs::types::DnodeType;
 use crate::perm::{self, MAY_EXEC};
-use crate::proto::{SvcId, LXS_LINUX, LXS_PROC, LX_VFS_PSEUDO_DEV, LX_VFS_PSEUDO_PROC, LX_VFS_PSEUDO_SYS};
+use crate::proto::{SvcId, LXS_PROC, LX_VFS_PSEUDO_PROC};
 
 /// Symbolic links followed in one walk at most (Linux `MAXSYMLINKS`).
 pub const SYMLOOP_MAX: u32 = 40;
@@ -107,10 +107,10 @@ impl Mounts for BootMounts {
         if !self.pseudo {
             return None;
         }
+        // (wave10 GV2: `sys` and `dev` are pool trees walked here; the names other services
+        // serve in them are redirected at lookup, [`Backend::served`])
         match name {
             b"proc" => Some((LXS_PROC, LX_VFS_PSEUDO_PROC)),
-            b"sys" => Some((LXS_LINUX, LX_VFS_PSEUDO_SYS)),
-            b"dev" => Some((LXS_LINUX, LX_VFS_PSEUDO_DEV)),
             _ => None,
         }
     }
@@ -143,6 +143,20 @@ pub trait Backend {
         Ok(true)
     }
     // wave9 G6b-3 end
+    // wave10 GV2 begin
+    /// Whether a name another service serves may start at component `name` (a quick filter
+    /// before [`Backend::served`]; none by default).
+    fn may_serve(&self, _name: &[u8]) -> bool {
+        false
+    }
+    /// The service serving `name` in directory `dir` with the components `rest` after it
+    /// (decision 19: `/sys` and `/dev` are pool trees here; the files another service serves
+    /// in them are redirected at lookup): `(service, object)`, the redirect's tail starting at
+    /// `name`. Asked only when [`Backend::may_serve`] said so.
+    fn served(&self, _cx: &Ctx, _dir: Node, _name: &[u8], _rest: &[&[u8]]) -> Option<(SvcId, u64)> {
+        None
+    }
+    // wave10 GV2 end
 }
 
 /// Where a relative path starts.
@@ -327,6 +341,71 @@ fn enter(be: &dyn Backend, cx: &Ctx, mut n: Node) -> Result<Result<Node, (SvcId,
 /// `ENOENT` (empty path, a missing component), `ENOTDIR`, `EACCES`, `ELOOP`,
 /// `ENAMETOOLONG`, or the back end's error.
 pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -> Result<Walked, i64> {
+    walk_in(be, cx, start, path, flags, None)
+}
+
+// wave10 GV2 begin: the path a walk took (chdir's shown path)
+/// The path of the object a walk found, as names from where it started (`chdir` shows it:
+/// `getcwd`): symbolic links resolved, `.` and `..` applied. `abs`: from the caller's root
+/// (an absolute path, a link to one, or `..` back to the root); else from the walk's start
+/// directory, after going up `ups` directories from it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Track {
+    /// The names are from the caller's root.
+    pub abs: bool,
+    /// Directories above the start, before the names (only when not `abs`).
+    pub ups: u32,
+    /// The names, first to last.
+    pub names: Vec<Vec<u8>>,
+}
+
+impl Track {
+    /// The walk is at the caller's root.
+    fn at_root(&mut self) {
+        self.abs = true;
+        self.ups = 0;
+        self.names.clear();
+    }
+
+    /// One `..` that left a directory (not at the root).
+    fn up(&mut self) {
+        if self.names.pop().is_none() && !self.abs {
+            self.ups += 1;
+        }
+    }
+
+    /// The path as text: absolute (`/a/b`), or relative to the start (`../../a/b`, `.`).
+    pub fn text(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.abs {
+            out.push(b'/');
+        }
+        for _ in 0..self.ups {
+            out.extend_from_slice(b"../");
+        }
+        for (i, n) in self.names.iter().enumerate() {
+            if i > 0 {
+                out.push(b'/');
+            }
+            out.extend_from_slice(n);
+        }
+        if out.is_empty() {
+            out.push(b'.');
+        }
+        out
+    }
+}
+
+/// [`walk`], and the path it took ([`Track`]).
+pub fn walk_track(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -> Result<(Walked, Track), i64> {
+    let mut t = Track::default();
+    let w = walk_in(be, cx, start, path, flags, Some(&mut t))?;
+    Ok((w, t))
+}
+// wave10 GV2 end
+
+/// [`walk`], recording its path in `track` (wave10 GV2).
+fn walk_in(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32, mut track: Option<&mut Track>) -> Result<Walked, i64> {
     if path.is_empty() {
         return Err(ENOENT);
     }
@@ -343,11 +422,17 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
         Start::Root => root,
         Start::At(n) => n,
     };
+    // wave10 GV2: (a start at the root is the root, whichever way it was named)
+    if let Some(t) = track.as_deref_mut() {
+        if cur == root {
+            t.at_root();
+        }
+    }
     let mut pending = components(path, true);
     let mut links = 0u32;
     // The attributes of `cur`, when the last step looked them up
     let mut known: Option<(Node, Attr)> = None;
-    while let Some((comp, _)) = pending.pop() {
+    while let Some((comp, off)) = pending.pop() {
         if comp.len() > NAME_MAX {
             return Err(ENAMETOOLONG);
         }
@@ -368,7 +453,13 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
             // on top of it — 7-7 review)
             if parent == root {
                 cur = root;
+                if let Some(t) = track.as_deref_mut() {
+                    t.at_root(); // wave10 GV2
+                }
                 continue;
+            }
+            if let Some(t) = track.as_deref_mut() {
+                t.up(); // wave10 GV2
             }
             // (the parent may be covered by a mount made after the walk's start went below it)
             cur = match enter(be, cx, parent)? {
@@ -387,6 +478,15 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
                 return Ok(Walked::Redirect(redirect(svc, obj, &pending, path.len(), trailing)));
             }
         }
+        // wave10 GV2: a name another service serves in this directory (the redirect's rest
+        // starts with the name itself)
+        if be.may_serve(&comp) {
+            let rest: Vec<&[u8]> = pending.iter().rev().map(|s| &s.0[..]).collect();
+            if let Some((svc, obj)) = be.served(cx, cur, &comp, &rest) {
+                pending.push((comp, off));
+                return Ok(Walked::Redirect(redirect(svc, obj, &pending, path.len(), trailing)));
+            }
+        }
         let next = be.lookup(cur, &comp)?;
         be.found(cur, &comp, next); // wave9 G6b-3
         let is_last = pending.is_empty();
@@ -402,6 +502,9 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
             }
             if target[0] == b'/' {
                 cur = root;
+                if let Some(t) = track.as_deref_mut() {
+                    t.at_root(); // wave10 GV2
+                }
             }
             // `link -> file/` as the last component: the result must be a directory
             if is_last && target.ends_with(b"/") {
@@ -412,6 +515,9 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
         }
         if !is_last && !attr.is_dir() {
             return Err(ENOTDIR);
+        }
+        if let Some(t) = track.as_deref_mut() {
+            t.names.push(comp.clone()); // wave10 GV2
         }
         match enter(be, cx, next)? {
             Ok(n) => {
@@ -424,6 +530,9 @@ pub fn walk(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8], flags: u32) -
                 // `mnt/..`: back out of the mount here (to the directory it is in)
                 if pending.last().is_some_and(|s| s.0 == b"..") {
                     pending.pop();
+                    if let Some(t) = track.as_deref_mut() {
+                        t.names.pop(); // wave10 GV2
+                    }
                     continue;
                 }
                 return Ok(Walked::Redirect(redirect(svc, obj, &pending, path.len(), trailing)));
@@ -507,6 +616,12 @@ pub fn walk_parent(be: &dyn Backend, cx: &Ctx, start: Start, path: &[u8]) -> Res
     if dir == cx.root {
         if let Some((svc, obj)) = be.mounts().pseudo_at_root(cx.ns, name) {
             return Ok(ParentWalked::Redirect(Redirect { svc, obj, tail: Some(path.len() as u32), text: Vec::new() }));
+        }
+    }
+    // wave10 GV2: a name another service serves (the rest is the name itself)
+    if be.may_serve(name) {
+        if let Some((svc, obj)) = be.served(cx, dir, name, &[]) {
+            return Ok(ParentWalked::Redirect(Redirect { svc, obj, tail: Some(name_at as u32), text: Vec::new() }));
         }
     }
     let child = if name == b"." || name == b".." {

@@ -257,25 +257,61 @@ pub fn create(cx: &Cx, k: &Call, path: &[u8], flags: u32, mode: u32) -> Result<M
     if path.last() == Some(&b'/') {
         return Err(EISDIR);
     }
-    let start = k.start(c, path)?;
-    let p = match walk::walk_parent(&k.w, &k.who, start, path)? {
-        ParentWalked::Found(p) => p,
-        ParentWalked::Redirect(_) => return Err(KERNEL),
-    };
-    // The name exists, though the walk found nothing: a dangling symbolic link to make the
-    // target of (the kernel's), or another caller was faster
-    if let Some(ch) = p.child {
+    let mut start = k.start(c, path)?;
+    // wave10 GV2: a dangling symbolic link is followed to the name its target makes (as the
+    // kernel's `creation_target`, 40 links at most)
+    let mut target: Vec<u8>;
+    let mut at: &[u8] = path;
+    let mut links = 0;
+    let mut named: Vec<u8> = path.to_vec();
+    let p = loop {
+        let p = match walk::walk_parent(&k.w, &k.who, start, at)? {
+            ParentWalked::Found(p) => p,
+            ParentWalked::Redirect(_) => return Err(KERNEL),
+        };
+        // The name exists, though the walk found nothing: a dangling symbolic link to make
+        // the target of, or another caller was faster
+        let Some(ch) = p.child else { break p };
         let a = k.w.getattr(ch)?;
         if a.mode & rules::S_IFMT == rules::S_IFLNK && flags & (rules::O_NOFOLLOW | rules::O_EXCL) == 0 {
-            return Err(KERNEL);
+            links += 1;
+            if links > walk::SYMLOOP_MAX {
+                return Err(-40); // ELOOP
+            }
+            // (review 2: fs.protected_symlinks as Ubuntu sets it: a link in a sticky
+            // world-writable directory is followed only by its owner or the directory's)
+            if p.dir_attr.mode & 0o1002 == 0o1002 && a.uid != c.euid && a.uid != p.dir_attr.uid {
+                return Err(EACCES);
+            }
+            target = k.w.readlink(ch)?;
+            if target.is_empty() {
+                return Err(rules::ENOENT);
+            }
+            if target.last() == Some(&b'/') {
+                return Err(EISDIR);
+            }
+            // (review 2: the path the access policies judge is the link's target)
+            named = if target[0] == b'/' {
+                target.clone()
+            } else {
+                let mut d = match named.iter().rposition(|&b| b == b'/') {
+                    Some(i) => named[..=i].to_vec(),
+                    None => Vec::new(),
+                };
+                d.extend_from_slice(&target);
+                d
+            };
+            start = if target[0] == b'/' { walk::Start::Root } else { walk::Start::At(p.dir) };
+            at = &target;
+            continue;
         }
         return if flags & rules::O_EXCL != 0 { Err(EEXIST) } else { Ok(Made::Exists) };
-    }
+    };
     if p.name == b"." || p.name == b".." {
         return Err(EISDIR);
     }
     let who = &k.who;
-    let p = parent_checks(c, who, p, path, true)?;
+    let p = parent_checks(c, who, p, &named, true)?;
     if let Some(d) = policy::domain(c)? {
         policy::check_dir(&d, p.dir, ll::MAKE_REG)?;
     }

@@ -632,19 +632,116 @@ fn the_proc_directory_is_not_a_handle() {
 #[test]
 fn lookups_from_the_trees_served_by_name_are_the_kernels() {
     assert!(pseudo_path("/proc"));
-    assert!(pseudo_path("/dev/pts"));
-    assert!(pseudo_path("/sys/fs/cgroup"));
+    assert!(pseudo_path("/proc/self/fd"));
+    // (wave10 GV2: /sys and /dev are pool trees vfs-server walks)
+    assert!(!pseudo_path("/dev/pts"));
+    assert!(!pseudo_path("/sys/fs/cgroup"));
     assert!(!pseudo_path("/devices"));
     assert!(!pseudo_path("/home/dev"));
+    assert!(!pseudo_path("/procs"));
     let mut t = crate::fs::FdTable::new();
-    t.cwd_path = "/dev".into();
-    t.set_fd(3, Some(vnode(50, true, "/sys/class")));
+    t.cwd_path = "/proc/self".into();
+    t.set_fd(3, Some(vnode(50, true, "/proc/sys")));
     let mut c = LxCall::EMPTY;
     c.args[0] = 3;
     fill(&mut c, &t, Shape::At0, true).unwrap().unwrap();
     assert_ne!(c.fs_flags & LX_FS_FOREIGN, 0);
     assert_eq!(c.at_kind, LX_AT_OTHER);
 }
+
+// wave10 GV2 begin
+#[test]
+fn handles_in_sys_and_dev_are_pool_handles_with_their_tree() {
+    use super::fstree::*;
+    let mut t = crate::fs::FdTable::new();
+    t.cwd_path = "/sys/fs/cgroup/user.slice".into();
+    t.set_fd(3, Some(vnode(50, true, "/sys/class")));
+    t.set_fd(4, Some(vnode(51, false, "/dev/shm/x")));
+    t.set_fd(5, Some(vnode(52, false, "/etc/hosts")));
+    let mut c = LxCall::EMPTY;
+    c.args[0] = 3;
+    fill(&mut c, &t, Shape::At0, true).unwrap().unwrap();
+    assert_eq!(c.fs_flags & LX_FS_FOREIGN, 0);
+    assert_eq!(c.at_kind, LX_AT_DIR);
+    assert_eq!(c.at_ino, 50);
+    assert_eq!(at_of(c.fh_flags), TREE_SYS);
+    assert_eq!(c.fh_flags & 3, 2, "the open flags are kept");
+    assert_eq!(cwd_of(c.fs_flags), TREE_CGROUP);
+    let mut c = LxCall::EMPTY;
+    c.args[0] = 4;
+    fill(&mut c, &t, Shape::Handle, true).unwrap().unwrap();
+    assert_eq!((c.at_kind, at_of(c.fh_flags)), (LX_AT_FILE, TREE_DEV));
+    let mut c = LxCall::EMPTY;
+    c.args[0] = 5;
+    fill(&mut c, &t, Shape::Handle, true).unwrap().unwrap();
+    assert_eq!(at_of(c.fh_flags), TREE_POOL);
+}
+
+#[test]
+fn a_device_answer_is_coded_apart_from_handles_and_errors() {
+    let mut c = LxCall::EMPTY;
+    c.nr = 257;
+    let rdev = (136u64 << 8) | 3;
+    let r = dev_answer(&c, (LX_REDIR_DEV as u64, rdev));
+    assert!(r < -4200);
+    assert_eq!(dev_decode(r), Some((rdev, false)));
+    assert_eq!(fh_decode(r), None, "not a handle");
+    let r = dev_answer(&c, (LX_REDIR_DEV as u64, (8 << 8) | LX_REDIR_DEV_BLOCK));
+    assert_eq!(dev_decode(r), Some((8 << 8, true)));
+    // the largest number Linux encodes (12-bit major, 20-bit minor)
+    let big = 0xFFF_FFFF_FFFFu64 & ((1 << 40) - 1);
+    assert_eq!(dev_decode(dev_answer(&c, (LX_REDIR_DEV as u64, big))), Some((big, false)));
+    // (beyond the payload, or not an open: the kernel answers)
+    assert_eq!(dev_answer(&c, (LX_REDIR_DEV as u64, 1 << 41)), LX_TO_KERNEL);
+    c.nr = 4;
+    assert_eq!(dev_answer(&c, (LX_REDIR_DEV as u64, 3)), LX_TO_KERNEL);
+    for nr in [2, 85] {
+        c.nr = nr;
+        assert!(dev_decode(dev_answer(&c, (LX_REDIR_DEV as u64, 0x103))).is_some());
+    }
+    for v in [0i64, 5, -1, -4095, -4102, i64::MAX, i64::MIN, -(1i64 << 62), fh_answer(&LxCall { nr: 257, flags: LX_CALL_FHANSWER, ..LxCall::EMPTY }, (LX_REDIR_FH as u64, 7))] {
+        assert_eq!(dev_decode(v), None, "{v}");
+    }
+    assert_eq!(open_flags(2, &[0, 0o1101, 0, 0, 0, 0]), 0o1101);
+    assert_eq!(open_flags(257, &[0, 0, 0o2, 0, 0, 0]), 0o2);
+    assert_eq!(open_flags(85, &[0, 0o644, 0, 0, 0, 0]), 0o1101);
+}
+
+#[test]
+fn a_device_answer_opens_the_device_on_the_ordinary_path() {
+    let sim = world();
+    claim_nr(257);
+    let rdev = (1u64 << 8) | 3;
+    start(&sim, LXS_VFS, 400, 1, true, handler(move |s| {
+        s.set_redir_obj(rdev);
+        (LX_REDIR_DEV as i64, LX_REPLY_REDIRECT)
+    }));
+    let before = DEV_OPENS.load(Ordering::Relaxed);
+    crate::world::bkl_enter();
+    let r = forward(&frame(257, [AT_FDCWD as i64 as u64, p(), 0o2, 0, 0, 0]));
+    // (the host's stub device open answers ENXIO; what matters: no walk, the device code ran)
+    assert_eq!(r, Some(-6));
+    assert_eq!(DEV_OPENS.load(Ordering::Relaxed), before + 1);
+}
+
+#[test]
+fn the_initial_namespaces_fuse_mounts_are_written_through() {
+    crate::fake::user_space_on();
+    let mut m = LxNs0Fuse { req: 7, mountpoint: 40, root: (1 << 62) | (0x8001 << 40) | 1, flags: 6, uid: 1000, gid: 1000, other: 0, path_kind: LX_FHP_ABS, path_len: 0, fstype_len: 0, source_len: 0, pad: 0, path: [0; LX_FH_PATH_MAX], fstype: [0; LX_NS0FUSE_NAME_MAX], source: [0; LX_NS0FUSE_NAME_MAX] };
+    let p = b"/run/user/1000/../1000/doc";
+    m.path[..p.len()].copy_from_slice(p);
+    m.path_len = p.len() as u32;
+    let ptr = Box::leak(Box::new(m)) as *const LxNs0Fuse as u64;
+    // (a request not the service's: refused)
+    assert_eq!(ns0fuse(LX_NS0FUSE_ADD, ptr, &|_| false), ESRCH);
+    assert_eq!(ns0fuse(LX_NS0FUSE_ADD, ptr, &|_| true), 0);
+    let root = (1u64 << 62) | (0x8001 << 40) | 1;
+    assert!(crate::compat::linux::fuse::NS0_RECORDS.lock().iter().any(|r| r.0 == 40 && r.1 == root && r.2 == "/run/user/1000/doc"));
+    assert_eq!(ns0fuse(LX_NS0FUSE_REMOVE, root, &|_| true), 0);
+    assert_eq!(ns0fuse(LX_NS0FUSE_REMOVE, root, &|_| true), ENOENT);
+    assert_eq!(ns0fuse(9, 0, &|_| true), EINVAL);
+}
+// wave10 GV2 end
 
 
 #[test]

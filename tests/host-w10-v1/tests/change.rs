@@ -203,7 +203,9 @@ fn which_opens_are_served() {
     assert!(servable(O_TMPFILE_MASK | O_DIRECTORY | 2));
     assert!(!servable(O_TMPFILE_MASK | 2));
     assert!(!servable(O_TMPFILE_MASK | O_DIRECTORY | O_PATH));
-    assert!(!servable(O_CREAT | O_DIRECTORY | O_WRONLY));
+    // (wave10 GV2: answered EINVAL by vfs-server, `creat_dir_flags`)
+    assert!(servable(O_CREAT | O_DIRECTORY | O_WRONLY));
+    assert!(creat_dir_flags(O_CREAT | O_DIRECTORY | O_WRONLY));
 }
 
 #[test]
