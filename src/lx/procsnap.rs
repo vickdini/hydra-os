@@ -391,7 +391,13 @@ pub mod glue {
         }
 
         fn poll_events(&self) -> u32 {
-            READY
+            // wave11 GP: readable; writable only when opened for writing (as the kernel's
+            // own `/proc` files: a watcher of `mountinfo` must not see it ready for writing)
+            if self.acc == O_RDONLY {
+                0x1 | 0x40
+            } else {
+                READY
+            }
         }
 
         fn add_wait_queues(&self, _waits: &mut WaitSet) {}
@@ -417,6 +423,13 @@ pub mod glue {
         }
 
         // wave11 GP begin
+        fn edges(&self) -> Option<u64> {
+            // (always ready, as a file: an edge-triggered watch fires once, as the epoll code
+            // treats the kernel's own files; level-triggered, a watcher of `mountinfo` - the
+            // SDDM greeter's - spun and starved the compositor)
+            Some(0)
+        }
+
         fn proc_ident(&self) -> Option<([u64; 4], u32, String)> {
             Some((self.ident, self.mode, self.name.clone()))
         }

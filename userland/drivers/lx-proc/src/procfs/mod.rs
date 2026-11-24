@@ -157,6 +157,7 @@ pub fn redirected(cx: &Cx) -> Answer {
 }
 
 
+
 /// The `stat` family: a served file is a read-only regular file; `/proc/self` a link
 /// (`lstat`; followed it is a directory: the kernel's).
 fn stat(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {

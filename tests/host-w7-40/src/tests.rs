@@ -308,12 +308,12 @@ fn classify_sends_the_rest_to_the_kernel() {
     // `keys`, `max_user_namespaces`, another process's memory, `thread-self/`
     for t in [
         "net/tcp", "net", "self/net/tcp", "keys", "sys/user/max_user_namespaces", "self/mem", "self/task/5/mem", "self/fd/3/x", "self/cwd/etc",
-        "self/root/.flatpak-info", "self/exe/x", "self/../uptime", "../etc/passwd", "uptime/", "self/stat/", "thread-self/",
+        "self/root/.flatpak-info", "self/exe/x", "asound/card0/pcm0p/sub0/status", "self/../uptime", "../etc/passwd", "uptime/", "self/stat/", "thread-self/",
     ] {
         assert_eq!(p(t), Target::Kernel, "{:?}", t);
     }
     // ... and what is not there at all (the kernel answered ENOENT for them too)
-    for t in ["nothing", "sys/kernel/nothing", "pressure/cpu", "self/ctty", "self/.directory", "self/smaps", "12a/stat", "-1/stat", "12345678901/stat", "0/stat", "123/task/x/stat", "123/task/0/stat", "asound/nothing", "self/fdinfo/x", "self/ns/nothing"] {
+    for t in ["nothing", "sys/kernel/nothing", "pressure/cpu", "self/ctty", "self/.directory", "self/smaps", "12a/stat", "-1/stat", "12345678901/stat", "0/stat", "123/task/x/stat", "123/task/0/stat", "self/fdinfo/x", "self/ns/nothing"] {
         assert_eq!(p(t), Target::Missing, "{:?}", t);
     }
     assert_eq!(p("self"), Target::SelfLink(false));

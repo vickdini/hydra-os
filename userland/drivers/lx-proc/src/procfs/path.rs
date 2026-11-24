@@ -552,9 +552,11 @@ pub fn classify(obj: u64, tail: &[u8]) -> Target {
         ["asound"] => Target::Dir(Dir::Asound),
         ["asound", rest @ ..] => {
             let joined = rest.join("/");
+            // (the sound card's per-stream files, `card0/pcm0p/sub0/status`, ...: the kernel's
+            // card code names them; its relayed text is not made for them here)
             match ASOUND.iter().position(|n| *n == joined) {
                 Some(i) => file(File::Asound(i as u8)),
-                None => Target::Missing,
+                None => Target::Kernel,
             }
         }
         // wave11 GP end
