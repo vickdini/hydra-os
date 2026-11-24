@@ -80,3 +80,17 @@ fn console_keys_while_tty_server_is_down() {
     assert_eq!(fallback_signal(Some('a')), None);
     assert_eq!(fallback_signal(None), None);
 }
+
+// wave11 GR: a console read tty-server died serving is sent again (at most 3 times)
+#[test]
+fn console_read_sent_again_only_when_tty_server_died() {
+    const EIO: i64 = -5;
+    const ENOSYS: i64 = -38;
+    assert!(read_again(EIO, true, 0), "died under the read: EIO is sent again");
+    assert!(read_again(ENOSYS, true, 2), "no instance there: sent again");
+    assert!(!read_again(EIO, true, 3), "at most 3 times");
+    assert!(!read_again(EIO, false, 0), "a live tty-server's EIO (hang-up) is the caller's");
+    assert!(!read_again(5, true, 0), "data read: never again");
+    assert!(!read_again(0, true, 0), "end of file: never again");
+    assert!(!read_again(-11, true, 0), "EAGAIN is the caller's");
+}

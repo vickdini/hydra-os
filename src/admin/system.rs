@@ -269,14 +269,57 @@ pub fn irqs(out: &mut Vec<u8>) {
     }
 }
 
+// wave11 GR begin
+/// Service kills asked for later (`service kill NAME after S`): name, when (ms since boot).
+static DELAYED_KILLS: spin::Mutex<Vec<(alloc::string::String, u64)>> = spin::Mutex::new(Vec::new());
+/// Whether the task doing them runs.
+static KILLER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The kernel task doing the delayed service kills; it ends when none is left.
+fn delayed_killer() {
+    loop {
+        let now = crate::arch::pit::uptime_ms();
+        let due: Vec<alloc::string::String> = {
+            let mut l = DELAYED_KILLS.lock();
+            let due = l.iter().filter(|(_, at)| *at <= now).map(|(n, _)| n.clone()).collect();
+            l.retain(|(_, at)| *at > now);
+            if l.is_empty() && Vec::<alloc::string::String>::is_empty(&due) {
+                KILLER.store(false, core::sync::atomic::Ordering::Release);
+                return;
+            }
+            due
+        };
+        for n in due {
+            match crate::task::supervisor::kill_service_by_name(&n) {
+                Ok(pid) => crate::kprintln!("[admin] delayed kill of service '{}' (process {})", n, pid.0),
+                Err(e) => crate::kprintln!("[admin] delayed kill of service '{}' failed: {}", n, e),
+            }
+            crate::task::supervisor::supervisor_tick();
+        }
+        crate::task::sleep_ms(100);
+    }
+}
+// wave11 GR end
+
 /// `ADMIN_SERVICE_CTL`.
 ///
 /// # Returns
 /// The process id started (restart, start) or ended (kill); 0 for a sweep.
-pub fn service_ctl(code: u64, name: &str) -> Result<u64, Failure> {
+pub fn service_ctl(code: u64, name: &str, delay_s: u64) -> Result<u64, Failure> {
     use crate::task::supervisor as sv;
     match code {
         SVCCTL_RESTART => sv::restart_service_by_name(name).map(|t| t.0).map_err(|e| Message(EIO, e)),
+        // wave11 GR: `service kill NAME after S`: the kill comes S seconds later, from a
+        // kernel task, so the console can run a program meanwhile (kill tests of a call in
+        // flight, e.g. a console read at a tty-server crash)
+        SVCCTL_KILL if delay_s > 0 => {
+            let at = crate::arch::pit::uptime_ms() + delay_s.min(3600) * 1000;
+            DELAYED_KILLS.lock().push((alloc::string::String::from(name), at));
+            if !KILLER.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                crate::task::spawn("svc-killer", delayed_killer, crate::task::TaskPriority::Normal);
+            }
+            Ok(0)
+        }
         SVCCTL_KILL => {
             let pid = sv::kill_service_by_name(name).map_err(|e| Message(EIO, e))?;
             // A watchdog sweep at once, to show the automatic restart

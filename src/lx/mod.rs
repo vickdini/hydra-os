@@ -2801,7 +2801,8 @@ fn server_gone(h: SvcId) {
         crate::compat::linux::bpf::set_server_device_programs(&[]);
     }
     // wave6 G21: a Transparent restart keeps the objects for the new instance to adopt
-    if !resend {
+    // (wave11 GR: so does vfs-server's ladder step to FailObjects: `objects_outlive`)
+    if !resend && !restart::objects_outlive(h) {
         obj::offline(x);
         // wave8 GH: a device service's objects failed: its devices are announced "removed"
         hotplug::objects_failed(h);
@@ -2974,7 +2975,7 @@ pub fn dump() {
         }
         for (i, r) in s.reqs.iter().enumerate() {
             if r.state != RState::Free {
-                w(&format!("[lx] {} req slot {} id {:#x} {:?} client {} result {}\n", name, i, r.id, r.state, r.client, r.result));
+                w(&format!("[lx] {} req slot {} id {:#x} {:?} client {} result {} interrupted {} early {}\n", name, i, r.id, r.state, r.client, r.result, r.interrupted, r.early));
             }
         }
     }

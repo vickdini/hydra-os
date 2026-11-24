@@ -4,7 +4,7 @@
 //! corruption.
 
 use hydra_hosttests::kept::{crc32c, Kept};
-use hydra_hosttests::lx::restart_policy::{after_crash, idempotent, stale_errno, Decision, Ladder, RestartClass, LADDER_WINDOW_MS, LX_RESEND, LX_RESEND_MAYBE};
+use hydra_hosttests::lx::restart_policy::{after_crash, idempotent, objects_outlive, stale_errno, Decision, Ladder, RestartClass, LADDER_WINDOW_MS, LX_RESEND, LX_RESEND_MAYBE};
 
 const T: RestartClass = RestartClass::Transparent;
 const F: RestartClass = RestartClass::FailObjects;
@@ -453,4 +453,27 @@ fn idempotent_marks_proc_remake() {
     assert!(idempotent(0x6793, &[17, 1234, 0, 99, 0, 0]));
     // its neighbours are not
     assert!(!idempotent(0x6794, &[0; 6]));
+}
+
+// wave11 GR: objects outlive a Transparent restart, and vfs-server's ladder step
+#[test]
+fn objects_outlive_transparent_and_the_ladder_step_of_a_service_that_takes_back_unkept() {
+    // a Transparent restart: always (whatever the service)
+    assert!(objects_outlive(d(T, false, true), T, false));
+    assert!(objects_outlive(d(T, false, true), T, true));
+    // the ladder's second crash within 30 s (Transparent -> FailObjects, kept state reset)
+    let mut l = Ladder::new(T);
+    l.crash(1_000);
+    l.restarted(1_000);
+    let step = l.crash(2_000);
+    assert_eq!(step, d(F, true, true));
+    assert!(objects_outlive(step, T, true), "vfs-server takes its objects back without kept records");
+    assert!(!objects_outlive(step, T, false), "other services: their objects fail, as before");
+    // a service configured FailObjects never keeps them
+    assert!(!objects_outlive(d(F, false, true), F, true));
+    // not restarted (the third crash within 30 s), or EndLinux: never
+    let stop = l.crash(3_000);
+    assert!(!stop.restart);
+    assert!(!objects_outlive(stop, T, true));
+    assert!(!objects_outlive(d(E, false, true), E, true));
 }

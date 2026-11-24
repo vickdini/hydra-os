@@ -54,6 +54,7 @@ const EBUSY: i64 = -16;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 const EMFILE: i64 = -24;
+const ERANGE: i64 = -34; // wave11 GR
 
 const O_NONBLOCK: u32 = 0o4000;
 const O_CLOEXEC: u32 = 0o2000000;
@@ -788,6 +789,16 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
             crate::compat::linux::vfs::copy_out(c, p).map_or_else(|e| e, |()| p.len() as i64)
         }
         LX_OBJ_BPF_DEVICE => {
+            // wave11 GR begin: c = 1 reads the list the kernel holds back (into a, cap b):
+            // its length, or ERANGE when it does not fit
+            if c == 1 {
+                let raw = crate::compat::linux::bpf::server_device_programs_raw();
+                if raw.len() as u64 > b {
+                    return ERANGE;
+                }
+                return crate::compat::linux::vfs::copy_out(a, &raw).map_or_else(|e| e, |()| raw.len() as i64);
+            }
+            // wave11 GR end
             if b > 1 << 20 {
                 return EINVAL;
             }

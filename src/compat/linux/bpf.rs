@@ -676,6 +676,17 @@ pub fn device_check(kind: u32, major: u32, minor: u32, access: u32) -> Result<()
 /// cannot ask the server): the server hands over the whole list whenever it changes.
 static SERVER_DEVICE: Mutex<Vec<(String, Arc<Prog>)>> = Mutex::new(Vec::new());
 static SERVER_ANY_DEVICE: AtomicBool = AtomicBool::new(false);
+// wave11 GR begin
+/// The list as the server sent it (the last one accepted): a restarted lx-sec whose kept
+/// state was reset reads it back ([`server_device_programs_raw`]) and rebuilds its records.
+static SERVER_DEVICE_RAW: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+/// The device-program list the kernel enforces now, in the form the server sent it
+/// (`LX_OBJ_BPF_DEVICE` with `c = 1`; empty if there is none).
+pub fn server_device_programs_raw() -> Vec<u8> {
+    SERVER_DEVICE_RAW.lock().clone()
+}
+// wave11 GR end
 
 /// Replaces the server's device programs with the list in `raw` (`LX_OBJ_BPF_DEVICE`:
 /// entries of `[u32 cgroup length, cgroup, u32 instruction count, instructions]`). Each
@@ -713,6 +724,7 @@ pub fn set_server_device_programs(raw: &[u8]) -> i64 {
     }
     SERVER_ANY_DEVICE.store(!list.is_empty(), Ordering::Relaxed);
     *SERVER_DEVICE.lock() = list;
+    *SERVER_DEVICE_RAW.lock() = raw.to_vec(); // wave11 GR
     0
 }
 

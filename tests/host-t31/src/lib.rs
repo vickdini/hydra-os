@@ -674,6 +674,10 @@ pub mod compat {
             pub fn parent_of(pid: u64) -> u64 {
                 *crate::fake::PARENTS.lock().unwrap().get(&pid).unwrap_or(&1)
             }
+            /// wave11 GR: the threads the test put in `fake::SIGNALLED`.
+            pub fn signal_pending_for(tid: u64, _pid: u64) -> bool {
+                crate::fake::SIGNALLED.lock().unwrap().contains(&tid)
+            }
         }
         /// *stub* Process accounting.
         pub mod admin {

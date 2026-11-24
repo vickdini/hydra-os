@@ -292,6 +292,9 @@ fn refresh(st: &State, slots: &[u32], bump: bool) {
 // Start and restart
 // ----------------------------------------------------------------------
 
+/// wave11 GR: the owner of an inotify instance taken back without its records (unknown).
+const REBORN_UID: u32 = u32::MAX;
+
 /// Before going online: the window, the kept records and the previous instance's objects.
 pub fn start(win: *mut u8) {
     WIN.store(win as u64, Ordering::Release);
@@ -330,6 +333,7 @@ pub fn start(win: *mut u8) {
     }
     let groups: BTreeMap<u32, KRec> = indexed.iter().filter(|(_, r)| matches!(r, KRec::InGroup { .. } | KRec::FanGroup { .. })).map(|(_, r)| (r.slot(), *r)).collect();
     let mut live: Vec<u32> = Vec::new();
+    let mut reborn: Vec<u32> = Vec::new(); // wave11 GR
     for o in &found {
         let ours = o.kind == LX_OBJ_KIND_INOTIFY || o.kind == LX_OBJ_KIND_FANOTIFY;
         let kept_kind = match groups.get(&o.slot) {
@@ -339,6 +343,14 @@ pub fn start(win: *mut u8) {
         };
         if ours && kept_kind == o.kind {
             live.push(o.slot);
+        } else if o.kind == LX_OBJ_KIND_INOTIFY {
+            // wave11 GR: an inotify instance whose records were lost (the restart ladder
+            // reset the kept state after a second crash within 30 s) comes back empty, with
+            // an overflow event: its watches are gone (as if removed), but the program's
+            // descriptor keeps working and new watches work; failing it instead made
+            // programs that read it (GLib, KDirWatch, Firefox) crash
+            live.push(o.slot);
+            reborn.push(o.slot);
         } else if ours {
             // (an instance or group whose records were lost: its descriptor fails from now
             // on; objects of other kinds are their modules': FUSE's `restart_init`)
@@ -365,8 +377,20 @@ pub fn start(win: *mut u8) {
                 g.overflow();
                 st.fans.insert(s, g);
             }
+            // wave11 GR: taken back without its records (owner unknown: counted for no
+            // user's limits); its record is written again for the next restart
+            _ if reborn.contains(&s) => {
+                let mut i = Inotify::new();
+                i.uid = REBORN_UID;
+                i.overflow();
+                st.inos.insert(s, i);
+                st.keep((s, 0, 0), KRec::InGroup { slot: s, uid: REBORN_UID });
+            }
             _ => {}
         }
+    }
+    if !reborn.is_empty() && adopted {
+        println!("[vfs-server] notify: {} inotify instances taken back without their records (kept state reset): empty, with an overflow event", reborn.len());
     }
     // Watches and marks of the groups taken back; every other record goes
     let (mut watches, mut marks) = (0, 0);

@@ -1815,6 +1815,19 @@ impl Scheduler {
             return false;
         }
         // wave6 G20 end
+        // wave11 GR begin: a signal posted while this task ran on its way here (a caller
+        // between placing its call and this switch) found it running and only marked it
+        // (`wake_pending`): blocking it now would lose that wake-up. A call answered
+        // "pending" never wakes its caller, so it slept with the signal pending (the ptrace
+        // attach/detach hang: SIGSTOP never stopped a child waiting in a pipe read). The
+        // caller then waits the ordinary way, which looks for signals after blocking.
+        if !keep {
+            let t = &self.tasks[curr_idx];
+            if crate::compat::linux::proc::signal_pending_for(t.id.0, t.tgid) {
+                return false;
+            }
+        }
+        // wave11 GR end
         let was = self.tasks[next_idx].state; // wave6 G20
         self.tasks[next_idx].state = TaskState::Ready;
         if !self.can_run(next_idx, me) {

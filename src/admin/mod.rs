@@ -285,7 +285,7 @@ fn run(call: &AdminCall, input: &[u8]) -> Result<Vec<u8>, Failure> {
         ADMIN_SERVICE_LIST => system::services(&mut out),
         ADMIN_IRQ_LIST => system::irqs(&mut out),
         ADMIN_SERVICE_CTL => {
-            let pid = system::service_ctl(a[0], input_str(input)?)?;
+            let pid = system::service_ctl(a[0], input_str(input)?, a[1])?; // wave11 GR: a[1] = delay (s)
             out.extend_from_slice(&pid.to_le_bytes());
         }
         ADMIN_IOMMU => system::iommu(a[0])?,

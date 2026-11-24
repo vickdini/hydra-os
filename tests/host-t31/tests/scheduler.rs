@@ -914,6 +914,13 @@ fn direct_call_refuses_whenever_the_fast_path_does_not_apply() {
     assert!(!try_call(w, 0, std::ptr::null()).0);
     assert_eq!(state(w), Some(TaskState::Blocked), "nothing changed");
     block(0);
+    // wave11 GR: a signal posted while the caller still ran (it only marked it): no switch,
+    // the caller waits the ordinary way and sees the signal
+    fake::SIGNALLED.lock().unwrap().push(0);
+    assert!(!try_call(w, 0, std::ptr::null()).0, "a signal is pending for the caller");
+    assert_eq!(state(w), Some(TaskState::Blocked), "nothing changed");
+    assert_eq!(state(0), Some(TaskState::Blocked));
+    fake::SIGNALLED.lock().unwrap().clear();
     // a caller to resume first, or a driver call in progress
     let s = spawn("srv", TaskPriority::Normal);
     SCHEDULER.lock().begin_handoff(s, u64::MAX);
