@@ -157,12 +157,8 @@ pub enum FileDescriptor {
     PipeRead(Arc<Mutex<PipeBuffer>>),
     /// Write end of an anonymous unidirectional [`PipeBuffer`].
     PipeWrite(Arc<Mutex<PipeBuffer>>),
-    /// Legacy Hydra-native connected/listening Unix domain socket.
-    Socket(Arc<Mutex<crate::compat::linux::socket::UnixSocket>>),
     /// Linux `epoll` readiness multiplexing instance (`epoll_create1`).
     Epoll(Arc<Mutex<crate::compat::linux::epoll::EpollInstance>>),
-    /// Linux event notification counter (`eventfd2`).
-    EventFd(Arc<Mutex<crate::compat::linux::eventfd::EventFd>>),
     /// Anonymous RAM-backed file created via `memfd_create`.
     MemFd {
         /// Reference-counted shared memory buffer.
@@ -172,18 +168,6 @@ pub enum FileDescriptor {
     },
     /// Open ZFS inode managed through the Linux VFS layer (`openat`).
     Vnode(Arc<Mutex<OpenFile>>),
-    /// Internet (`AF_INET` TCP/UDP) socket managed by the network stack.
-    Inet(Arc<Mutex<crate::compat::linux::inet::InetSocket>>),
-    /// Master (`/dev/ptmx`) or slave (`/dev/pts/N`) end of a pseudo-terminal pair.
-    Pty(Arc<crate::compat::linux::pty::PtyFile>),
-    /// Signal delivery file descriptor (`signalfd4`).
-    SignalFd(Arc<crate::compat::linux::signalfd::SignalFd>),
-    /// Linux `AF_UNIX` stream/datagram socket supporting SCM_RIGHTS ancillary data.
-    Unix(Arc<crate::compat::linux::unix::UnixSocket>),
-    /// POSIX interval timer exposed as a readable file descriptor (`timerfd_create`).
-    TimerFd(Arc<crate::compat::linux::timerfd::TimerFd>),
-    /// Process reference file descriptor (`pidfd_open` / `CLONE_PIDFD`).
-    PidFd(Arc<crate::compat::linux::pidfd::PidFd>),
     /// Character device driven by a kernel driver (DRM, evdev) or a netlink socket.
     Device(Arc<dyn crate::compat::linux::chardev::CharDevice>),
     /// Path-addressed file handle used for synthetic pseudo-files (`/dev`, `/proc`) and native opens.
@@ -322,17 +306,9 @@ impl FileDescriptor {
             FileDescriptor::PipeRead(a) => of(a),
             // The two ends share one buffer: the low bit (Arcs are aligned) tells them apart
             FileDescriptor::PipeWrite(a) => of(a) | 1,
-            FileDescriptor::Socket(a) => of(a),
             FileDescriptor::Epoll(a) => of(a),
-            FileDescriptor::EventFd(a) => of(a),
             FileDescriptor::MemFd { memfd, .. } => of(memfd),
             FileDescriptor::Vnode(a) => of(a),
-            FileDescriptor::Inet(a) => of(a),
-            FileDescriptor::Pty(a) => of(a),
-            FileDescriptor::SignalFd(a) => of(a),
-            FileDescriptor::Unix(a) => of(a),
-            FileDescriptor::TimerFd(a) => of(a),
-            FileDescriptor::PidFd(a) => of(a),
             FileDescriptor::Device(a) => of(a),
             // Held by value: the description is its shared cursor (wave7 G7-7)
             FileDescriptor::File { cursor, .. } => cursor.id(),
@@ -394,14 +370,6 @@ impl FileDescriptor {
             FileDescriptor::PipeWrite(_) => {
                 Err("Cannot read from write end of pipe")
             }
-            FileDescriptor::Socket(sock) => {
-                let mut s = sock.lock();
-                s.read(buf)
-            }
-            FileDescriptor::EventFd(efd) => {
-                let mut e = efd.lock();
-                e.read(buf)
-            }
             FileDescriptor::Epoll(_) => {
                 Err("Cannot read from epoll file descriptor")
             }
@@ -412,12 +380,6 @@ impl FileDescriptor {
                 let mut m = memfd.lock();
                 m.read(buf)
             }
-            FileDescriptor::Inet(_) => Err("Internet sockets are read through the Linux socket layer"),
-            FileDescriptor::Pty(_) => Err("Pseudo-terminals are read through the Linux terminal layer"),
-            FileDescriptor::SignalFd(_) => Err("signalfd is read through the Linux layer"),
-            FileDescriptor::Unix(_) => Err("Unix sockets are read through the Linux socket layer"),
-            FileDescriptor::TimerFd(_) => Err("read through the Linux layer"),
-            FileDescriptor::PidFd(_) => Err("pidfds are not readable"),
             FileDescriptor::Device(_) => Err("devices are read through the Linux layer"),
             FileDescriptor::Vnode(file) => {
                 let mut f = file.lock();
@@ -576,14 +538,6 @@ impl FileDescriptor {
                 let mut p = pipe.lock();
                 p.write(data)
             }
-            FileDescriptor::Socket(sock) => {
-                let mut s = sock.lock();
-                s.write(data)
-            }
-            FileDescriptor::EventFd(efd) => {
-                let mut e = efd.lock();
-                e.write(data)
-            }
             FileDescriptor::Epoll(_) => {
                 Err("Cannot write to epoll file descriptor")
             }
@@ -594,14 +548,6 @@ impl FileDescriptor {
                 let mut m = memfd.lock();
                 m.write(data)
             }
-            FileDescriptor::Inet(_) => Err("Internet sockets are written through the Linux socket layer"),
-            // Kernel output to a process whose stdout is a pseudo-terminal (never waits:
-            // callers may hold the scheduler lock)
-            FileDescriptor::Pty(p) => Ok(p.write_nowait(data)),
-            FileDescriptor::SignalFd(_) => Err("signalfd is not writable"),
-            // Kernel output to a process whose stdout is a socket: best effort, never waits
-            FileDescriptor::Unix(_) => Ok(data.len()),
-            FileDescriptor::TimerFd(_) | FileDescriptor::PidFd(_) => Err("not writable"),
             FileDescriptor::Device(_) => Err("devices are written through the Linux layer"),
             FileDescriptor::Vnode(file) => {
                 let mut f = file.lock();
@@ -650,32 +596,7 @@ impl FileDescriptor {
             FileDescriptor::PipeRead(p) | FileDescriptor::PipeWrite(p) => {
                 waits.add(QueueRef::Shared(p.lock().wq.clone()));
             }
-            FileDescriptor::Socket(sock) => match &sock.lock().role {
-                crate::compat::linux::socket::UnixSocketRole::Connected { rx, tx, .. } => {
-                    waits.add(QueueRef::Shared(rx.lock().wq.clone()));
-                    waits.add(QueueRef::Shared(tx.lock().wq.clone()));
-                }
-                _ => waits.polled = true,
-            },
-            FileDescriptor::Pty(p) => waits.add(QueueRef::Shared(p.pty.wq.clone())),
-            // Posting a signal wakes every wait of the process
-            FileDescriptor::SignalFd(_) => {}
-            FileDescriptor::Unix(s) => s.add_wait_queues(waits),
-            FileDescriptor::TimerFd(t) => {
-                waits.add(QueueRef::Shared(t.wq.clone()));
-                waits.add_deadline(t.clone());
-            }
-            FileDescriptor::PidFd(_) => waits.add(QueueRef::Static(&crate::compat::linux::pidfd::EXIT_WQ)),
             FileDescriptor::Device(d) => d.add_wait_queues(waits),
-            FileDescriptor::EventFd(e) => waits.add(QueueRef::Shared(e.lock().wq.clone())),
-            FileDescriptor::Inet(s) => {
-                let mut s = s.lock();
-                match s.wait_queue() {
-                    Some(q) if crate::net::client::service_running() => waits.add(QueueRef::Shared(q)),
-                    Some(_) => waits.polled = true,
-                    None => waits.polled = true,
-                }
-            }
             // Always ready
             FileDescriptor::Vnode(_) | FileDescriptor::MemFd { .. } | FileDescriptor::File { .. } => {}
             // A nested epoll instance's readiness changes are not announced
@@ -710,24 +631,12 @@ impl FileDescriptor {
                 if p.readers_count() == 0 { ev |= 0x0008; }  // EPOLLERR
                 ev
             }
-            FileDescriptor::Socket(sock) => {
-                sock.lock().poll_events()
-            }
-            FileDescriptor::EventFd(efd) => {
-                efd.lock().poll_events()
-            }
             FileDescriptor::File { readable, writable, .. } => {
                 let mut ev = 0;
                 if *readable { ev |= 0x0001; }
                 if *writable { ev |= 0x0004; }
                 ev
             }
-            FileDescriptor::Inet(s) => s.lock().poll_events(),
-            FileDescriptor::Pty(p) => p.poll_events(),
-            FileDescriptor::SignalFd(s) => s.poll_events(),
-            FileDescriptor::Unix(s) => s.poll_events(),
-            FileDescriptor::TimerFd(t) => t.poll_events(),
-            FileDescriptor::PidFd(p) => p.poll_events(),
             FileDescriptor::Device(d) => d.poll_events(),
             // Regular and anonymous files are always ready
             FileDescriptor::Vnode(_) => 0x0001 | 0x0004,
@@ -1024,17 +933,9 @@ impl FdTable {
             FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr => "console",
             FileDescriptor::PipeRead(_) => "pipe-r",
             FileDescriptor::PipeWrite(_) => "pipe-w",
-            FileDescriptor::Socket(_) => "socket",
             FileDescriptor::Epoll(_) => "epoll",
-            FileDescriptor::EventFd(_) => "eventfd",
             FileDescriptor::MemFd { .. } => "memfd",
             FileDescriptor::Vnode(_) => "vnode",
-            FileDescriptor::Inet(_) => "inet",
-            FileDescriptor::Pty(_) => "pty",
-            FileDescriptor::SignalFd(_) => "signalfd",
-            FileDescriptor::Unix(_) => "unix",
-            FileDescriptor::TimerFd(_) => "timerfd",
-            FileDescriptor::PidFd(_) => "pidfd",
             FileDescriptor::Device(_) => "device",
             FileDescriptor::File { .. } => "file",
         };
@@ -1230,10 +1131,6 @@ impl FdTable {
             }
             FileDescriptor::PipeWrite(pipe) => {
                 pipe.lock().drop_writer();
-            }
-            FileDescriptor::Socket(sock) => {
-                let mut s = sock.lock();
-                let _ = s.shutdown(crate::compat::linux::socket::SHUT_RDWR);
             }
             FileDescriptor::Vnode(f) if by_owner => {
                 let ino = f.lock().ino;

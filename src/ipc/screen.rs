@@ -134,12 +134,10 @@ fn status_get(i: usize) -> u32 {
 }
 
 // wave8 GD begin: the routing call agreed with Group I (NOTES.md, wave 8): one place
-/// Input goes to the desktop session (`on`) or back to the console (held keys released).
+/// Input goes to the desktop session (`on`) or back to the console (the input service
+/// releases held keys when the routing goes off).
 fn route_input(on: bool) {
     crate::compat::linux::evdev::set_routing(on);
-    if !on {
-        crate::compat::linux::evdev::release_held_keys();
-    }
 }
 // wave8 GD end
 

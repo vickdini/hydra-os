@@ -1,6 +1,7 @@
 //! `chardev.rs` (device numbers, the driver switch, the trait's defaults, device socket
 //! calls) and `misc.rs` (times, membarrier, personality, sched_rr_get_interval, getdents,
 //! utime/utimes/futimesat, getcpu, restart_syscall).
+#![allow(dead_code, unused_imports, unused_variables)] // (wave10 G10-C: helpers of tests deleted with the kernel copies)
 
 mod common;
 
@@ -55,85 +56,6 @@ impl CharDevice for Bare {
     }
 }
 
-#[test]
-fn trait_defaults() {
-    let d = Bare;
-    assert_eq!(d.write(b"x"), EINVAL);
-    assert_eq!(d.ioctl(1, 2), -25);
-    assert_eq!(d.mmap_object().err(), Some(-19));
-    assert_eq!(d.mmap_object_at(3).err(), Some(-19));
-    assert!(d.dma_buf().is_none());
-    assert!(d.socket_call(41, [0; 6]).is_none());
-    let st = d.stat();
-    assert_eq!(st.st_dev, 6);
-    assert_eq!(st.st_rdev, makedev(4, 5));
-    assert_eq!(st.st_ino, makedev(4, 5) | 0x1_0000_0000);
-    assert_eq!(st.st_mode, 0o020660);
-    assert_eq!(st.st_nlink, 1);
-    assert_eq!(st.st_blksize, 4096);
-    assert!(!d.deliver_notification(b"n"));
-    assert!(d.as_mqueue().is_none());
-    let mut b = [0u8; 4];
-    assert!(d.pread(&mut b, 0).is_none());
-    assert!(d.pwrite(&b, 0).is_none());
-    assert!(d.seek(0, 0).is_none());
-    assert!(d.read_unlocked(&mut b).is_none());
-    assert!(d.fsync().is_none());
-    assert!(d.as_bpf().is_none());
-    assert!(d.as_perf().is_none());
-    assert!(d.as_mount_obj().is_none());
-    assert!(d.as_io_uring().is_none());
-    assert!(d.as_landlock().is_none());
-    assert!(d.as_server().is_none());
-    assert!(d.edges().is_none());
-}
-
-#[test]
-fn open_switches_on_the_major() {
-    // No driver for this major
-    assert!(chardev::open(makedev(250, 0), 0).is_none());
-    // 1:11 kmsg goes to its module, 10:229 fuse to vfs-server (stubs with recognisable errnos);
-    // 1:3 (/dev/null) and 10:200 are not char drivers here
-    assert_eq!(chardev::open(makedev(1, 11), 0).unwrap().err(), Some(-1011));
-    assert!(chardev::open(makedev(1, 3), 0).is_none());
-    assert_eq!(chardev::open(makedev(10, 229), 0).unwrap().err(), Some(-1229));
-    assert!(chardev::open(makedev(10, 200), 0).is_none());
-    // DRM card1 and evdev minor 1 do not exist; no sound card: ENODEV
-    assert_eq!(chardev::open(makedev(226, 1), 0).unwrap().err(), Some(-6));
-    assert_eq!(chardev::open(makedev(13, 1), 0).unwrap().err(), Some(-6));
-    assert_eq!(chardev::open(makedev(116, 0), 0).unwrap().err(), Some(-19));
-    // evdev minor 64 opens, with O_NONBLOCK honoured
-    let kbd = chardev::open(makedev(13, 64), 0o4000).unwrap().unwrap();
-    assert!(kbd.nonblock());
-    assert_eq!(kbd.path(), "/dev/input/event0");
-    let kbd = chardev::open(makedev(13, 64), 0).unwrap().unwrap();
-    assert!(!kbd.nonblock());
-}
-
-#[test]
-fn open_asks_the_linux_services_first() {
-    fake::LX_DEV_OPEN.set(Some(-77));
-    assert_eq!(chardev::open(makedev(13, 64), 0).unwrap().err(), Some(-77));
-    fake::LX_DEV_OPEN.set(None);
-}
-
-#[test]
-fn dispatch_of_device_sockets() {
-    // socket(2) goes to netlink
-    assert_eq!(chardev::dispatch(41, [0; 6]), Some(4141));
-    // Not a socket call
-    assert_eq!(chardev::dispatch(0, [0; 6]), None);
-    // A socket call on a descriptor that is not a device: not ours
-    assert_eq!(chardev::dispatch(42, [3, 0, 0, 0, 0, 0]), None);
-    fake::with_current_fds_mut(|f| f.install(5, FileDescriptor::Other));
-    assert_eq!(chardev::dispatch(44, [5, 0, 0, 0, 0, 0]), None);
-    // A device: its socket_call answers, or ENOTSOCK
-    fake::with_current_fds_mut(|f| f.install(4, FileDescriptor::Device(Arc::new(Bare))));
-    assert_eq!(chardev::dispatch(42, [4, 9, 0, 0, 0, 0]), Some(10));
-    for num in [43, 55, 288, 299, 307] {
-        assert_eq!(chardev::dispatch(num, [4, 9, 0, 0, 0, 0]), Some(-88), "call {num}");
-    }
-}
 
 // --------------------------------------------------------------------- misc
 

@@ -39,9 +39,6 @@ fn socket_nodes() {
     let ino = vfs::make_socket_node(b"/run/user/bus").unwrap();
     assert_eq!(memfs::attr(ino).mode, 0o140755);
     assert_eq!(vfs::socket_node_for_connect(b"/run/user/bus").unwrap(), ino);
-    assert_eq!(vfs::socket_key(b"/run/user/bus").unwrap(), format!("ino:{}", ino).into_bytes());
-    assert_eq!(vfs::socket_key(b"/run/user/none").unwrap(), b"0:/run/user/none".to_vec());
-    assert_eq!(vfs::socket_ino_key(5), b"ino:5".to_vec());
     assert!(vfs::path_exists(b"/run/user/bus"));
     assert!(!vfs::path_exists(b"/run/user/none"));
     // connect to something that is not a socket, or missing

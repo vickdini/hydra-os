@@ -173,6 +173,7 @@ const EBUSY: i64 = -16;
 const EINVAL: i64 = -22;
 const ENAMETOOLONG: i64 = -36;
 const ENOSYS: i64 = -38;
+const EAFNOSUPPORT: i64 = -97;
 const ELOOP: i64 = -40;
 
 /// A server object at a descriptor, held for the length of a forwarded call: the device,
@@ -414,12 +415,6 @@ fn vfs_ctx(c: &mut LxCall) {
     });
 }
 // wave7 G7-1 end
-/// Whether step 4's descriptors (Unix sockets, pipes, eventfd, timerfd, signalfd, pidfd)
-/// are the service's: the kernel's dispatchers send the calls that make them there.
-pub fn step4() -> bool {
-    // (wave6 G21: also while the service restarts: the calls wait for it)
-    usable(LXS_IPC)
-}
 
 /// The boot entry's `lx` words, kept for [`init`].
 static BOOT_WORDS: Mutex<([u8; 256], usize)> = Mutex::new(([0; 256], 0));
@@ -697,11 +692,16 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
 fn forward_svc(frame: &SyscallFrame, nr: u64, e: u32) -> Option<i64> {
     // wave7 G7-2 end
     if e & T_FAMILY != 0 {
-        // Routed per call (Group 12): a family whose service is not online is the kernel's
+        // Routed per call (Group 12): a family no service has is the kernel's (AF_PACKET, ...)
         let s = family_svc(frame.rdi);
-        // (wave6 G21: a restarting service's callers wait for it)
-        if s == 0 || !usable(s) {
+        if s == 0 {
             return None;
+        }
+        // (wave6 G21: a restarting service's callers wait for it; wave10 G10-C: a service
+        // not running answers EAFNOSUPPORT, one the ladder gave up EIO: the kernel has no
+        // copy of the sockets any more)
+        if !usable(s) {
+            return Some(if restart::down(svc::host_of(s)) { EIO } else { EAFNOSUPPORT });
         }
         return Some(call(frame, s, None));
     }
@@ -3037,13 +3037,10 @@ pub fn proc_keys_text() -> Option<alloc::string::String> {
     Some(text.unwrap_or_default())
 }
 
-/// Group 13: `/proc/net/unix` from the IPC service when Unix sockets are its own (`None`:
-/// the in-kernel table answers). A hand-off call, like `/proc/keys`.
+/// Group 13: `/proc/net/unix` from the IPC service (Unix sockets are its own). A hand-off
+/// call, like `/proc/keys`.
 pub fn proc_net_unix_text() -> Option<alloc::string::String> {
     use crate::ipc::protocol::MSG_LX_PROC_NET_UNIX;
-    if !step4() {
-        return None;
-    }
     Some(window_text(LXS_IPC, crate::ipc::Message::with_args(MSG_LX_PROC_NET_UNIX, [0, 0, 0, 0]), |_| {}).unwrap_or_default())
 }
 

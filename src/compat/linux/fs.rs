@@ -546,7 +546,6 @@ Seccomp:	{}
                     _ => 0,
                 };
                 let pidfd = match desc {
-                    crate::fs::FileDescriptor::PidFd(p) => Some(p.pid),
                     crate::fs::FileDescriptor::Device(d) => d.as_server().filter(|o| o.kind() == crate::ipc::protocol::LX_OBJ_KIND_PIDFD).map(|o| o.tag()),
                     _ => None,
                 };
@@ -619,10 +618,9 @@ impl PseudoFile {
             PseudoFile::ProcLocks => read_slice(super::locks::proc_locks().as_bytes(), cursor, buf),
             PseudoFile::ProcNet(i) => {
                 let text = match PROC_NET[*i as usize] {
-                    "unix" => crate::lx::proc_net_unix_text().unwrap_or_else(super::unix::proc_net_unix),
+                    "unix" => crate::lx::proc_net_unix_text().unwrap_or_default(),
                     // Internet sockets in linux-server (wave 5): it lists them
                     t => crate::lx::proc_net_text(t)
-                        .or_else(|| super::inet::proc_net(t))
                         .or_else(|| super::rtnetlink::proc_net_text(t))
                         .unwrap_or_default(),
                 };
@@ -692,11 +690,8 @@ impl PseudoFile {
             PseudoFile::ProcStatic(content) => read_slice(content, cursor, buf),
             PseudoFile::ProcSnd(rest) => read_slice(super::snd::proc_text(rest).unwrap_or_default().as_bytes(), cursor, buf),
             PseudoFile::ProcUuid(boot) => read_slice(uuid_text(*boot).as_bytes(), cursor, buf),
-            // From linux-server when the key calls are forwarded to it
-            PseudoFile::ProcKeys => match crate::lx::proc_keys_text() {
-                Some(t) => read_slice(t.as_bytes(), cursor, buf),
-                None => read_slice(super::keys::proc_keys().as_bytes(), cursor, buf),
-            },
+            // From lx-sec (the keys are its own)
+            PseudoFile::ProcKeys => read_slice(crate::lx::proc_keys_text().unwrap_or_default().as_bytes(), cursor, buf),
             PseudoFile::ProcDir(_) => 0,
             PseudoFile::ProcSelfMaps => {
                 let text = super::mm::current_mm().map(|m| m.lock().maps_text()).unwrap_or_default();

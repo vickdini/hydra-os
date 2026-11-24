@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::fs::fd::{FileDescriptor, OpenFile, O_ACCMODE, O_APPEND, O_RDONLY, O_WRONLY};
-use crate::fs::zfs::types::{dtype_from_mode, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK};
+use crate::fs::zfs::types::{dtype_from_mode, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG};
 use crate::fs::zfs::zpl::{Attr, SetAttr};
 use crate::fs::ZfsClient;
 use crate::memory::vm::prefault_current;
@@ -108,7 +108,6 @@ const EFBIG: i64 = -27;
 const O_CREAT: u32 = 0o100;
 const O_EXCL: u32 = 0o200;
 const O_TRUNC: u32 = 0o1000;
-const O_NOCTTY: u32 = 0o400;
 const O_NONBLOCK: u32 = 0o4000;
 const O_DIRECTORY: u32 = 0o200000;
 const O_NOFOLLOW: u32 = 0o400000;
@@ -400,43 +399,6 @@ fn proc_root_path(path: &[u8]) -> Option<(u64, &[u8])> {
     Some((pid, rest))
 }
 
-/// Lookup key of a Unix socket path: the process root and the absolute path, so the
-/// same name means the same socket to every process sharing that root.
-///
-/// # Arguments
-/// * `path` - Socket path byte slice.
-///
-/// # Returns
-/// Byte vector representing the canonical socket key.
-///
-/// # Errors
-/// Returns negative Linux error code if path resolution fails.
-pub(crate) fn socket_key(path: &[u8]) -> Result<Vec<u8>, i64> {
-    // A socket is attached to its node, as on Linux: it is found under any name the node
-    // gets (programs bind in a temporary directory and rename the node into place)
-    if let Ok((base, _)) = base_dir(AT_FDCWD, path) {
-        if let Ok(ino) = resolve(base, path, true) {
-            return Ok(socket_ino_key(ino));
-        }
-    }
-    let (_, base_path) = base_dir(AT_FDCWD, path)?;
-    let abs = join_path(&base_path, path);
-    let mut key = alloc::format!("{}:", proc_root()).into_bytes();
-    key.extend_from_slice(abs.as_bytes());
-    Ok(key)
-}
-
-/// Name under which the socket bound to node `ino` is found.
-///
-/// # Arguments
-/// * `ino` - Inode number of the socket.
-///
-/// # Returns
-/// Byte vector representing the inode key (`ino:<ino>`).
-pub(crate) fn socket_ino_key(ino: u64) -> Vec<u8> {
-    alloc::format!("ino:{}", ino).into_bytes()
-}
-
 /// Creates the socket node `bind` makes for a path name (mode 0777 minus the umask);
 /// returns its inode.
 ///
@@ -464,248 +426,6 @@ pub(crate) fn make_socket_node(path: &[u8]) -> Result<u64, i64> {
     Ok(ino)
 }
 
-/// FIFOs of the in-kernel code (`lx=kernel`), by node: the pipe while any end is open.
-static FIFOS: spin::Mutex<alloc::collections::BTreeMap<u64, alloc::sync::Weak<spin::Mutex<crate::fs::pipe::PipeBuffer>>>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
-
-// wave7 G7-7 begin: the in-kernel FIFO's two bugs (7-5's finding)
-/// Per FIFO node: how many read ends and write ends were ever opened (Linux's
-/// `r_counter`/`w_counter`): a blocking open waits until the other side's count moved, so a
-/// writer that opened and closed within one tick still lets a waiting reader go.
-static FIFO_OPENS: spin::Mutex<alloc::collections::BTreeMap<u64, (u64, u64)>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
-
-/// Counts an end of FIFO `ino` opened (`write`: a write end); the counts after it.
-fn fifo_opened(ino: u64, write: bool) -> (u64, u64) {
-    let mut m = FIFO_OPENS.lock();
-    // (only nodes with a live pipe keep their counts)
-    let live = FIFOS.lock();
-    m.retain(|k, _| *k == ino || live.get(k).is_some_and(|w| w.strong_count() > 0));
-    drop(live);
-    let e = m.entry(ino).or_insert((0, 0));
-    if write {
-        e.1 += 1;
-    } else {
-        e.0 += 1;
-    }
-    *e
-}
-
-/// The open counts of FIFO `ino`.
-fn fifo_opens(ino: u64) -> (u64, u64) {
-    FIFO_OPENS.lock().get(&ino).copied().unwrap_or((0, 0))
-}
-
-/// The `O_RDWR` end of an in-kernel FIFO: one description that reads and writes (it counts
-/// as a reader and a writer, so it never sees end of file or `EPIPE`; Linux's `O_RDWR` open
-/// of a FIFO, which never waits).
-struct FifoRw {
-    pipe: alloc::sync::Arc<spin::Mutex<crate::fs::pipe::PipeBuffer>>,
-    ino: u64,
-    nonblock: core::sync::atomic::AtomicBool,
-}
-
-impl Drop for FifoRw {
-    fn drop(&mut self) {
-        let mut b = self.pipe.lock();
-        b.drop_reader();
-        b.drop_writer();
-    }
-}
-
-impl super::chardev::CharDevice for FifoRw {
-    fn read(&self, buf: &mut [u8]) -> i64 {
-        use crate::task::wait::{QueueRef, WaitSet};
-        if buf.is_empty() {
-            return 0;
-        }
-        let mut waits = WaitSet::new();
-        waits.add(QueueRef::Shared(self.pipe.lock().wq.clone()));
-        loop {
-            waits.register();
-            {
-                let mut p = self.pipe.lock();
-                if p.available_read() > 0 {
-                    return p.read(buf) as i64;
-                }
-            }
-            if self.nonblock() {
-                return -11; // EAGAIN
-            }
-            if super::proc::signal_pending() {
-                return super::proc::ERESTARTSYS;
-            }
-            waits.wait(None);
-        }
-    }
-
-    fn write(&self, data: &[u8]) -> i64 {
-        use crate::task::wait::{QueueRef, WaitSet};
-        if data.is_empty() {
-            return 0;
-        }
-        // (up to PIPE_BUF bytes go in one piece, as Linux's pipes)
-        let atomic = data.len() <= 4096;
-        let mut waits = WaitSet::new();
-        waits.add(QueueRef::Shared(self.pipe.lock().wq.clone()));
-        let mut done = 0usize;
-        loop {
-            waits.register();
-            {
-                let mut p = self.pipe.lock();
-                let room = p.available_write();
-                if room > 0 && (!atomic || room >= data.len()) {
-                    match p.write(&data[done..]) {
-                        Ok(n) => done += n,
-                        Err(_) => return if done > 0 { done as i64 } else { -32 }, // EPIPE
-                    }
-                    if done == data.len() {
-                        return done as i64;
-                    }
-                }
-            }
-            if self.nonblock() {
-                return if done > 0 { done as i64 } else { -11 };
-            }
-            if super::proc::signal_pending() {
-                return if done > 0 { done as i64 } else { super::proc::ERESTARTSYS };
-            }
-            waits.wait(None);
-        }
-    }
-
-    fn poll_events(&self) -> u32 {
-        let p = self.pipe.lock();
-        // POLLIN; POLLOUT once PIPE_BUF bytes fit (what a write of up to PIPE_BUF waits for,
-        // as Linux's free-buffer rule — 7-7 review)
-        (if p.available_read() > 0 { 0x001 } else { 0 }) | if p.available_write() >= 4096 { 0x004 } else { 0 }
-    }
-
-    fn add_wait_queues(&self, waits: &mut crate::task::wait::WaitSet) {
-        waits.add(crate::task::wait::QueueRef::Shared(self.pipe.lock().wq.clone()));
-    }
-
-    fn rdev(&self) -> u64 {
-        0
-    }
-
-    fn path(&self) -> String {
-        alloc::format!("pipe:[{}]", self.ino)
-    }
-
-    fn set_nonblock(&self, on: bool) {
-        self.nonblock.store(on, core::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn nonblock(&self) -> bool {
-        self.nonblock.load(core::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn stat(&self) -> super::types::LinuxStat {
-        // The FIFO node's own attributes (owner, mode, times), as an fstat of either end
-        // shows them (7-7 review: they were made up)
-        if let Ok(a) = ZfsClient::getattr(self.ino) {
-            return fill_stat(&a);
-        }
-        let mut st = super::types::LinuxStat::default();
-        st.st_ino = self.ino;
-        st.st_mode = 0o010600; // S_IFIFO
-        st.st_nlink = 1;
-        st.st_blksize = 4096;
-        st
-    }
-}
-// wave7 G7-7 end
-
-/// Group 13: `open` of FIFO node `ino` with the in-kernel pipes (`lx=kernel`): a reader
-/// waits for a writer and a writer for a reader, unless `O_NONBLOCK` (a writer then fails
-/// with `ENXIO` when there is no reader). `O_RDWR` gives one end that reads and writes
-/// (wave7 G7-7, `FifoRw`; it was the read end only).
-fn open_fifo_kernel(ino: u64, flags: u32) -> Result<usize, i64> {
-    use crate::fs::pipe::PipeBuffer;
-    let acc = flags & O_ACCMODE;
-    let nonblock = flags & O_NONBLOCK != 0;
-    let pipe = {
-        let mut m = FIFOS.lock();
-        m.retain(|_, w| w.strong_count() > 0);
-        match m.get(&ino).and_then(|w| w.upgrade()) {
-            Some(p) => p,
-            None => {
-                let p = PipeBuffer::new();
-                {
-                    let mut b = p.lock();
-                    b.drop_reader();
-                    b.drop_writer();
-                }
-                m.insert(ino, alloc::sync::Arc::downgrade(&p));
-                p
-            }
-        }
-    };
-    let write = acc == O_WRONLY;
-    if write && nonblock && pipe.lock().readers_count() == 0 {
-        return Err(-6); // ENXIO
-    }
-    // wave7 G7-7: O_RDWR, both ends in one description
-    if acc == 2 {
-        {
-            let mut b = pipe.lock();
-            b.add_reader();
-            b.add_writer();
-        }
-        fifo_opened(ino, false);
-        fifo_opened(ino, true);
-        let dev = FifoRw { pipe: pipe.clone(), ino, nonblock: core::sync::atomic::AtomicBool::new(nonblock) };
-        return install(FileDescriptor::Device(alloc::sync::Arc::new(dev)), flags);
-    }
-    // (the other side's open count before this end is counted: an end that opens after
-    // that moves it, even if it is gone again before we look — wave7 G7-7)
-    let seen = fifo_opens(ino);
-    if write {
-        pipe.lock().add_writer();
-    } else {
-        pipe.lock().add_reader();
-    }
-    fifo_opened(ino, write);
-    let desc = if write { FileDescriptor::PipeWrite(pipe.clone()) } else { FileDescriptor::PipeRead(pipe.clone()) };
-    if acc != 2 && !nonblock {
-        // Wait for the other side (a tick at a time); an end of it that opened meanwhile,
-        // even if it is closed again, ends the wait (wave7 G7-7)
-        loop {
-            let other = if write { pipe.lock().readers_count() } else { pipe.lock().writers_count() };
-            let now = fifo_opens(ino);
-            let came = if write { now.0 != seen.0 } else { now.1 != seen.1 };
-            if other > 0 || came {
-                break;
-            }
-
-            if super::proc::signal_pending() {
-                if write {
-                    pipe.lock().drop_writer();
-                } else {
-                    pipe.lock().drop_reader();
-                }
-                return Err(super::proc::ERESTARTSYS);
-            }
-            crate::task::sleep_ticks(1);
-        }
-    }
-    if nonblock {
-        let mut b = pipe.lock();
-        if write {
-            b.write_nonblock = true;
-        } else {
-            b.read_nonblock = true;
-        }
-    }
-    let r = install(desc, flags);
-    if r.is_err() {
-        if write {
-            pipe.lock().drop_writer();
-        } else {
-            pipe.lock().drop_reader();
-        }
-    }
-    r
-}
 
 /// Group 13 (temporary, until the VFS moves: `vfs_resolve`): the socket node `connect`
 /// names, resolved for the caller: `ENOENT` if missing, `ECONNREFUSED` if it is not a
@@ -870,19 +590,6 @@ fn fd_vnode(fd: i32) -> Option<Arc<Mutex<OpenFile>>> {
     })
 }
 
-/// Retrieves the internet socket object corresponding to `fd`.
-///
-/// # Arguments
-/// * `fd` - File descriptor index.
-///
-/// # Returns
-/// `Some(Arc<Mutex<InetSocket>>)` if descriptor is an internet socket, `None` otherwise.
-fn inet_of(fd: usize) -> Option<Arc<Mutex<super::inet::InetSocket>>> {
-    crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
-        Some(FileDescriptor::Inet(s)) => Some(s.clone()),
-        _ => None,
-    })
-}
 
 /// Checks whether file descriptor `fd` exists in current process table.
 ///
@@ -997,21 +704,7 @@ fn pty_chardev_path(rdev: u64) -> Option<String> {
 /// Returns negative Linux error code on open failure.
 fn open_pty_path(abs: &str, flags: u32) -> Result<Option<FileDescriptor>, i64> {
     // wave8 GT begin: the terminals are tty-server's objects
-    if crate::lx::console::forwarded() {
-        return crate::lx::console::open_pty(abs, flags).transpose();
-    }
-    // wave8 GT end
-    let nonblock = flags & O_NONBLOCK != 0;
-    if abs == "/dev/ptmx" {
-        return Ok(Some(FileDescriptor::Pty(super::pty::open_master(creds().euid, nonblock))));
-    }
-    if let Some(index) = super::pty::slave_index(abs) {
-        return super::pty::open_slave(index, nonblock, flags & O_NOCTTY != 0).map(|f| Some(FileDescriptor::Pty(f)));
-    }
-    if abs == "/dev/tty" {
-        return Ok(super::pty::open_controlling(nonblock).map(FileDescriptor::Pty));
-    }
-    Ok(None)
+    crate::lx::console::open_pty(abs, flags).transpose()
 }
 
 /// Checks whether a given (uid, gid) possesses the requested access permissions (`want`) on an inode.
@@ -1311,26 +1004,7 @@ fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
             Some(ZfsClient::getattr(ino).map(|a| fill_stat(&a)))
         }
         Some(FileDescriptor::File { path, .. }) if is_pseudo(&path) => Some(Ok(pseudo_stat(&path))),
-        Some(FileDescriptor::Pty(p)) => Some(Ok(p.stat())),
         Some(FileDescriptor::Device(d)) => Some(Ok(d.stat())),
-        Some(FileDescriptor::Unix(s)) => {
-            let mut st = super::types::LinuxStat::default();
-            st.st_dev = 0x8;
-            st.st_ino = s.ino();
-            st.st_mode = 0o140777;
-            st.st_nlink = 1;
-            st.st_blksize = 4096;
-            Some(Ok(st))
-        }
-        Some(FileDescriptor::Socket(s)) => {
-            let mut st = super::types::LinuxStat::default();
-            st.st_dev = 0x8;
-            st.st_ino = alloc::sync::Arc::as_ptr(&s) as u64;
-            st.st_mode = 0o140777;
-            st.st_nlink = 1;
-            st.st_blksize = 4096;
-            Some(Ok(st))
-        }
         Some(FileDescriptor::ConsoleIn) | Some(FileDescriptor::ConsoleOut) | Some(FileDescriptor::ConsoleErr) => {
             Some(Ok(console_stat()))
         }
@@ -1345,13 +1019,7 @@ fn fstat_fd(fd: i32) -> Option<Result<super::types::LinuxStat, i64>> {
         Some(FileDescriptor::PipeRead(p)) | Some(FileDescriptor::PipeWrite(p)) => {
             Some(Ok(anon_stat(Arc::as_ptr(&p) as *const u8, S_IFIFO | 0o600)))
         }
-        Some(FileDescriptor::Inet(s)) => Some(Ok(anon_stat(Arc::as_ptr(&s) as *const u8, S_IFSOCK | 0o777))),
-        // Anonymous-inode objects: Linux reports mode 0600 without a file type
-        Some(FileDescriptor::EventFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
         Some(FileDescriptor::Epoll(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
-        Some(FileDescriptor::SignalFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
-        Some(FileDescriptor::TimerFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
-        Some(FileDescriptor::PidFd(o)) => Some(Ok(anon_stat(Arc::as_ptr(&o) as *const u8, 0o600))),
         None => Some(Err(EBADF)),
         _ => None,
     }
@@ -1625,11 +1293,8 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     // Group 13: a FIFO (`mkfifo` node) opens as a pipe end (before, it opened as an empty
     // regular file: GNU make's jobserver FIFO busy-looped)
     if ftype == S_IFIFO && flags & O_PATH == 0 {
-        if crate::lx::step4() {
-            let r = crate::lx::call_plain(crate::ipc::protocol::LX_KCALL_FIFO, [ino, flags as u64, 0, 0, 0, 0]);
-            return if r < 0 { Err(r) } else { Ok(r as usize) };
-        }
-        return open_fifo_kernel(ino, flags);
+        let r = crate::lx::call_plain(crate::ipc::protocol::LX_KCALL_FIFO, [ino, flags as u64, 0, 0, 0, 0]);
+        return if r < 0 { Err(r) } else { Ok(r as usize) };
     }
     if ftype == S_IFCHR || ftype == 0o060000 {
         // wave10 GV2 (review 1): no device opens on a nodev mount (a user's FUSE mount, a
@@ -2515,7 +2180,6 @@ pub(crate) fn fd_link(abs: &str) -> Option<String> {
     let fd: usize = fd.parse().ok()?;
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd).cloned())?;
     Some(match desc {
-        FileDescriptor::Pty(p) => p.path(),
         FileDescriptor::Vnode(f) => f.lock().path.clone(),
         FileDescriptor::File { path, shown, .. } => shown.unwrap_or(path),
         FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr => {
@@ -2525,14 +2189,7 @@ pub(crate) fn fd_link(abs: &str) -> Option<String> {
         FileDescriptor::PipeRead(p) | FileDescriptor::PipeWrite(p) => {
             alloc::format!("pipe:[{}]", Arc::as_ptr(&p) as usize as u64 & 0xFFFF_FFFF)
         }
-        FileDescriptor::Socket(s) => alloc::format!("socket:[{}]", Arc::as_ptr(&s) as usize as u64 & 0xFFFF_FFFF),
-        FileDescriptor::Inet(s) => alloc::format!("socket:[{}]", Arc::as_ptr(&s) as usize as u64 & 0xFFFF_FFFF),
-        FileDescriptor::Unix(s) => alloc::format!("socket:[{}]", s.ino()),
-        FileDescriptor::TimerFd(_) => String::from("anon_inode:[timerfd]"),
-        FileDescriptor::PidFd(_) => String::from("anon_inode:[pidfd]"),
         FileDescriptor::Epoll(_) => String::from("anon_inode:[eventpoll]"),
-        FileDescriptor::EventFd(_) => String::from("anon_inode:[eventfd]"),
-        FileDescriptor::SignalFd(_) => String::from("anon_inode:[signalfd]"),
         FileDescriptor::MemFd { .. } => String::from("/memfd: (deleted)"),
         FileDescriptor::Device(d) => d.path(),
     })
@@ -3247,47 +2904,12 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
             fds.set_cloexec(fd, arg & 1 != 0);
             0
         }),
-        F_GETFL | F_SETFL if inet_of(fd).is_some() => {
-            let s = inet_of(fd).unwrap();
-            let mut s = s.lock();
-            if cmd == F_SETFL {
-                s.nonblock = arg as u32 & O_NONBLOCK != 0;
-                0
-            } else {
-                2 | if s.nonblock { O_NONBLOCK as i64 } else { 0 } // O_RDWR
-            }
-        }
         F_GETFL | F_SETFL if crate::task::with_current_fds_mut(|fds| fds.get(fd).map_or(false, is_tty)) => {
             if cmd == F_SETFL {
                 super::tty::set_nonblock(arg as u32 & O_NONBLOCK != 0);
                 0
             } else {
                 2 | if super::tty::nonblock() { O_NONBLOCK as i64 } else { 0 } // O_RDWR
-            }
-        }
-        F_GETFL | F_SETFL if event_obj_of(fd).is_some() => {
-            let desc = event_obj_of(fd).unwrap();
-            let on = arg as u32 & O_NONBLOCK != 0;
-            let nb = match &desc {
-                FileDescriptor::EventFd(e) => {
-                    let mut e = e.lock();
-                    if cmd == F_SETFL {
-                        e.nonblocking = on;
-                    }
-                    e.nonblocking
-                }
-                FileDescriptor::TimerFd(t) => {
-                    if cmd == F_SETFL {
-                        t.set_nonblock(on);
-                    }
-                    t.get_nonblock()
-                }
-                _ => false,
-            };
-            if cmd == F_SETFL {
-                0
-            } else {
-                2 | if nb { O_NONBLOCK as i64 } else { 0 } // O_RDWR
             }
         }
         F_GETFL | F_SETFL if device_of(fd).is_some() => {
@@ -3297,33 +2919,6 @@ fn fcntl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
                 0
             } else {
                 2 | if d.nonblock() { O_NONBLOCK as i64 } else { 0 } // O_RDWR
-            }
-        }
-        F_GETFL | F_SETFL if unix_of(fd).is_some() => {
-            let s = unix_of(fd).unwrap();
-            if cmd == F_SETFL {
-                s.set_nonblock(arg as u32 & O_NONBLOCK != 0);
-                0
-            } else {
-                2 | if s.get_nonblock() { O_NONBLOCK as i64 } else { 0 } // O_RDWR
-            }
-        }
-        F_GETFL | F_SETFL if signalfd_of(fd).is_some() => {
-            let s = signalfd_of(fd).unwrap();
-            if cmd == F_SETFL {
-                s.set_nonblock(arg as u32 & O_NONBLOCK != 0);
-                0
-            } else {
-                if s.get_nonblock() { O_NONBLOCK as i64 } else { 0 } // O_RDONLY
-            }
-        }
-        F_GETFL | F_SETFL if pty_of(fd).is_some() => {
-            let p = pty_of(fd).unwrap();
-            if cmd == F_SETFL {
-                p.set_nonblock(arg as u32 & O_NONBLOCK != 0);
-                0
-            } else {
-                2 | if p.get_nonblock() { O_NONBLOCK as i64 } else { 0 } // O_RDWR
             }
         }
         F_GETFL | F_SETFL if pipe_of(fd).is_some() => {
@@ -3428,19 +3023,6 @@ fn is_tty(d: &FileDescriptor) -> bool {
     matches!(d, FileDescriptor::ConsoleIn | FileDescriptor::ConsoleOut | FileDescriptor::ConsoleErr)
 }
 
-/// Retrieves the eventfd, timerfd or inotify object behind descriptor `fd`.
-///
-/// # Arguments
-/// * `fd` - File descriptor index.
-///
-/// # Returns
-/// `Some(FileDescriptor)` if event/timer/inotify object, or `None`.
-fn event_obj_of(fd: usize) -> Option<FileDescriptor> {
-    crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
-        Some(d @ (FileDescriptor::EventFd(_) | FileDescriptor::TimerFd(_))) => Some(d.clone()),
-        _ => None,
-    })
-}
 
 /// Retrieves the character device behind descriptor `fd`.
 ///
@@ -3456,47 +3038,8 @@ fn device_of(fd: usize) -> Option<Arc<dyn super::chardev::CharDevice>> {
     })
 }
 
-/// Retrieves the Unix socket behind descriptor `fd`.
-///
-/// # Arguments
-/// * `fd` - File descriptor index.
-///
-/// # Returns
-/// `Some(Arc<UnixSocket>)` if Unix socket descriptor, or `None`.
-fn unix_of(fd: usize) -> Option<Arc<super::unix::UnixSocket>> {
-    crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
-        Some(FileDescriptor::Unix(s)) => Some(s.clone()),
-        _ => None,
-    })
-}
 
-/// Retrieves the signalfd behind descriptor `fd`.
-///
-/// # Arguments
-/// * `fd` - File descriptor index.
-///
-/// # Returns
-/// `Some(Arc<SignalFd>)` if signalfd descriptor, or `None`.
-fn signalfd_of(fd: usize) -> Option<Arc<super::signalfd::SignalFd>> {
-    crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
-        Some(FileDescriptor::SignalFd(s)) => Some(s.clone()),
-        _ => None,
-    })
-}
 
-/// Retrieves the pseudo-terminal end behind descriptor `fd`.
-///
-/// # Arguments
-/// * `fd` - File descriptor index.
-///
-/// # Returns
-/// `Some(Arc<PtyFile>)` if PTY descriptor, or `None`.
-fn pty_of(fd: usize) -> Option<Arc<super::pty::PtyFile>> {
-    crate::task::with_current_fds_mut(|fds| match fds.get(fd) {
-        Some(FileDescriptor::Pty(p)) => Some(p.clone()),
-        _ => None,
-    })
-}
 
 /// The pipe behind descriptor `fd` and whether it is the write end.
 ///
@@ -3613,8 +3156,8 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
     let fd = a[0] as usize;
     let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd).cloned())?;
     let stream = is_tty(&desc)
-        || matches!(desc, FileDescriptor::PipeRead(_) | FileDescriptor::PipeWrite(_) | FileDescriptor::Inet(_) | FileDescriptor::Pty(_) | FileDescriptor::SignalFd(_) | FileDescriptor::Unix(_)
-            | FileDescriptor::EventFd(_) | FileDescriptor::TimerFd(_) | FileDescriptor::Device(_));
+        || matches!(desc, FileDescriptor::PipeRead(_) | FileDescriptor::PipeWrite(_)
+ | FileDescriptor::Device(_));
     if !stream {
         return None;
     }
@@ -3661,12 +3204,6 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
             match &desc {
                 FileDescriptor::PipeRead(p) => pipe_read(p, buf),
                 FileDescriptor::PipeWrite(_) => EBADF,
-                FileDescriptor::Inet(s) => super::inet::read(s, buf),
-                FileDescriptor::Pty(p) => p.read(buf),
-                FileDescriptor::SignalFd(s) => s.read(buf),
-                FileDescriptor::Unix(s) => s.read(buf),
-                FileDescriptor::EventFd(e) => super::eventfd::read(e, buf),
-                FileDescriptor::TimerFd(t) => t.read(buf),
                 // Devices whose reads install descriptors (fanotify) have their own read
                 FileDescriptor::Device(d) => d.read_unlocked(buf).unwrap_or_else(|| d.read(buf)),
                 _ => super::tty::read(buf, super::tty::nonblock()),
@@ -3676,12 +3213,6 @@ fn stream_io(num: u64, a: [u64; 6]) -> Option<i64> {
             match &desc {
                 FileDescriptor::PipeWrite(p) => pipe_write(p, data),
                 FileDescriptor::PipeRead(_) => EBADF,
-                FileDescriptor::Inet(s) => super::inet::write(s, data),
-                FileDescriptor::Pty(p) => p.write(data),
-                FileDescriptor::SignalFd(_) => EINVAL,
-                FileDescriptor::Unix(s) => s.write(data),
-                FileDescriptor::EventFd(e) => super::eventfd::write(e, data),
-                FileDescriptor::TimerFd(_) => EINVAL,
                 FileDescriptor::Device(d) => d.write(data),
                 _ => super::tty::write(data) as i64,
             }
@@ -3719,7 +3250,6 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                     0
                 }
                 Some(ref d) if is_tty(d) => super::tty::ioctl(a[1], a[2]),
-                Some(FileDescriptor::Unix(ref s)) => super::unix::ioctl(s, a[1], a[2]),
                 Some(FileDescriptor::Device(ref d)) => match a[1] {
                     0x5421 => match copy_in(a[2], 4) {
                         // FIONBIO
@@ -3731,44 +3261,6 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                     },
                     _ if d.as_server().is_some() => crate::lx::call_obj(16, a, d),
                     _ => d.ioctl(a[1], a[2]),
-                },
-                Some(FileDescriptor::Pty(ref p)) => match a[1] {
-                    0x5421 => match copy_in(a[2], 4) {
-                        // FIONBIO
-                        Ok(v) => {
-                            p.set_nonblock(v.iter().any(|&b| b != 0));
-                            0
-                        }
-                        Err(e) => e,
-                    },
-                    _ => p.ioctl(a[1], a[2], &|peer, flags| match install(FileDescriptor::Pty(peer), flags) {
-                        Ok(fd) => fd as i64,
-                        Err(e) => e,
-                    }),
-                },
-                Some(FileDescriptor::Inet(ref s)) => match a[1] {
-                    0x5421 => {
-                        // FIONBIO
-                        match copy_in(a[2], 4) {
-                            Ok(v) => {
-                                s.lock().nonblock = v.iter().any(|&b| b != 0);
-                                0
-                            }
-                            Err(e) => e,
-                        }
-                    }
-                    // SIOCGSTAMP / SIOCGSTAMPNS
-                    0x8906 | 0x8907 => super::inet::stamp_ioctl(s, a[1], a[2]),
-                    0x541B => {
-                        // FIONREAD
-                        let n = super::inet::pending_bytes(s) as i32;
-                        match copy_out(a[2], &n.to_le_bytes()) {
-                            Ok(()) => 0,
-                            Err(e) => e,
-                        }
-                    }
-                    r if r & 0xFF00 == 0x5400 => super::tty::NOT_A_TTY,
-                    _ => EINVAL,
                 },
                 // Pipes and files answer the generic requests (FIONREAD, FIONBIO, FIOASYNC) as
                 // Linux does; other terminal requests are not for them
@@ -4095,7 +3587,6 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
         NR_FSTATFS => {
             let desc = crate::task::with_current_fds_mut(|fds| fds.get(a[0] as usize).cloned());
             let magic = match desc {
-                Some(FileDescriptor::Pty(_)) => DEVPTS_SUPER_MAGIC,
                 Some(FileDescriptor::Vnode(f)) => {
                     let ino = f.lock().ino;
                     if super::fuse::is_fuse(ino) {

@@ -142,8 +142,7 @@ fn add_rule_validation() {
     let f = open_at(51, "/A/file");
     assert_eq!(dispatch(ADD_RULE, [rs as u64, 1, 0, 1, 0, 0]), EINVAL, "flags");
     assert_eq!(allow_path(99, a, READ_FILE), EBADF, "no such descriptor");
-    let efd = hydra_hosttests::compat::linux::eventfd::EventFd::new(0, 0);
-    fake::FDS.with_borrow_mut(|t| t.install(60, FileDescriptor::EventFd(efd)));
+    fake::FDS.with_borrow_mut(|t| t.install(60, FileDescriptor::File { path: "/A/file".into(), readable: true, writable: false }));
     assert_eq!(allow_path(60, a, READ_FILE), EBADFD, "not a ruleset");
     assert_eq!(dispatch(ADD_RULE, [rs as u64, 3, 0, 0, 0, 0]), EINVAL, "unknown rule type");
     assert_eq!(allow_path(rs, a, 0), ENOMSG, "no rights");

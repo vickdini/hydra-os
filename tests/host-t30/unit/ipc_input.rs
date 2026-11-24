@@ -127,8 +127,6 @@ fn forwarded_input_is_the_services() {
     assert!(crate::ipc::service::service(ENDPOINT_INPUT_SERVER).is_some(), "0x2A is a system endpoint");
     set_routing(true);
     push_scancode(0x1E);
-    // The kernel copy does not consume what is the service's
-    assert_eq!(drain(|_| panic!("not the kernel's")), 0);
     assert!(pending());
     assert_eq!(waiting().len(), 1);
     set_routing(false);

@@ -633,7 +633,6 @@ impl FdTable {
                     0
                 }
             }
-            Socket(s) => s.lock().poll_events(),
             _ => 0,
         }
     }

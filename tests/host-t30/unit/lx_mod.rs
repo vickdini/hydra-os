@@ -420,8 +420,12 @@ fn forward_answers_the_null_call_and_unrouted_calls() {
     restart::tests::set_down(LXS_LINUX, true);
     assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(EIO));
     restart::tests::set_down(LXS_LINUX, false);
-    // A family whose service is not online goes to the kernel
-    assert_eq!(forward(&frame(41, [2, 1, 0, 0, 0, 0])), None);
+    // A family whose service is not running: EAFNOSUPPORT (wave10 G10-C: no kernel copy)
+    assert_eq!(forward(&frame(41, [2, 1, 0, 0, 0, 0])), Some(-97));
+    // ... and one the ladder gave up: EIO
+    restart::tests::set_down(svc::host_of(LXS_NET), true);
+    assert_eq!(forward(&frame(41, [2, 1, 0, 0, 0, 0])), Some(EIO));
+    restart::tests::set_down(svc::host_of(LXS_NET), false);
     assert_eq!(forward(&frame(41, [17, 1, 0, 0, 0, 0])), None);
     // A by-descriptor call on a descriptor holding no server object
     assert_eq!(forward(&frame(44, [3, 0, 0, 0, 0, 0])), None);

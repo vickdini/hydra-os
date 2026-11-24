@@ -698,16 +698,10 @@ pub mod linux_stubs {
             fn seek(&self, _offset: i64, _whence: u32) -> Option<i64> {
                 None
             }
-            fn as_mqueue(&self) -> Option<&crate::compat::linux::mqueue::MqHandle> {
-                None
-            }
             fn as_server(&self) -> Option<&crate::lx::obj::ServerObject> {
                 None
             }
             fn as_landlock(&self) -> Option<&crate::compat::linux::landlock::Ruleset> {
-                None
-            }
-            fn as_bpf(&self) -> Option<crate::compat::linux::bpf::Obj> {
                 None
             }
             fn as_perf(&self) -> Option<Arc<crate::compat::linux::perf::Event>> {

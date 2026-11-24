@@ -80,16 +80,10 @@ pub mod compat {
         // ---------------------------------------------------------- the files under test
         #[path = "../../../../../src/compat/linux/epoll.rs"]
         pub mod epoll;
-        #[path = "../../../../../src/compat/linux/eventfd.rs"]
-        pub mod eventfd;
-        #[path = "../../../../../src/compat/linux/inet.rs"]
-        pub mod inet;
         #[path = "../../../../../src/compat/linux/io_uring.rs"]
         pub mod io_uring;
         #[path = "../../../../../src/compat/linux/itimer.rs"]
         pub mod itimer;
-        #[path = "../../../../../src/compat/linux/netlink.rs"]
-        pub mod netlink;
         #[path = "../../../../../src/compat/linux/pidfd.rs"]
         pub mod pidfd;
         #[path = "../../../../../src/compat/linux/ptimer.rs"]
@@ -98,16 +92,6 @@ pub mod compat {
         pub mod rtnetlink;
         #[path = "../../../../../src/compat/linux/select.rs"]
         pub mod select;
-        #[path = "../../../../../src/compat/linux/signalfd.rs"]
-        pub mod signalfd;
-        #[path = "../../../../../src/compat/linux/socket.rs"]
-        pub mod socket;
-        #[path = "../../../../../src/compat/linux/sockopt.rs"]
-        pub mod sockopt;
-        #[path = "../../../../../src/compat/linux/timerfd.rs"]
-        pub mod timerfd;
-        #[path = "../../../../../src/compat/linux/unix.rs"]
-        pub mod unix;
 
         // ---------------------------------------------------------- real, not ours
         #[path = "../../../../../src/compat/linux/types.rs"]

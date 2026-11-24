@@ -57,7 +57,6 @@ const VWERASE: usize = 14;
 const ENOTTY: i64 = -25;
 const EINVAL: i64 = -22;
 const EFAULT: i64 = -14;
-const EAGAIN: i64 = -11;
 
 /// Kernel `struct termios` (36 bytes).
 #[derive(Clone, Copy)]
@@ -160,14 +159,6 @@ impl Tty {
         }
     }
 
-    /// True if `read` would return data (or end-of-file) now.
-    ///
-    /// # Returns
-    ///
-    /// `true` if input is buffered; `false` otherwise.
-    pub(crate) fn has_input(&self) -> bool {
-        !self.ready.is_empty()
-    }
 }
 
 static TTY: Mutex<Tty> = Mutex::new(Tty::new());
@@ -202,31 +193,13 @@ pub fn set_nonblock(on: bool) {
 /// * `pgrp` - Foreground process group ID.
 pub fn attach_session(sid: u64, pgrp: u64) {
     // wave8 GT: the console terminal is tty-server's
-    if crate::lx::console::forwarded() {
-        TTY.lock().nonblock = false;
-        crate::lx::console::attach(sid, pgrp);
-        return;
-    }
-    let mut t = TTY.lock();
-    t.session = sid;
-    t.fg_pgrp = pgrp;
-    t.termios = Termios::default();
-    t.line.clear();
-    t.ready.clear();
-    t.nonblock = false;
+    TTY.lock().nonblock = false;
+    crate::lx::console::attach(sid, pgrp);
 }
 
 /// Returns the console to the Hydra shell.
 pub fn detach_session() {
-    if crate::lx::console::forwarded() {
-        crate::lx::console::detach();
-        return;
-    }
-    let mut t = TTY.lock();
-    t.session = 0;
-    t.fg_pgrp = 0;
-    t.line.clear();
-    t.ready.clear();
+    crate::lx::console::detach();
 }
 
 /// True while a Linux session owns the console.
@@ -235,10 +208,7 @@ pub fn detach_session() {
 ///
 /// `true` if attached to a Linux session; `false` if owned by Hydra shell.
 pub fn attached() -> bool {
-    if crate::lx::console::forwarded() {
-        return crate::lx::console::attached();
-    }
-    TTY.lock().session != 0
+    crate::lx::console::attached()
 }
 
 /// Prints raw bytes to the console output.
@@ -291,10 +261,7 @@ pub(crate) fn process_output(t: &Tty, data: &[u8], out: &mut Vec<u8>) {
 /// Number of bytes processed and output, or a negative Linux errno (forwarded).
 pub fn write(data: &[u8]) -> i64 {
     // wave8 GT: `data` is the caller's own buffer (`vfs::stream_io`), forwarded as such
-    if crate::lx::console::forwarded() {
-        return crate::lx::console::write(data.as_ptr() as u64, data.len());
-    }
-    write_kernel(data) as i64
+    crate::lx::console::write(data.as_ptr() as u64, data.len())
 }
 
 /// [`write`] in the kernel: output processing with the kernel's termios, then the console
@@ -498,20 +465,7 @@ pub fn pump() {
 ///
 /// `true` if input is buffered; `false` otherwise.
 pub fn has_input() -> bool {
-    if crate::lx::console::forwarded() {
-        return crate::lx::console::readable();
-    }
-    TTY.try_lock().map_or(false, |t| !t.ready.is_empty())
-}
-
-/// Bytes available to `read` right now.
-///
-/// # Returns
-///
-/// `true` if characters are waiting to be read.
-pub fn readable() -> bool {
-    pump();
-    !TTY.lock().ready.is_empty()
+    crate::lx::console::readable()
 }
 
 /// `read` from the terminal: blocks until a line (canonical mode) or at least one byte
@@ -530,88 +484,7 @@ pub fn read(buf: &mut [u8], nonblock: bool) -> i64 {
         return 0;
     }
     // wave8 GT: `buf` is the caller's own buffer (`vfs::stream_io`), forwarded as such
-    if crate::lx::console::forwarded() {
-        return crate::lx::console::read(buf.as_mut_ptr() as u64, buf.len(), nonblock);
-    }
-    // A background process reading the terminal is stopped with SIGTTIN (EIO if it
-    // ignores or blocks that signal), as on Linux
-    let (_, pid) = super::proc::current_ids();
-    if let Some((sid, pgid)) = super::proc::session_of(pid) {
-        let (tty_sid, fg) = {
-            let t = TTY.lock();
-            (t.session, t.fg_pgrp)
-        };
-        if tty_sid == sid && fg != 0 && pgid != fg {
-            if super::proc::ignores_or_blocks(super::proc::SIGTTIN) {
-                return -5;
-            }
-            super::proc::post_group(pgid, super::proc::SIGTTIN);
-            return super::proc::ERESTARTSYS;
-        }
-    }
-    let mut waits = crate::task::wait::WaitSet::new();
-    waits.add(crate::task::wait::QueueRef::Static(&INPUT_WQ));
-    loop {
-        waits.register();
-        pump();
-        if let Some(n) = take_input(&mut TTY.lock(), buf) {
-            return n;
-        }
-        if nonblock {
-            return EAGAIN;
-        }
-        if super::proc::signal_pending() {
-            return super::proc::ERESTARTSYS;
-        }
-        waits.wait(None);
-    }
-}
-
-/// Takes input for `read`: a line in canonical mode, otherwise what is there. `None`
-/// means the reader must wait.
-///
-/// # Arguments
-///
-/// * `t` - Active Tty state.
-/// * `buf` - Destination buffer.
-///
-/// # Returns
-///
-/// `Some(bytes_copied)` if input was extracted, or `None` if reader must wait.
-pub(crate) fn take_input(t: &mut Tty, buf: &mut [u8]) -> Option<i64> {
-    let canon = t.termios.lflag & ICANON != 0;
-    if !t.ready.is_empty() {
-        let mut n = 0;
-        while n < buf.len() {
-            match t.ready.front() {
-                Some(Some(b)) => {
-                    buf[n] = *b;
-                    n += 1;
-                    t.ready.pop_front();
-                    if canon && buf[n - 1] == b'\n' {
-                        break;
-                    }
-                }
-                Some(None) => {
-                    // End-of-file marker (^D): ends this read, 0 bytes if nothing came
-                    // before it. Used up either way, as on Linux: a ^D after a partial
-                    // line only pushes the line out (left queued, the next reader saw a
-                    // second end-of-file)
-                    t.ready.pop_front();
-                    break;
-                }
-                None => break,
-            }
-        }
-        if super::TRACE_SYSCALLS.load(core::sync::atomic::Ordering::Relaxed) {
-            crate::kprintln!("[tty] read -> {:?} (canon={}, left={})", core::str::from_utf8(&buf[..n]).unwrap_or("?"), canon, t.ready.len());
-        }
-        return Some(n as i64);
-    }
-    if !canon && t.termios.cc[VMIN] == 0 {
-        return Some(0);
-    }
-    None
+    crate::lx::console::read(buf.as_mut_ptr() as u64, buf.len(), nonblock)
 }
 
 /// Copies byte slice to user memory after prefaulting.
@@ -697,15 +570,6 @@ pub(crate) fn vt_ioctl(request: u64, arg: u64) -> Option<i64> {
     })
 }
 
-/// The virtual terminal display managers last activated.
-///
-/// # Returns
-///
-/// Active VT index.
-pub fn active_vt() -> u32 {
-    ACTIVE_VT.load(core::sync::atomic::Ordering::Relaxed)
-}
-
 /// Console terminal `ioctl`s.
 ///
 /// # Arguments
@@ -717,10 +581,7 @@ pub fn active_vt() -> u32 {
 ///
 /// Result code, or negative Linux errno on error.
 pub fn ioctl(request: u64, arg: u64) -> i64 {
-    if crate::lx::console::forwarded() {
-        return crate::lx::console::ioctl(request, arg);
-    }
-    ioctl_kernel(request, arg)
+    crate::lx::console::ioctl(request, arg)
 }
 
 /// [`ioctl`] in the kernel (also tty-server's stand-in while it is not online).

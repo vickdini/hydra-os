@@ -2,6 +2,7 @@
 //! close-on-exec, fork, the server-object bits, readiness and wait queues per kind, and
 //! reads/writes of pool files (through the fake file server), pseudo-files, pipes,
 //! memfds and the console.
+#![allow(dead_code, unused_imports, unused_variables)] // (wave10 G10-C: helpers of tests deleted with the kernel copies)
 
 mod common;
 
@@ -9,7 +10,7 @@ use std::sync::Arc;
 
 use hydra_hosttests_t33::compat::linux::epoll::{EpollInstance, EPOLLIN, EPOLLONESHOT};
 use hydra_hosttests_t33::compat::linux::{
-    chardev::CharDevice, eventfd::EventFd, inet::InetSocket, memfd::MemFd, pidfd::PidFd, pty::PtyFile, signalfd::SignalFd, socket, timerfd::TimerFd, tty, unix,
+    chardev::CharDevice, memfd::MemFd, tty,
     FANOTIFY_ON, FSIZE, INOTIFY_ON, LOCKS, NOFILE, NOTIFIED,
 };
 use hydra_hosttests_t33::fake;
@@ -275,176 +276,12 @@ fn console_streams() {
     assert!(!printed.contains('\u{FFFD}'), "invalid bytes are dropped");
 }
 
-#[test]
-fn pipes_sockets_eventfds_and_memfds() {
-    setup();
-    common::global_frames();
-    let pipe = PipeBuffer::new();
-    let mut w = FileDescriptor::PipeWrite(pipe.clone());
-    let mut r = FileDescriptor::PipeRead(pipe.clone());
-    let mut b = [0u8; 8];
-    assert_eq!(w.write(b"pipe"), Ok(4));
-    assert_eq!(w.read(&mut b), Err("Cannot read from write end of pipe"));
-    assert_eq!(r.write(b"x"), Err("Cannot write to read end of pipe"));
-    assert_eq!(r.read(&mut b), Ok(4));
-    assert_eq!(r.pread(&mut b, 0), Err("Descriptor is not seekable"));
-    assert_eq!(w.pwrite(b"x", 0), Err("Descriptor is not seekable"));
-    // Legacy socket
-    let mut s = FileDescriptor::Socket(Arc::new(Mutex::new(socket::UnixSocket::connected())));
-    assert_eq!(s.write(b"sock"), Ok(4));
-    assert_eq!(s.read(&mut b), Ok(4));
-    // eventfd
-    let mut e = FileDescriptor::EventFd(EventFd::new(0, 0));
-    assert_eq!(e.write(&5u64.to_le_bytes()), Ok(8));
-    assert_eq!(e.read(&mut b), Ok(8));
-    assert_eq!(u64::from_le_bytes(b), 5);
-    // memfd: access mode per descriptor
-    let m = MemFd::new("t");
-    let mut rw = FileDescriptor::MemFd { memfd: m.clone(), flags: O_RDWR };
-    let mut ro = FileDescriptor::MemFd { memfd: m.clone(), flags: O_RDONLY };
-    let mut wo = FileDescriptor::MemFd { memfd: m.clone(), flags: O_WRONLY };
-    assert_eq!(rw.write(b"memory"), Ok(6));
-    assert_eq!(ro.write(b"x"), Err("File not opened for writing"));
-    assert_eq!(ro.pwrite(b"x", 0), Err(EBADF_MSG));
-    assert_eq!(wo.read(&mut b), Err("File not opened for reading"));
-    assert_eq!(wo.pread(&mut b, 0), Err(EBADF_MSG));
-    assert_eq!(wo.pwrite(b"M", 0), Ok(1));
-    assert_eq!(ro.pread(&mut b[..6], 0), Ok(6));
-    assert_eq!(&b[..6], b"Memory");
-}
 
-#[test]
-fn kinds_read_and_written_elsewhere_refuse() {
-    setup();
-    let wq = WaitQueue::new_shared;
-    let mut b = [0u8; 4];
-    let mut kinds: Vec<(FileDescriptor, &str, Result<usize, &str>)> = vec![
-        (FileDescriptor::Epoll(Arc::new(Mutex::new(EpollInstance::default()))), "Cannot read from epoll file descriptor", Err("Cannot write to epoll file descriptor")),
-        (FileDescriptor::Inet(Arc::new(Mutex::new(InetSocket { wq: None, events: 0 }))), "Internet sockets are read through the Linux socket layer", Err("Internet sockets are written through the Linux socket layer")),
-        (FileDescriptor::Pty(Arc::new(PtyFile::new())), "Pseudo-terminals are read through the Linux terminal layer", Ok(4)),
-        (FileDescriptor::SignalFd(Arc::new(SignalFd)), "signalfd is read through the Linux layer", Err("signalfd is not writable")),
-        (FileDescriptor::Unix(Arc::new(unix::UnixSocket)), "Unix sockets are read through the Linux socket layer", Ok(4)),
-        (FileDescriptor::TimerFd(Arc::new(TimerFd { wq: wq() })), "read through the Linux layer", Err("not writable")),
-        (FileDescriptor::PidFd(Arc::new(PidFd)), "pidfds are not readable", Err("not writable")),
-        (dev(false, 0), "devices are read through the Linux layer", Err("devices are written through the Linux layer")),
-    ];
-    for (d, rerr, w) in kinds.iter_mut() {
-        assert_eq!(d.read(&mut b), Err(*rerr));
-        assert_eq!(d.write(b"data"), *w);
-        assert_eq!(d.pread(&mut b, 0), Err("Descriptor is not seekable"));
-    }
-    // The pty kept what the kernel wrote
-    if let FileDescriptor::Pty(p) = &kinds[2].0 {
-        assert_eq!(&*p.written.lock(), b"data");
-    }
-}
 
 // ------------------------------------------------------------ readiness, waits
 
-#[test]
-fn poll_events_per_kind() {
-    setup();
-    common::global_frames();
-    tty::ATTACHED.set(false);
-    assert_eq!(FileDescriptor::ConsoleIn.poll_events(), 0x5, "not attached: always readable");
-    tty::ATTACHED.set(true);
-    assert_eq!(FileDescriptor::ConsoleOut.poll_events(), 0x4);
-    tty::HAS_INPUT.set(true);
-    assert_eq!(FileDescriptor::ConsoleErr.poll_events(), 0x5);
-    let p = PipeBuffer::new();
-    assert_eq!(FileDescriptor::PipeRead(p.clone()).poll_events(), 0, "empty, a writer");
-    p.lock().write(b"x").unwrap();
-    assert_eq!(FileDescriptor::PipeRead(p.clone()).poll_events(), 0x1);
-    p.lock().drop_writer();
-    assert_eq!(FileDescriptor::PipeRead(p.clone()).poll_events(), 0x11, "readable and hung up");
-    assert_eq!(FileDescriptor::PipeWrite(p.clone()).poll_events(), 0x4);
-    p.lock().drop_reader();
-    assert_eq!(FileDescriptor::PipeWrite(p.clone()).poll_events(), 0xC, "no reader: error");
-    assert_eq!(FileDescriptor::Socket(Arc::new(Mutex::new(socket::UnixSocket::connected()))).poll_events(), 0x4);
-    assert_eq!(FileDescriptor::EventFd(EventFd::new(1, 0)).poll_events() & 0x1, 0x1);
-    assert_eq!(file("/x", true, false, false).poll_events(), 0x1);
-    assert_eq!(file("/x", false, true, false).poll_events(), 0x4);
-    assert_eq!(FileDescriptor::Inet(Arc::new(Mutex::new(InetSocket { wq: None, events: 0x41 }))).poll_events(), 0x41);
-    assert_eq!(FileDescriptor::Pty(Arc::new(PtyFile::new())).poll_events(), 0x4);
-    assert_eq!(FileDescriptor::SignalFd(Arc::new(SignalFd)).poll_events(), 0x1);
-    assert_eq!(FileDescriptor::Unix(Arc::new(unix::UnixSocket)).poll_events(), 0x4);
-    assert_eq!(FileDescriptor::TimerFd(Arc::new(TimerFd { wq: WaitQueue::new_shared() })).poll_events(), 0);
-    assert_eq!(FileDescriptor::PidFd(Arc::new(PidFd)).poll_events(), 0x1);
-    assert_eq!(dev(false, 0x40).poll_events(), 0x40);
-    let (_, v) = vnode("poll", b"", O_RDONLY);
-    assert_eq!(v.poll_events(), 0x5);
-    let m = MemFd::new("p");
-    assert_eq!(FileDescriptor::MemFd { memfd: m.clone(), flags: O_RDONLY }.poll_events(), 0x1);
-    assert_eq!(FileDescriptor::MemFd { memfd: m.clone(), flags: O_WRONLY }.poll_events(), 0x4);
-    assert_eq!(FileDescriptor::MemFd { memfd: m, flags: O_RDWR }.poll_events(), 0x5);
-    assert_eq!(FileDescriptor::Epoll(Arc::new(Mutex::new(EpollInstance::default()))).poll_events(), 0);
-}
 
-#[test]
-fn wait_queues_per_kind() {
-    setup();
-    common::global_frames();
-    let count = |d: &FileDescriptor| {
-        let mut w = WaitSet::new();
-        d.add_wait_queues(&mut w);
-        (w.queues.len(), w.polled, w.deadlines)
-    };
-    assert_eq!(count(&FileDescriptor::ConsoleIn), (1, false, 0));
-    let p = PipeBuffer::new();
-    assert_eq!(count(&FileDescriptor::PipeRead(p.clone())), (1, false, 0));
-    assert_eq!(count(&FileDescriptor::Socket(Arc::new(Mutex::new(socket::UnixSocket::connected())))), (2, false, 0));
-    let unbound = socket::UnixSocket { role: socket::UnixSocketRole::Unbound, data: vec![], shut: None };
-    assert_eq!(count(&FileDescriptor::Socket(Arc::new(Mutex::new(unbound)))), (0, true, 0));
-    assert_eq!(count(&FileDescriptor::Pty(Arc::new(PtyFile::new()))), (1, false, 0));
-    assert_eq!(count(&FileDescriptor::SignalFd(Arc::new(SignalFd))), (0, false, 0));
-    assert_eq!(count(&FileDescriptor::Unix(Arc::new(unix::UnixSocket))), (1, false, 0));
-    assert_eq!(count(&FileDescriptor::TimerFd(Arc::new(TimerFd { wq: WaitQueue::new_shared() }))), (1, false, 1));
-    assert_eq!(count(&FileDescriptor::PidFd(Arc::new(PidFd))), (1, false, 0));
-    assert_eq!(count(&dev(false, 0)), (0, true, 0));
-    assert_eq!(count(&FileDescriptor::EventFd(EventFd::new(0, 0))), (1, false, 0));
-    let inet = |wq| FileDescriptor::Inet(Arc::new(Mutex::new(InetSocket { wq, events: 0 })));
-    assert_eq!(count(&inet(None)), (0, true, 0));
-    assert_eq!(count(&inet(Some(WaitQueue::new_shared()))), (0, true, 0), "net-server not running: polled");
-    fake::NET_RUNNING.set(true);
-    assert_eq!(count(&inet(Some(WaitQueue::new_shared()))), (1, false, 0));
-    let (_, v) = vnode("waits", b"", O_RDONLY);
-    assert_eq!(count(&v), (0, false, 0));
-    assert_eq!(count(&FileDescriptor::MemFd { memfd: MemFd::new("w"), flags: 0 }), (0, false, 0));
-    assert_eq!(count(&file("/x", true, true, false)), (0, false, 0));
-    assert_eq!(count(&FileDescriptor::Epoll(Arc::new(Mutex::new(EpollInstance::default())))), (0, true, 0));
-}
 
-#[test]
-fn object_ids_tell_open_files_apart() {
-    setup();
-    let p = PipeBuffer::new();
-    let r = FileDescriptor::PipeRead(p.clone());
-    let w = FileDescriptor::PipeWrite(p.clone());
-    assert_eq!(r.object_id() | 1, w.object_id(), "the two ends differ in the low bit");
-    assert_ne!(r.object_id(), w.object_id());
-    assert_eq!(r.clone().object_id(), r.object_id(), "a dup is the same open file");
-    assert_eq!([FileDescriptor::ConsoleIn.object_id(), FileDescriptor::ConsoleOut.object_id(), FileDescriptor::ConsoleErr.object_id()], [1, 2, 3]);
-    let a = file("/a", true, false, false);
-    let b = file("/a", true, false, false);
-    assert_ne!(a.object_id(), b.object_id());
-    let wq = WaitQueue::new_shared;
-    let all = vec![
-        FileDescriptor::Socket(Arc::new(Mutex::new(socket::UnixSocket::connected()))),
-        FileDescriptor::Epoll(Arc::new(Mutex::new(EpollInstance::default()))),
-        FileDescriptor::EventFd(EventFd::new(0, 0)),
-        FileDescriptor::Inet(Arc::new(Mutex::new(InetSocket { wq: None, events: 0 }))),
-        FileDescriptor::Pty(Arc::new(PtyFile::new())),
-        FileDescriptor::SignalFd(Arc::new(SignalFd)),
-        FileDescriptor::Unix(Arc::new(unix::UnixSocket)),
-        FileDescriptor::TimerFd(Arc::new(TimerFd { wq: wq() })),
-        FileDescriptor::PidFd(Arc::new(PidFd)),
-        dev(false, 0),
-        vnode("ids", b"", O_RDONLY).1,
-    ];
-    for d in &all {
-        assert_ne!(d.object_id(), 0);
-    }
-}
 
 // --------------------------------------------------------------- the table
 
@@ -534,25 +371,6 @@ fn pipe_ends_are_counted_through_dup_fork_and_close() {
     assert_eq!(ends(&p), (0, 0));
 }
 
-#[test]
-fn closing_sockets_and_vnodes() {
-    setup();
-    let s = Arc::new(Mutex::new(socket::UnixSocket::connected()));
-    let mut t = FdTable::new_default();
-    let fd = t.alloc_fd(FileDescriptor::Socket(s.clone())).unwrap();
-    t.close(fd).unwrap();
-    assert_eq!(s.lock().shut, Some(socket::SHUT_RDWR));
-    // A file closed by its process drops that process's POSIX locks on it
-    let (ino, v) = vnode("locks", b"", O_RDONLY);
-    let fd = t.alloc_fd(v.clone()).unwrap();
-    t.close(fd).unwrap();
-    assert!(LOCKS.with_borrow(|l| l.contains(&("closed", ino))));
-    // A dead process's table: no lock release (the process's locks went with it)
-    LOCKS.with_borrow_mut(|l| l.clear());
-    t.alloc_fd(v).unwrap();
-    t.close_all();
-    assert!(LOCKS.with_borrow(|l| !l.contains(&("closed", ino))));
-}
 
 #[test]
 fn epoll_readiness_and_wait_queues_through_the_table() {
@@ -596,32 +414,6 @@ fn epoll_readiness_and_wait_queues_through_the_table() {
     assert_eq!(t.trace_describe(1), "1:console=0x5");
 }
 
-#[test]
-fn trace_names_every_kind() {
-    setup();
-    common::global_frames();
-    let wq = WaitQueue::new_shared;
-    let mut t = FdTable::empty();
-    let kinds: Vec<(FileDescriptor, &str)> = vec![
-        (FileDescriptor::PipeWrite(PipeBuffer::new()), "pipe-w"),
-        (FileDescriptor::Socket(Arc::new(Mutex::new(socket::UnixSocket::connected()))), "socket"),
-        (FileDescriptor::EventFd(EventFd::new(0, 0)), "eventfd"),
-        (FileDescriptor::MemFd { memfd: MemFd::new("t"), flags: 2 }, "memfd"),
-        (vnode("trace", b"", O_RDONLY).1, "vnode"),
-        (FileDescriptor::Inet(Arc::new(Mutex::new(InetSocket { wq: None, events: 0 }))), "inet"),
-        (FileDescriptor::Pty(Arc::new(PtyFile::new())), "pty"),
-        (FileDescriptor::SignalFd(Arc::new(SignalFd)), "signalfd"),
-        (FileDescriptor::Unix(Arc::new(unix::UnixSocket)), "unix"),
-        (FileDescriptor::TimerFd(Arc::new(TimerFd { wq: wq() })), "timerfd"),
-        (FileDescriptor::PidFd(Arc::new(PidFd)), "pidfd"),
-        (dev(false, 0), "device"),
-        (file("/f", true, false, false), "file"),
-    ];
-    for (d, name) in kinds {
-        let fd = t.alloc_fd(d).unwrap();
-        assert!(t.trace_describe(fd).starts_with(&format!("{fd}:{name}=")));
-    }
-}
 
 #[test]
 fn server_object_bits() {

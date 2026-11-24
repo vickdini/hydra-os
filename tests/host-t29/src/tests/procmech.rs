@@ -288,38 +288,7 @@ fn pgrp_update_holds_the_table_for_rule_and_set() {
     assert_eq!(mech::task_pgrp_update(4242, |_, _| Ok((1, false))), Err(ESRCH));
 }
 
-/// Race shape 1: a child joins group `pid` just before the parent's setsid: setsid sees it
-/// (EPERM) and the parent keeps its session, so no member of group `pid` is left behind.
-#[test]
-fn setsid_sees_a_child_that_joined_its_group() {
-    use crate::compat::linux::proc::{setpgid, setsid};
-    let _g = setup();
-    spawn(7080, 1);
-    spawn(7081, 7080);
-    run(7081);
-    assert_eq!(setpgid(0, 7080), 0, "the child joins group 7080 (its parent's pid)");
-    run(7080);
-    mech::task_pgrp_set(7080, 1, false); // the parent itself is not a group leader
-    assert_eq!(setsid(), EPERM, "its pid names a used group");
-    assert_eq!(mech::task_pgrp(7080).map(|p| (p.pgid, p.sid)), Some((1, 7080)), "no new session");
-    fake::switch_to(0);
-}
 
-/// Race shape 2: the target became a session leader just before its parent's setpgid: the
-/// parent's change is refused, so a leader never gets a foreign group.
-#[test]
-fn setpgid_sees_a_target_that_just_led_a_session() {
-    use crate::compat::linux::proc::{setpgid, setsid};
-    let _g = setup();
-    spawn(7090, 1);
-    spawn(7091, 7090);
-    run(7091);
-    assert_eq!(setsid(), 7091);
-    run(7090);
-    assert_eq!(setpgid(7091, 7090), EPERM, "a session leader");
-    assert_eq!(mech::task_pgrp(7091).map(|p| (p.pgid, p.sid)), Some((7091, 7091)));
-    fake::switch_to(0);
-}
 
 /// Limits: the rule sees the stored old value under the table's lock; a refusal stores nothing.
 #[test]

@@ -7,7 +7,6 @@
 //! queues) through the fake descriptor table's `readiness`.
 
 use hydra_hosttests::compat::linux::epoll::*;
-use hydra_hosttests::compat::linux::eventfd::EventFd;
 use hydra_hosttests::fake;
 use hydra_hosttests::fs::FileDescriptor;
 
@@ -19,13 +18,6 @@ fn ev(events: u32, data: u64) -> Option<LinuxEpollEvent> {
     Some(LinuxEpollEvent { events, data })
 }
 
-/// Install an eventfd with the given counter at `fd`.
-fn eventfd(fd: usize, counter: u64) -> std::sync::Arc<spin::Mutex<EventFd>> {
-    let e = EventFd::new(0, 0);
-    e.lock().counter = counter;
-    fake::FDS.with_borrow_mut(|f| f.install(fd, FileDescriptor::EventFd(e.clone())));
-    e
-}
 
 fn file(fd: usize) {
     fake::FDS.with_borrow_mut(|f| f.install(fd, FileDescriptor::File { path: "/etc/hosts".into(), readable: true, writable: false }));
@@ -68,68 +60,6 @@ fn ctl_add_mod_del() {
 // ------------------------------------------------------------- readiness
 
 #[test]
-fn level_triggered_reporting() {
-    fake::reset();
-    let efd = eventfd(10, 0);
-    let ep = EpollInstance::new();
-    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN, 0xAA)).unwrap();
-    assert!(collect(&ep, 8).is_empty(), "counter 0: not readable");
-    efd.lock().counter = 3;
-    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 0xAA)]);
-    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 0xAA)], "level-triggered: reported until drained");
-    efd.lock().counter = 0;
-    assert!(collect(&ep, 8).is_empty());
-}
-
-#[test]
-fn only_requested_events_plus_err_and_hup() {
-    fake::reset();
-    eventfd(10, 1); // readable and writable
-    let ep = EpollInstance::new();
-    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLOUT, 1)).unwrap();
-    assert_eq!(collect(&ep, 8), vec![(EPOLLOUT, 1)], "EPOLLIN not requested, not reported");
-    ep.lock().ctl(EPOLL_CTL_MOD, 10, ev(EPOLLIN | EPOLLOUT, 2)).unwrap();
-    assert_eq!(collect(&ep, 8), vec![(EPOLLIN | EPOLLOUT, 2)]);
-}
-
-#[test]
-fn maxevents_limits_the_batch() {
-    fake::reset();
-    let ep = EpollInstance::new();
-    for fd in 10..15 {
-        eventfd(fd, 1);
-        ep.lock().ctl(EPOLL_CTL_ADD, fd as i32, ev(EPOLLIN, fd as u64)).unwrap();
-    }
-    assert_eq!(collect(&ep, 2), vec![(EPOLLIN, 10), (EPOLLIN, 11)]);
-    assert_eq!(collect(&ep, 64).len(), 5);
-}
-
-#[test]
-fn oneshot_fires_once_until_rearmed() {
-    fake::reset();
-    eventfd(10, 1);
-    let ep = EpollInstance::new();
-    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN | EPOLLONESHOT, 7)).unwrap();
-    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 7)]);
-    assert!(collect(&ep, 8).is_empty(), "disabled after firing");
-    assert!(ep.lock().watches.contains_key(&10), "but still registered (MOD re-arms, ADD gives EEXIST)");
-    assert_eq!(ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN, 7)), Err(EEXIST));
-    ep.lock().ctl(EPOLL_CTL_MOD, 10, ev(EPOLLIN | EPOLLONESHOT, 8)).unwrap();
-    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 8)]);
-}
-
-#[test]
-fn oneshot_without_a_match_stays_armed() {
-    fake::reset();
-    let efd = eventfd(10, 0);
-    let ep = EpollInstance::new();
-    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN | EPOLLONESHOT, 1)).unwrap();
-    assert!(collect(&ep, 8).is_empty());
-    efd.lock().counter = 1;
-    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 1)], "fires on the first real event");
-}
-
-#[test]
 fn edge_triggered_regular_files_fire_once() {
     fake::reset();
     file(20);
@@ -144,79 +74,4 @@ fn edge_triggered_regular_files_fire_once() {
     lt.lock().ctl(EPOLL_CTL_ADD, 20, ev(EPOLLIN, 5)).unwrap();
     assert_eq!(collect(&lt, 8).len(), 1);
     assert_eq!(collect(&lt, 8).len(), 1, "level-triggered files: always ready");
-}
-
-#[test]
-fn edge_triggered_eventfd_reports_once_per_wakeup() {
-    // An eventfd that keeps a value is not reported again until it is written or read
-    // (a wakeup of its queue): level-triggered, Firefox's event loops never slept
-    fake::reset();
-    let e = eventfd(10, 1);
-    let ep = EpollInstance::new();
-    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN | EPOLLET, 1)).unwrap();
-    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 1)]);
-    assert!(collect(&ep, 8).is_empty(), "still readable, but no new edge");
-    e.lock().wq.wake_all(); // a write
-    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 1)], "a wakeup is a new edge");
-    assert!(collect(&ep, 8).is_empty());
-}
-
-#[test]
-fn edge_triggered_eventfd_needs_readiness_too() {
-    // A wakeup while the eventfd is empty reports nothing; the edge is not used up
-    fake::reset();
-    let e = eventfd(10, 0);
-    let ep = EpollInstance::new();
-    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN | EPOLLET, 1)).unwrap();
-    assert!(collect(&ep, 8).is_empty());
-    e.lock().counter = 3;
-    e.lock().wq.wake_all();
-    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 1)]);
-}
-
-#[test]
-fn edge_triggered_eventfd_is_rearmed_by_ctl_mod() {
-    // EPOLL_CTL_MOD re-arms the watch: a ready eventfd is reported again (Linux)
-    fake::reset();
-    eventfd(10, 1);
-    let ep = EpollInstance::new();
-    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN | EPOLLET, 1)).unwrap();
-    assert_eq!(collect(&ep, 8).len(), 1);
-    assert!(collect(&ep, 8).is_empty());
-    ep.lock().ctl(EPOLL_CTL_MOD, 10, ev(EPOLLIN | EPOLLET, 2)).unwrap();
-    assert_eq!(collect(&ep, 8), vec![(EPOLLIN, 2)]);
-}
-
-#[test]
-fn level_triggered_eventfd_reports_every_time() {
-    fake::reset();
-    eventfd(10, 1);
-    let ep = EpollInstance::new();
-    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN, 1)).unwrap();
-    assert_eq!(collect(&ep, 8).len(), 1);
-    assert_eq!(collect(&ep, 8).len(), 1);
-}
-
-#[test]
-fn wait_set_covers_watched_descriptors() {
-    fake::reset();
-    eventfd(10, 0);
-    file(11);
-    let ep = EpollInstance::new();
-    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN, 0)).unwrap();
-    ep.lock().ctl(EPOLL_CTL_ADD, 11, ev(EPOLLIN, 0)).unwrap();
-    ep.lock().ctl(EPOLL_CTL_ADD, 12, ev(EPOLLIN, 0)).unwrap(); // not open
-    let _waits = epoll_wait_set(&ep); // registers queues of open descriptors only
-}
-
-#[test]
-fn closing_a_descriptor_removes_its_watch() {
-    fake::reset();
-    eventfd(10, 0);
-    let ep = EpollInstance::new();
-    ep.lock().ctl(EPOLL_CTL_ADD, 10, ev(EPOLLIN, 0xDEAD)).unwrap();
-    fake::FDS.with_borrow_mut(|f| f.close(10)).unwrap();
-    assert!(collect(&ep, 8).is_empty(), "closed fd still reported: {:?}", collect(&ep, 8));
-    eventfd(10, 1); // the number is reused by an unrelated, readable eventfd
-    assert!(collect(&ep, 8).is_empty(), "new file reported under the old watch: {:?}", collect(&ep, 8));
 }

@@ -64,7 +64,6 @@ pub enum FileDescriptor {
     ConsoleErr,
     PipeRead(Arc<Mutex<PipeBuffer>>),
     PipeWrite(Arc<Mutex<PipeBuffer>>),
-    Socket(Arc<Mutex<crate::compat::linux::socket::UnixSocket>>),
     Epoll(Arc<Mutex<crate::compat::linux::epoll::EpollInstance>>),
     EventFd(Arc<Mutex<FakeObj>>),
     MemFd { memfd: Arc<Mutex<crate::compat::linux::memfd::MemFd>>, flags: u32 },
@@ -96,7 +95,6 @@ impl FileDescriptor {
             FileDescriptor::ConsoleOut => 2,
             FileDescriptor::ConsoleErr => 3,
             FileDescriptor::PipeRead(a) | FileDescriptor::PipeWrite(a) => of(a),
-            FileDescriptor::Socket(a) => of(a),
             FileDescriptor::Epoll(a) => of(a),
             FileDescriptor::EventFd(a) | FileDescriptor::Inet(a) => of(a),
             FileDescriptor::Unix(a) => of(a),
@@ -139,7 +137,6 @@ impl FileDescriptor {
                 Ok(n)
             }
             FileDescriptor::PipeRead(p) => Ok(p.lock().read(buf)),
-            FileDescriptor::Socket(s) => s.lock().read(buf),
             FileDescriptor::MemFd { memfd, .. } => memfd.lock().read(buf),
             _ => Err("Bad file descriptor"),
         }
@@ -181,7 +178,6 @@ impl FileDescriptor {
                 Ok(n)
             }
             FileDescriptor::PipeWrite(p) => p.lock().write(data),
-            FileDescriptor::Socket(s) => s.lock().write(data),
             FileDescriptor::MemFd { memfd, .. } => memfd.lock().write(data),
             _ => Err("Bad file descriptor"),
         }

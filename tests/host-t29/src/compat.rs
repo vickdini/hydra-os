@@ -46,8 +46,6 @@ pub mod linux_host {
     pub mod prof;
     #[path = "../../../../../src/compat/linux/landlock.rs"]
     pub mod landlock;
-    #[path = "../../../../../src/compat/linux/socket.rs"]
-    pub mod socket;
     #[path = "../../../../../src/compat/linux/epoll.rs"]
     pub mod epoll;
 

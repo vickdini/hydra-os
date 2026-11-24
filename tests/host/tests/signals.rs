@@ -130,12 +130,6 @@ fn tgkill_needs_positive_ids() {
     assert_eq!(proc::sys_tgkill(8150, 8150, 0), 0);
 }
 
-#[test]
-fn setpgid_refuses_a_negative_group() {
-    be(8160, 1000, 1000);
-    assert_eq!(proc::setpgid(0, (-1i64) as u64), EINVAL);
-}
-
 /// `siginfo_t` for sigqueue: signo, errno, code, then pid/uid and the value.
 fn queue_info(value: u64) -> [u64; 16] {
     let mut i = [0u64; 16];

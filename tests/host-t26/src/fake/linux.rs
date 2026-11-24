@@ -707,7 +707,6 @@ pub mod pidfd {
     }
     pub fn pid_of(fd: u64) -> Result<u64, i64> {
         crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
-            Some(crate::fs::FileDescriptor::PidFd(p)) => Ok(p.pid),
             Some(_) => Err(-22),
             None => Err(-9),
         })

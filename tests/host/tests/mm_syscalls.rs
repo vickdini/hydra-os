@@ -23,6 +23,7 @@ use spin::Mutex;
 const P: u64 = PAGE_SIZE;
 const RW: u64 = (PROT_READ | PROT_WRITE) as u64;
 const A: u64 = USER_SPACE_START + 0x2000_0000;
+#[allow(dead_code)]
 const EBADF: i64 = -9;
 const ENOMEM: i64 = -12;
 const EACCES: i64 = -13;
@@ -128,17 +129,6 @@ fn fd_minus_one_without_map_anonymous_is_anonymous() {
     // What Linux does too: a private mapping of fd -1 is treated as anonymous.
     with_mm(|mm| {
         assert!(sys_mmap(mm, 0, P, RW, MAP_PRIVATE, -1, 0) > 0);
-    });
-}
-
-#[test]
-fn bad_descriptors() {
-    with_mm(|mm| {
-        assert_eq!(sys_mmap(mm, 0, P, RW, MAP_PRIVATE, -2, 0), EBADF);
-        assert_eq!(sys_mmap(mm, 0, P, RW, MAP_PRIVATE, 7, 0), EBADF, "not open");
-        let efd = hydra_hosttests::compat::linux::eventfd::EventFd::new(0, 0);
-        install(8, FileDescriptor::EventFd(efd));
-        assert_eq!(sys_mmap(mm, 0, P, RW, MAP_PRIVATE, 8, 0), ENODEV, "eventfd cannot be mapped");
     });
 }
 

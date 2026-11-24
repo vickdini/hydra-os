@@ -50,76 +50,6 @@ fn fcntl_descriptor_flags() {
 }
 
 #[test]
-fn fcntl_status_flags_of_other_descriptors() {
-    let _e = setup();
-    // A by-name file
-    let f = install(FileDescriptor::File { path: "/dev/null".into(), cursor: hydra_hosttests_t26::fs::FileCursor::new(0), readable: false, writable: true, append: false, shown: None });
-    assert_eq!(sys(72, &[f as u64, 3, 0]), 1);
-    assert_eq!(sys(72, &[f as u64, 4, O_APPEND]), 0);
-    assert_eq!(sys(72, &[f as u64, 3, 0]), (1 | O_APPEND) as i64);
-    let rw = install(FileDescriptor::file("/dev/zero"));
-    assert_eq!(sys(72, &[rw as u64, 3, 0]), 2);
-    let ro = install(FileDescriptor::File { path: "/dev/zero".into(), cursor: hydra_hosttests_t26::fs::FileCursor::new(0), readable: true, writable: false, append: false, shown: None });
-    assert_eq!(sys(72, &[ro as u64, 3, 0]), 0);
-    // A memfd keeps its flags
-    let m = install(FileDescriptor::MemFd { memfd: lx::memfd::MemFd::new("m"), flags: 2 });
-    assert_eq!(sys(72, &[m as u64, 4, O_NONBLOCK]), 0);
-    assert_eq!(sys(72, &[m as u64, 3, 0]), (2 | O_NONBLOCK) as i64);
-    // An internet socket
-    let s = Arc::new(spin::Mutex::new(lx::inet::InetSocket::default()));
-    let sfd = install(FileDescriptor::Inet(s.clone()));
-    assert_eq!(sys(72, &[sfd as u64, 4, O_NONBLOCK]), 0);
-    assert!(s.lock().nonblock);
-    assert_eq!(sys(72, &[sfd as u64, 3, 0]), (2 | O_NONBLOCK) as i64);
-    // The console
-    let c = install(FileDescriptor::ConsoleOut);
-    assert_eq!(sys(72, &[c as u64, 4, O_NONBLOCK]), 0);
-    assert!(lx::tty::nonblock());
-    assert_eq!(sys(72, &[c as u64, 3, 0]), (2 | O_NONBLOCK) as i64);
-    // eventfd, timerfd (wave9 G9-C: inotify instances are vfs-server's)
-    let e = lx::eventfd::EventFd::new(0);
-    let efd = install(FileDescriptor::EventFd(e.clone()));
-    assert_eq!(sys(72, &[efd as u64, 4, O_NONBLOCK]), 0);
-    assert!(e.lock().nonblocking);
-    assert_eq!(sys(72, &[efd as u64, 3, 0]), (2 | O_NONBLOCK) as i64);
-    let t = Arc::new(lx::timerfd::TimerFd::default());
-    let tfd = install(FileDescriptor::TimerFd(t.clone()));
-    assert_eq!(sys(72, &[tfd as u64, 4, O_NONBLOCK]), 0);
-    assert!(t.get_nonblock());
-    assert_eq!(sys(72, &[tfd as u64, 3, 0]), (2 | O_NONBLOCK) as i64);
-    // A device, a Unix socket, a signalfd, a pty
-    let d: Arc<dyn lx::chardev::CharDevice> = Arc::new(lx::chardev::TestDev::new("/dev/x", 0));
-    let dfd = install(FileDescriptor::Device(d.clone()));
-    assert_eq!(sys(72, &[dfd as u64, 4, O_NONBLOCK]), 0);
-    assert!(d.nonblock());
-    assert_eq!(sys(72, &[dfd as u64, 3, 0]), (2 | O_NONBLOCK) as i64);
-    let u = lx::unix::UnixSocket::new(3);
-    let ufd = install(FileDescriptor::Unix(u.clone()));
-    assert_eq!(sys(72, &[ufd as u64, 4, O_NONBLOCK]), 0);
-    assert_eq!(sys(72, &[ufd as u64, 3, 0]), (2 | O_NONBLOCK) as i64);
-    let sg = Arc::new(lx::signalfd::SignalFd::default());
-    let sgfd = install(FileDescriptor::SignalFd(sg.clone()));
-    assert_eq!(sys(72, &[sgfd as u64, 4, O_NONBLOCK]), 0);
-    assert_eq!(sys(72, &[sgfd as u64, 3, 0]), O_NONBLOCK as i64);
-    let p = lx::pty::PtyFile::named("/dev/pts/0", false);
-    let pfd = install(FileDescriptor::Pty(p.clone()));
-    assert_eq!(sys(72, &[pfd as u64, 4, O_NONBLOCK]), 0);
-    assert_eq!(sys(72, &[pfd as u64, 3, 0]), (2 | O_NONBLOCK) as i64);
-    // Pipe ends: the write end reports O_WRONLY
-    let pipe = hydra_hosttests_t26::fs::pipe::PipeBuffer::new();
-    let r = install(FileDescriptor::PipeRead(pipe.clone()));
-    let w = install(FileDescriptor::PipeWrite(pipe.clone()));
-    assert_eq!(sys(72, &[w as u64, 4, O_NONBLOCK]), 0);
-    assert!(pipe.lock().write_nonblock && !pipe.lock().read_nonblock);
-    assert_eq!(sys(72, &[w as u64, 3, 0]), (1 | O_NONBLOCK) as i64);
-    assert_eq!(sys(72, &[r as u64, 3, 0]), 0);
-    // A legacy socket has no flags here
-    let so = install(FileDescriptor::Socket(Arc::new(spin::Mutex::new(Default::default()))));
-    assert_eq!(sys_opt(72, &[so as u64, 3, 0]), None);
-    assert_eq!(sys_opt(72, &[so as u64, 4, 0]), None);
-}
-
-#[test]
 fn fcntl_seals_and_server_pipes() {
     let _e = setup();
     let m = lx::memfd::MemFd::new("m");
@@ -337,22 +267,6 @@ fn statfs_reports_the_file_system() {
 }
 
 #[test]
-fn fstatfs_by_descriptor_kind() {
-    let _e = setup();
-    memfs::mkfile("/f", b"");
-    let b = buf(120);
-    let magic = |fd: i64| {
-        assert_eq!(sys(138, &[fd as u64, b]), 0);
-        i64::from_le_bytes(read(b, 8).try_into().unwrap())
-    };
-    assert_eq!(magic(open("/f", O_RDONLY)), 0x2fc1_2fc1);
-    assert_eq!(magic(install(FileDescriptor::Pty(lx::pty::PtyFile::named("/dev/ptmx", false)))), 0x1cd1);
-    assert_eq!(magic(install(FileDescriptor::file("/proc/version"))), 0x9fa0);
-    assert_eq!(magic(install(FileDescriptor::ConsoleIn)), 0x2fc1_2fc1);
-    assert_eq!(sys(138, &[900, b]), EBADF);
-}
-
-#[test]
 fn sync_calls() {
     let _e = setup();
     memfs::mkfile("/f", b"");
@@ -378,51 +292,4 @@ fn sync_calls() {
     // A failed write-back
     memfs::fail("sync", -5);
     assert_eq!(sys(74, &[fd]), -5);
-}
-
-#[test]
-fn fstat_of_every_kind() {
-    let _e = setup();
-    use lx::types::LinuxStat;
-    let check = |fd: i64| -> LinuxStat { fstat(fd).unwrap() };
-    memfs::mkfile("/f", b"abc");
-    assert_eq!(check(open("/f", O_RDONLY)).st_size, 3);
-    assert_eq!(check(install(FileDescriptor::file("/dev/null"))).st_mode, 0o020666);
-    assert_eq!(check(install(FileDescriptor::Pty(lx::pty::PtyFile::named("/dev/ptmx", false)))).st_dev, lx::pty::PTS_DEV);
-    let u = check(install(FileDescriptor::Unix(lx::unix::UnixSocket::new(42))));
-    assert_eq!((u.st_ino, u.st_mode), (42, 0o140777));
-    assert_eq!(check(install(FileDescriptor::Socket(Arc::new(spin::Mutex::new(Default::default()))))).st_mode, 0o140777);
-    assert_eq!(check(install(FileDescriptor::ConsoleErr)).st_ino, 0x401);
-    let m = lx::memfd::MemFd::new("m");
-    m.lock().write_at(0, &[1u8; 1000]);
-    let ms = check(install(FileDescriptor::MemFd { memfd: m, flags: 0 }));
-    assert_eq!((ms.st_mode, ms.st_size, ms.st_blocks), (0o100444, 1000, 2));
-    let mw = check(install(FileDescriptor::MemFd { memfd: lx::memfd::MemFd::new("w"), flags: 2 }));
-    assert_eq!(mw.st_mode, 0o100666);
-    let p = hydra_hosttests_t26::fs::pipe::PipeBuffer::new();
-    assert_eq!(check(install(FileDescriptor::PipeWrite(p))).st_mode, 0o010600);
-    assert_eq!(check(install(FileDescriptor::Inet(Arc::new(spin::Mutex::new(Default::default()))))).st_mode, 0o140777);
-    for d in [
-        FileDescriptor::EventFd(lx::eventfd::EventFd::new(0)),
-        FileDescriptor::Epoll(Arc::new(spin::Mutex::new(Default::default()))),
-        FileDescriptor::SignalFd(Arc::new(Default::default())),
-        FileDescriptor::TimerFd(Arc::new(Default::default())),
-        FileDescriptor::PidFd(Arc::new(lx::pidfd::PidFd { pid: 3 })),
-    ] {
-        let st = check(install(d));
-        assert_eq!(st.st_mode, 0o600);
-        assert_eq!(st.st_dev, 0xd);
-    }
-    // A device reports its own stat
-    let d: Arc<dyn lx::chardev::CharDevice> = Arc::new(lx::chardev::TestDev::new("/dev/x", 0));
-    assert_eq!(check(install(FileDescriptor::Device(d))).st_mode, 0);
-    assert_eq!(fstat(-1).unwrap_err(), EBADF);
-    assert_eq!(fstat(700).unwrap_err(), EBADF);
-    // A by-name file that is not a pseudo file is not ours
-    let x = install(FileDescriptor::file("/not/pseudo"));
-    assert_eq!(sys_opt(5, &[x as u64, buf(256)]), None);
-    // Anonymous objects are owned by the caller
-    become_user(1000);
-    let st = check(install(FileDescriptor::EventFd(lx::eventfd::EventFd::new(0))));
-    assert_eq!((st.st_uid, st.st_gid), (1000, 1000));
 }

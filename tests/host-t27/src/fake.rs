@@ -744,16 +744,9 @@ pub mod fd {
     pub enum FileDescriptor {
         PipeRead(Arc<spin::Mutex<crate::fs::pipe::PipeBuffer>>),
         PipeWrite(Arc<spin::Mutex<crate::fs::pipe::PipeBuffer>>),
-        Socket(Arc<spin::Mutex<lx::socket::UnixSocket>>),
         Epoll(Arc<spin::Mutex<lx::epoll::EpollInstance>>),
-        EventFd(Arc<spin::Mutex<lx::eventfd::EventFd>>),
         MemFd { memfd: Arc<spin::Mutex<MemFdStub>>, flags: u32 },
         Vnode(Arc<spin::Mutex<Vnode>>),
-        Inet(Arc<spin::Mutex<lx::inet::InetSocket>>),
-        SignalFd(Arc<lx::signalfd::SignalFd>),
-        Unix(Arc<lx::unix::UnixSocket>),
-        TimerFd(Arc<lx::timerfd::TimerFd>),
-        PidFd(Arc<lx::pidfd::PidFd>),
         Device(Arc<dyn lx::chardev::CharDevice>),
         File { path: String, readable: bool, writable: bool },
     }
@@ -767,16 +760,9 @@ pub mod fd {
             use FileDescriptor::*;
             match self {
                 PipeRead(a) | PipeWrite(a) => of(a),
-                Socket(a) => of(a),
                 Epoll(a) => of(a),
-                EventFd(a) => of(a),
                 MemFd { memfd, .. } => of(memfd),
                 Vnode(a) => of(a),
-                Inet(a) => of(a),
-                SignalFd(a) => of(a),
-                Unix(a) => of(a),
-                TimerFd(a) => of(a),
-                PidFd(a) => of(a),
                 Device(a) => of(a),
                 File { path, .. } => path.as_ptr() as usize,
             }
@@ -820,15 +806,8 @@ pub mod fd {
         pub fn readiness(&self, desc: &FileDescriptor) -> u32 {
             use FileDescriptor::*;
             match desc {
-                EventFd(e) => e.lock().poll_events(),
                 Device(d) => d.poll_events(),
                 File { .. } | Vnode(_) | MemFd { .. } => 0x1 | 0x4,
-                Unix(s) => s.poll_events(),
-                Inet(s) => s.lock().poll_events(),
-                TimerFd(t) => t.poll_events(),
-                SignalFd(s) => s.poll_events(),
-                PidFd(p) => p.poll_events(),
-                Socket(s) => s.lock().poll_events(),
                 PipeRead(p) => {
                     let p = p.lock();
                     (if p.available_read() > 0 { 0x1 } else { 0 }) | (if p.writers_count() == 0 { 0x10 } else { 0 })
@@ -843,15 +822,7 @@ pub mod fd {
         pub fn add_wait_queues_for(&self, desc: &FileDescriptor, waits: &mut wait::WaitSet) {
             use FileDescriptor::*;
             match desc {
-                EventFd(e) => waits.add(wait::QueueRef::Shared(e.lock().wq.clone())),
                 Device(d) => d.add_wait_queues(waits),
-                Unix(s) => s.add_wait_queues(waits),
-                TimerFd(t) => waits.add(wait::QueueRef::Shared(t.wq.clone())),
-                Inet(s) => match s.lock().wait_queue() {
-                    Some(q) => waits.add(wait::QueueRef::Shared(q)),
-                    None => waits.polled = true,
-                },
-                PidFd(_) => waits.add(wait::QueueRef::Static(&lx::pidfd::EXIT_WQ)),
                 _ => {}
             }
         }
