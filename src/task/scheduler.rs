@@ -1821,7 +1821,9 @@ impl Scheduler {
         // "pending" never wakes its caller, so it slept with the signal pending (the ptrace
         // attach/detach hang: SIGSTOP never stopped a child waiting in a pipe read). The
         // caller then waits the ordinary way, which looks for signals after blocking.
-        if !keep {
+        // (Only a marked task is looked up: the signal's wake-up marks it under this lock
+        // before, or finds it blocked after, so the common switch stays one field read.)
+        if !keep && self.tasks[curr_idx].wake_pending {
             let t = &self.tasks[curr_idx];
             if crate::compat::linux::proc::signal_pending_for(t.id.0, t.tgid) {
                 return false;
