@@ -263,6 +263,35 @@ pub mod arch {
         }
     }
 
+    // wave11 GH begin
+    /// *stub* The boot log: nothing is kept.
+    pub mod bootlog {
+        pub fn early() {}
+        pub fn prepare_file() {}
+        pub fn start_writer() {}
+        pub fn check_pool() {}
+        pub fn after_panic() {}
+        pub fn append(_text: &[u8]) {}
+        pub fn at_power(_what: &'static str) {}
+    }
+    /// The boot words' real logic.
+    #[path = "../../../../src/arch/bootwords.rs"]
+    pub mod bootwords;
+    /// *stub* The boot words: none (the tests give theirs to `discover_with`).
+    pub mod bootopts {
+        pub fn init() {}
+        pub fn words() -> &'static super::bootwords::Words {
+            static NONE: super::bootwords::Words = super::bootwords::Words::new();
+            &NONE
+        }
+        pub fn say(words: &[&[u8]]) -> bool {
+            words.iter().any(|w| self::words().has(w))
+        }
+        pub fn ucs2() -> Vec<u8> {
+            words().ucs2()
+        }
+    }
+    // wave11 GH end
     /// *stub* The fake clock.
     pub mod pit {
         use crate::fake;

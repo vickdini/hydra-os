@@ -282,7 +282,15 @@ fn collect_disk_logs(stick_logs: &mut uefi::proto::media::file::Directory, bounc
     use uefi::proto::media::file::{File, FileAttribute, FileMode};
     use uefi::proto::media::fs::SimpleFileSystem;
     let own = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()).ok().and_then(|i| i.device());
+    // The firmware may have connected only the device it booted from: every controller's
+    // drivers first (the disks, their partitions, their file systems)
+    if let Ok(all) = uefi::boot::locate_handle_buffer(uefi::boot::SearchType::AllHandles) {
+        for &h in all.iter() {
+            let _ = uefi::boot::connect_controller(h, &[], None, true);
+        }
+    }
     let Ok(handles) = uefi::boot::locate_handle_buffer(uefi::boot::SearchType::from_proto::<SimpleFileSystem>()) else { return };
+    let mut hydra_volumes = 0;
     #[repr(C, align(8))]
     struct EntryBuf([u8; 1024]);
     let mut eb = EntryBuf([0; 1024]);
@@ -300,6 +308,7 @@ fn collect_disk_logs(stick_logs: &mut uefi::proto::media::file::Directory, bounc
         if !is(&mut root, "EFI\\hydra\\hydra.efi", &mut b) || is(&mut root, "hydra\\live", &mut b) {
             continue;
         }
+        hydra_volumes += 1;
         let Some(c) = crate::fs::bootfs::path_to_cstr16(DIR, &mut b) else { continue };
         let Some(mut logs) = root.open(c, FileMode::Read, FileAttribute::empty()).ok().and_then(|f| f.into_directory()) else { continue };
         let mut b2 = [0u16; 64];
@@ -336,9 +345,13 @@ fn collect_disk_logs(stick_logs: &mut uefi::proto::media::file::Directory, bounc
             }
         }
     }
-    if copied > 0 {
-        crate::kprintln!("[bootlog] copied {} log files of the installed system to \\{}\\disk on the stick", copied, DIR);
-    }
+    crate::kprintln!(
+        "[bootlog] {} other EFI volumes, {} with an installed Hydra: {} of its log files copied to \\{}\\disk on the stick",
+        handles.len().saturating_sub(1),
+        hydra_volumes,
+        copied,
+        DIR
+    );
 }
 
 /// After the disks are known (`blockdev::scan`): starts the task that writes the log into

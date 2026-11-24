@@ -221,8 +221,15 @@ fn find_table(sig: &[u8; 4]) -> Option<alloc::vec::Vec<u8>> {
 }
 
 /// Whether Hydra runs in a virtual machine (CPUID's hypervisor bit).
+#[cfg(target_os = "uefi")]
 fn in_vm() -> bool {
     core::arch::x86_64::__cpuid(1).ecx & (1 << 31) != 0
+}
+
+/// Host builds (unit tests): as in a virtual machine (the ports are recorded).
+#[cfg(not(target_os = "uefi"))]
+fn in_vm() -> bool {
+    true
 }
 
 /// Busy-waits about `ms` milliseconds.

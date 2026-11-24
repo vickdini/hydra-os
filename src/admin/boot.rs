@@ -77,7 +77,8 @@ pub fn discover_with(fw: Option<&[u8]>, opts: Option<&[u8]>) {
 /// The boot entry's load options as lower-case ASCII (and how many bytes of it).
 fn load_options_text() -> Option<([u8; 512], usize)> {
     // wave11 GH: the boot words (load options, \hydra\options.txt, the start menu)
-    Some(options_text(&crate::arch::bootopts::ucs2()))
+    let opts = crate::arch::bootopts::ucs2();
+    (!opts.is_empty()).then(|| options_text(&opts))
 }
 
 /// UCS-2 load options `opts` as lower-case ASCII (other characters as `?`), at most 512

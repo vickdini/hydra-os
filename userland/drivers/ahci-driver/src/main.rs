@@ -789,6 +789,49 @@ fn find_disk_ports(hba: &Hba, wanted: Option<usize>) -> alloc::vec::Vec<usize> {
         .collect()
 }
 
+// wave11 GH begin
+/// Ports with a device on an established link but no device signature (`PxSIG` all ones:
+/// the firmware reset or stopped the port it booted from, and the signature arrives only in
+/// a received FIS): receives FISes into a scratch page, resets the link (COMRESET) and waits
+/// up to 1 s for the signature, then stops receiving again. Seen in QEMU (q35, the firmware
+/// had used the disk); real firmware may leave ports the same way.
+fn refresh_signatures(hba: &Hba, wanted: Option<usize>, cap: u32) {
+    let pi = hba.read(HBA_PI);
+    let todo: alloc::vec::Vec<usize> = (0..32)
+        .filter(|&p| pi & (1 << p) != 0 && wanted.map_or(true, |w| w == p))
+        .filter(|&p| hba.port_read(p, PX_SSTS) & 0xF != 0 && hba.port_read(p, PX_SIG) == 0xFFFF_FFFF)
+        .collect();
+    if todo.is_empty() {
+        return;
+    }
+    let Ok((_, fb)) = sys::dma_alloc(4096) else { return };
+    if cap & CAP_S64A == 0 && fb >= 0x1_0000_0000 {
+        return;
+    }
+    for p in todo {
+        // The engine and FIS receive off (they may still run from the firmware)
+        hba.port_write(p, PX_CMD, hba.port_read(p, PX_CMD) & !CMD_ST);
+        hba.wait_port(p, PX_CMD, CMD_CR, 0, 500);
+        hba.port_write(p, PX_CMD, hba.port_read(p, PX_CMD) & !CMD_FRE);
+        hba.wait_port(p, PX_CMD, CMD_FR, 0, 500);
+        hba.port_write(p, PX_FB, fb as u32);
+        hba.port_write(p, PX_FBU, (fb >> 32) as u32);
+        hba.port_write(p, PX_SERR, 0xFFFF_FFFF);
+        hba.port_write(p, PX_CMD, hba.port_read(p, PX_CMD) | CMD_FRE | CMD_POD | CMD_SUD);
+        let sctl = hba.port_read(p, PX_SCTL) & !0xF;
+        hba.port_write(p, PX_SCTL, sctl | 1);
+        sys::sleep_ms(2);
+        hba.port_write(p, PX_SCTL, sctl);
+        hba.wait_port(p, PX_SSTS, 0xF, 3, 1000);
+        let got = hba.wait_port(p, PX_SIG, 0xFFFF_FFFF, SIG_ATA, 1000);
+        hba.port_write(p, PX_SERR, 0xFFFF_FFFF);
+        hba.port_write(p, PX_CMD, hba.port_read(p, PX_CMD) & !CMD_FRE);
+        hba.wait_port(p, PX_CMD, CMD_FR, 0, 500);
+        println!("[ahci-driver] port {}: no signature from the firmware's use; after a link reset {:#x}{}", p, hba.port_read(p, PX_SIG), if got { "" } else { " (still none)" });
+    }
+}
+// wave11 GH end
+
 /// The driver's disks, for the unit logic shared with the other block drivers.
 struct Set(alloc::vec::Vec<Disk>);
 
@@ -841,6 +884,9 @@ fn main(args: &[&str]) {
     let mut ports = find_disk_ports(&hba, wanted);
     if ports.is_empty() {
         sys::sleep_ms(200);
+        // wave11 GH: a device on the link without a signature (the firmware stopped the
+        // port it used): a fresh one, as Linux's probe does with its hard reset
+        refresh_signatures(&hba, wanted, cap);
         ports = find_disk_ports(&hba, wanted);
     }
     if ports.is_empty() {
