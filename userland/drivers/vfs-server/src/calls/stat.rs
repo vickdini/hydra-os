@@ -36,10 +36,12 @@ pub fn stat(cx: &Cx) -> Result<i64, i64> {
     if x {
         let mut b = enc::statx(&attr);
         crate::fuse::fix_stat(&attr, &mut b, true); // wave9 G6b-2
+        enc::fix_console_stat(&attr, &mut b, true); // wave10 GV2
         cx.copy_out(out, &b)?;
     } else {
         let mut b = enc::stat(&attr);
         crate::fuse::fix_stat(&attr, &mut b, false); // wave9 G6b-2
+        enc::fix_console_stat(&attr, &mut b, false); // wave10 GV2
         cx.copy_out(out, &b)?;
     }
     Ok(0)

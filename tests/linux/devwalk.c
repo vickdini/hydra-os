@@ -170,6 +170,12 @@ static void dev_nodes(void) {
     // the console nodes and the terminals
     CHECK(stat("/dev/tty1", &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == makedev(4, 1), "stat /dev/tty1");
     CHECK(stat("/dev/console", &st) == 0 && st.st_rdev == makedev(5, 1), "stat /dev/console");
+    // (review 8: on the console, ttyname finds /dev/ttyN: glibc compares dev, inode, rdev)
+    struct stat c0;
+    if (isatty(0) && fstat(0, &c0) == 0 && c0.st_rdev == makedev(4, 1)) {
+        char *tn = ttyname(0);
+        CHECK(tn && strncmp(tn, "/dev/tty", 8) == 0, "ttyname of the console: %s", tn ? tn : "-");
+    }
     int m = open("/dev/ptmx", O_RDWR | O_NOCTTY);
     CHECK(m >= 0, "open /dev/ptmx");
     if (m >= 0) {

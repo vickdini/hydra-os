@@ -272,3 +272,25 @@ fn readdir_requests_are_bounded() {
     assert_eq!(readdir_max(32768), 1365);
     assert_eq!(readdir_max(u32::MAX as usize), 4096);
 }
+
+// wave10 GV2 (review 8): the console's terminals stat as fstat of a console descriptor shows
+#[test]
+fn console_nodes_stat_as_the_console() {
+    let tty2 = Attr { ino: 99, mode: 0o020620, rdev: (4 << 8) | 2, ..Attr::default() };
+    let mut b = stat(&tty2);
+    fix_console_stat(&tty2, &mut b, false);
+    assert_eq!(u64::from_le_bytes(b[0..8].try_into().unwrap()), CONSOLE_DEV);
+    assert_eq!(u64::from_le_bytes(b[8..16].try_into().unwrap()), CONSOLE_INO);
+    assert_eq!(u64::from_le_bytes(b[40..48].try_into().unwrap()), (4 << 8) | 1);
+    let mut x = statx(&tty2);
+    fix_console_stat(&tty2, &mut x, true);
+    assert_eq!(u64::from_le_bytes(x[32..40].try_into().unwrap()), CONSOLE_INO);
+    assert_eq!(u32::from_le_bytes(x[132..136].try_into().unwrap()), 1);
+    // /dev/console (5:1), other devices, files: unchanged
+    for a in [Attr { ino: 5, mode: 0o020600, rdev: (5 << 8) | 1, ..Attr::default() }, Attr { ino: 6, mode: 0o020666, rdev: (1 << 8) | 3, ..Attr::default() }, Attr { ino: 7, mode: 0o100644, rdev: (4 << 8) | 1, ..Attr::default() }] {
+        let mut b = stat(&a);
+        let o = b;
+        fix_console_stat(&a, &mut b, false);
+        assert_eq!(b, o);
+    }
+}
