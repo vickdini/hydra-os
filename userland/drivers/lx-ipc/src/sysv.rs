@@ -1268,6 +1268,17 @@ pub fn dcall(cx: &Cx) -> i64 {
 /// Handles `semget` (64), `semop` (65), `semctl` (66), `semtimedop` (220), `msgget` (68),
 /// `msgsnd` (69), `msgrcv` (70), `msgctl` (71): `(result, reply flags)`.
 pub fn dispatch(cx: &Cx) -> (i64, u64) {
+    // wave10 G8-2: the shared memory calls that change nothing here (shmat, the stat and info
+    // commands) are sent again if lx-ipc dies while it serves them (a Transparent restart
+    // then looks invisible to their callers)
+    let readonly = match cx.nr {
+        30 => true,
+        31 => matches!(cx.args[1] & !IPC_64, IPC_STAT | IPC_INFO | SHM_STAT | SHM_INFO | SHM_STAT_ANY),
+        _ => false,
+    };
+    if readonly {
+        kstore::resend_safe(cx.page(), cx.id, true);
+    }
     let r = match cx.nr {
         // wave10 G8-2: shared memory
         29 => (shmget(cx), 0),
@@ -1286,12 +1297,7 @@ pub fn dispatch(cx: &Cx) -> (i64, u64) {
     // wave9 GX3: the tables are written before the answer leaves
     // (wave10 G8-2: not after the shared memory calls that change nothing worth keeping:
     // `shmat`, the stat and info commands, a failed call)
-    let quiet = match cx.nr {
-        30 => true,
-        29 | 31 if r.0 < 0 => true,
-        31 => matches!(cx.args[1] & !IPC_64, IPC_STAT | IPC_INFO | SHM_STAT | SHM_INFO | SHM_STAT_ANY),
-        _ => false,
-    };
+    let quiet = readonly || matches!(cx.nr, 29 | 31) && r.0 < 0;
     if !quiet {
         persist(&IPC.lock());
     }

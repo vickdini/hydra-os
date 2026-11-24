@@ -183,6 +183,17 @@ fn idempotent_marks_ipc() {
     assert!(idempotent(71, &[1, 2, 0, 0, 0, 0]));
     assert!(!idempotent(71, &[1, 1, 0, 0, 0, 0]));
     assert!(!idempotent(71, &[1, 0, 0, 0, 0, 0]));
+    // wave10 G8-2: shmget as semget; shmat always (lx-ipc only checks); shmctl reads only
+    assert!(idempotent(29, &[1234, 4096, 0o1000, 0, 0, 0]));
+    assert!(!idempotent(29, &[0, 4096, 0o1000, 0, 0, 0]));
+    assert!(!idempotent(29, &[1234, 4096, 0o3000, 0, 0, 0]));
+    assert!(idempotent(30, &[5, 0, 0o10000, 0, 0, 0]));
+    for cmd in [2u64, 3, 13, 14, 15, 0x100 | 2] {
+        assert!(idempotent(31, &[5, cmd, 0, 0, 0, 0]), "shmctl {:#x}", cmd);
+    }
+    for cmd in [0u64, 1, 11, 12] {
+        assert!(!idempotent(31, &[5, cmd, 0, 0, 0, 0]), "shmctl {}: RMID, SET, LOCK, UNLOCK", cmd);
+    }
     // mq_getsetattr only without a new attribute; mq_timedsend / receive never
     assert!(idempotent(245, &[3, 0, 0x1000, 0, 0, 0]));
     assert!(!idempotent(245, &[3, 0x1000, 0, 0, 0, 0]));

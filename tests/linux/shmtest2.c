@@ -358,6 +358,8 @@ static int bench(void) {
     return 0;
 }
 
+#define CERR(what) do { cerr++; printf("worker %d: %s failed: errno %d\n", k, what, errno); fflush(stdout); } while (0)
+
 // The kill test: one big segment with a counter area the writer advances and the readers
 // check; small segments made, attached, checked and removed all the time.
 static int kill_test(int secs) {
@@ -388,16 +390,18 @@ static int kill_test(int secs) {
                         int s = shmget(IPC_PRIVATE, 1 << 16, 0600);
                         char *q = s >= 0 ? shmat(s, 0, 0) : (void *)-1;
                         calls++;
-                        if (q == (void *)-1) {
-                            cerr++;
+                        if (s < 0) {
+                            CERR("shmget");
+                        } else if (q == (void *)-1) {
+                            CERR("shmat");
                         } else {
                             q[100] = 7;
                             if (nattch(s) != 1 || q[100] != 7)
-                                cerr++;
+                                CERR("nattch of the new segment");
                             shmdt(q);
                         }
                         if (s >= 0 && shmctl(s, IPC_RMID, 0) != 0)
-                            cerr++;
+                            CERR("IPC_RMID");
                     }
                 }
             } else {
@@ -415,10 +419,10 @@ static int kill_test(int secs) {
                         calls++;
                         long na = nattch(id);
                         if (na < 2)
-                            cerr++;
+                            CERR("IPC_STAT nattch");
                         void *q = shmat(id, 0, SHM_RDONLY);
                         if (q == (void *)-1 || ((volatile uint64_t *)q)[512] != 1)
-                            cerr++;
+                            CERR("shmat RDONLY");
                         if (q != (void *)-1)
                             shmdt(q);
                     }
