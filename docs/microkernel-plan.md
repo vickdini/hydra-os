@@ -389,7 +389,7 @@ These are not group work yet, but should not be forgotten:
 - **First test on the real NUC** (i5-4250U): VT-d on in the firmware, the IOMMU log lines, the PCID boot line, e1000e networking, xHCI input, and the installer. No wave has run on real hardware yet. This needs you at the machine; a good time is after wave 4.
 - **The rare `regstress` hang:** both virtual CPUs spinning, once in 6 runs on wave 2's merge, not reproduced since. `suite_loop.sh` takes a task dump if it happens again.
 - **The `lowmem` failure on q35:** the firmware loads the kernel where the test wants to map memory.
-- **A Wi-Fi driver is needed eventually** (user, 2026-11-24): the NUC's card is most likely an Intel Wireless 7260 (mini-PCIe). Needs a driver service for the card, firmware loading, an 802.11 layer and a WPA2 supplicant (or the Linux one through lx-net). Hydra has no Wi-Fi support today; wave 11's NUC run uses an Ethernet cable. Group H estimates the work; to be scheduled in a later wave.
+- **A Wi-Fi driver is needed eventually** (user, 2026-11-24): the NUC uses a **USB Wi-Fi adapter** (model and chipset to be identified: the chipset — e.g. Realtek, MediaTek or Atheros — decides the driver). Needs a USB driver for that chipset on Hydra's xHCI stack, firmware loading, an 802.11 layer and a WPA2 supplicant (or the Linux one through lx-net). Hydra has no Wi-Fi support today; wave 11's NUC run uses an Ethernet cable. Group H estimates the work; to be scheduled in a later wave.
 
 ## Merge order and testing
 
