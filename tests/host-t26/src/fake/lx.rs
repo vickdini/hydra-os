@@ -129,6 +129,13 @@ pub mod proc {
         out[..n].copy_from_slice(&name[..n]);
         out
     }
+    /// *stub* wave10 G7b-2: prctl's dumpable flag (every process is dumpable on the host).
+    pub struct ProcAttrs {
+        pub dumpable: u8,
+    }
+    pub fn proc_attrs(_tgid: u64) -> ProcAttrs {
+        ProcAttrs { dumpable: 1 }
+    }
     /// *mirror* of the kernel's.
     pub struct Tree {
         pub ppid: u64,

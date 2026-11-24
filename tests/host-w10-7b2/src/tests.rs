@@ -39,6 +39,18 @@ fn seek_data_and_hole() {
 }
 
 #[test]
+fn snapshot_bytes_are_capped() {
+    assert!(may_charge(0, 0, 4096));
+    assert!(may_charge(TOTAL_CAP - 10, 0, 10));
+    assert!(!may_charge(TOTAL_CAP - 10, 0, 11));
+    assert!(may_charge(0, USER_CAP - 1, 1));
+    assert!(!may_charge(0, USER_CAP, 1));
+    assert!(!may_charge(usize::MAX, 0, 1));
+    assert!(!may_charge(0, usize::MAX, 1));
+    assert!(USER_CAP <= TOTAL_CAP);
+}
+
+#[test]
 fn read_pieces() {
     assert_eq!(piece(10, 0, 4), 0..4);
     assert_eq!(piece(10, 8, 4), 8..10);

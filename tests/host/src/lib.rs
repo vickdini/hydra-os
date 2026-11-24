@@ -713,6 +713,8 @@ pub mod lx {
         pub fn clear_approval(_tid: u64) {}
         pub fn attrs_on_fork(_parent_tid: u64, _parent: u64, _child: u64) {}
         pub fn attrs_on_exec(_tid: u64, _tgid: u64) {}
+        /// *stub* wave10 G7b-2.
+        pub fn attrs_exec_secure(_tgid: u64) {}
         /// *mirror* of the kernel's.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub struct Pgrp {

@@ -56,17 +56,22 @@ pub fn to_caller(id: u64, init: Option<u64>) -> u64 {
 /// process; with `CAP_SYS_PTRACE`; or when the caller's file-system user ID (here the
 /// effective one) is the target's real, effective and saved user ID **and** its file-system
 /// group ID the target's real, effective and saved group ID (a set-group-ID program is not
-/// readable by its user).
-pub fn may_see(same: bool, target_service: bool, caller: (u32, u32), caller_caps: u64, target_uids: (u32, u32, u32), target_gids: (u32, u32, u32)) -> bool {
+/// readable by its user). wave10 G7b-2: a target that is not dumpable (`PR_SET_DUMPABLE` 0,
+/// or a program that gained privileges at exec: set-ID or file capabilities) is readable
+/// only with `CAP_SYS_PTRACE`, as Linux's `__ptrace_may_access` (one function: 8-1's ptrace
+/// rules can share it).
+pub fn may_see(same: bool, target_service: bool, caller: (u32, u32), caller_caps: u64, target_uids: (u32, u32, u32), target_gids: (u32, u32, u32), target_dumpable: bool) -> bool {
     if same {
         return true;
     }
     if target_service {
         return false;
     }
+    if caller_caps & CAP_SYS_PTRACE != 0 {
+        return true;
+    }
     let (u, g) = caller;
-    caller_caps & CAP_SYS_PTRACE != 0
-        || (u == target_uids.0 && u == target_uids.1 && u == target_uids.2 && g == target_gids.0 && g == target_gids.1 && g == target_gids.2)
+    target_dumpable && u == target_uids.0 && u == target_uids.1 && u == target_uids.2 && g == target_gids.0 && g == target_gids.1 && g == target_gids.2
 }
 
 /// Whether the info primitives answer for a caller (`init`: its PID namespace's init, `None`
@@ -262,6 +267,12 @@ pub mod glue {
     /// and PID namespace's init.
     fn caller(id: u64) -> Result<Caller, i64> {
         let client = crate::lx::client_of(id).ok_or(ESRCH)?;
+        // wave10 G7b-2: a `/proc` snapshot being made again answers with the rights of the
+        // process that opened it (as Linux checks at open), not the reader's
+        if let Some(o) = crate::lx::procsnap::glue::opener_of(client) {
+            may_query(o.init, o.in_userns, false)?;
+            return Ok(Caller { tgid: o.tgid, euid: o.euid, egid: o.egid, caps: o.caps, init: o.init });
+        }
         let (tgid, euid, egid, caps, in_userns) = crate::task::SCHEDULER
             .lock()
             .with_task_mut(TaskId(client), |t| (t.tgid, t.euid, t.egid, if t.caps.in_userns { 0 } else { t.caps.effective }, t.caps.in_userns))
@@ -427,7 +438,7 @@ pub mod glue {
         if let Err(e) = may_query(init, false, service) {
             return e;
         }
-        if !may_see(pid == ctgid, service, (euid, egid), caps, uids, gids) {
+        if !may_see(pid == ctgid, service, (euid, egid), caps, uids, gids, crate::lx::proc::proc_attrs(pid).dumpable == 1) {
             return EACCES;
         }
         out_bytes(buf, len, &lx::fs::live_environ(pid).unwrap_or_default())
@@ -450,7 +461,7 @@ pub mod glue {
         if let Err(e) = may_query(init, false, service) {
             return e;
         }
-        if !may_see(pid == ctgid, service, (euid, egid), caps, uids, gids) {
+        if !may_see(pid == ctgid, service, (euid, egid), caps, uids, gids, crate::lx::proc::proc_attrs(pid).dumpable == 1) {
             return EACCES;
         }
         let entries = mm.map(|m| m.lock().maps_entries()).unwrap_or_default();

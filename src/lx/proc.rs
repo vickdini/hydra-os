@@ -534,6 +534,15 @@ pub fn attrs_on_exec(tid: u64, tgid: u64) {
     }
 }
 
+// wave10 G7b-2 begin
+/// Process `tgid` ran a program that gained privileges (set-user/group-ID to other ids, or
+/// file capabilities): it is not dumpable (Linux sets `suid_dumpable`, 0 here), so its
+/// memory facts (`environ`, `maps`) are hidden from its user.
+pub fn attrs_exec_secure(tgid: u64) {
+    PATTRS.lock().entry(tgid).or_default().dumpable = 0;
+}
+// wave10 G7b-2 end
+
 /// Process `tgid` ended: its records go.
 pub fn attrs_on_exit(tgid: u64) {
     TATTRS.lock().retain(|_, a| a.tgid != tgid);

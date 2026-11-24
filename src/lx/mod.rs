@@ -877,9 +877,10 @@ pub fn call_obj_pseudo(dev: &Arc<dyn crate::compat::linux::chardev::CharDevice>,
 /// Kernel call `nr` (no descriptor object) with four words to the service `plain_svc` names,
 /// for the current thread, with a kernel output buffer: the call's `args` are `[w0,
 /// LX_KBUF_ADDR, room, w1, w2, w3]`, and what the service writes at `args[1]` lands in `out`
-/// (at most `LX_DATA_SIZE` bytes). The caller holds the kernel lock (an ordinary system call
-/// path); the service restarting is waited for as for any call. (`procsnap`'s remakes.)
-pub fn call_kbuf_plain(nr: u64, args: [u64; 4], out: &mut [u8]) -> i64 {
+/// (at most `LX_DATA_SIZE` bytes). `ipc_ns`: the IPC namespace the call names (`LxCall::ipc_ns`).
+/// The caller holds the kernel lock (an ordinary system call path); the service restarting
+/// is waited for as for any call. (`procsnap`'s remakes.)
+pub fn call_kbuf_plain(nr: u64, args: [u64; 4], ipc_ns: u64, out: &mut [u8]) -> i64 {
     use crate::ipc::protocol::LX_KBUF_ADDR;
     let s = plain_svc(nr, &[args[0], 0, 0, args[1], args[2], args[3]]);
     let Some(x) = svc::host(svc::host_of(s)).filter(|x| host_usable(x)) else { return ENOSYS };
@@ -888,6 +889,7 @@ pub fn call_kbuf_plain(nr: u64, args: [u64; 4], out: &mut [u8]) -> i64 {
     c.nr = nr;
     c.args = [args[0], LX_KBUF_ADDR, n as u64, args[1], args[2], args[3]];
     c.svc = s as u32;
+    c.ipc_ns = ipc_ns;
     let mut buf = copy::CopyBuf::EMPTY;
     buf.used = n;
     buf.hdr.out_off[1] = LX_DATA_OFF as u16;

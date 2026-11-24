@@ -217,15 +217,20 @@ fn access(cx: &Cx, target: Target) -> i64 {
     let c = &cx.c;
     // (faccessat2's AT_EACCESS: the effective ids)
     let uid = if flags & 0x200 != 0 { c.euid } else { c.uid };
-    let dir = matches!(target, Target::SelfLink(_) | Target::Dir(_));
-    if let Err(e) = path::access_rule(mode, if cx.nr == 439 { flags } else { 0 }, uid, dir) {
-        return e;
-    }
-    let exists = match target {
-        Target::Dir(d) => dir_facts(cx.id, d).map(|_| ()),
-        _ => owner(cx.id, target).map(|_| ()),
+    // The process must exist; its files and directories are its effective user's
+    let (perm, owner_uid) = match target {
+        Target::Dir(d) => match dir_facts(cx.id, d) {
+            Ok((u, _, _)) => (0o555, u),
+            Err(e) => return e,
+        },
+        Target::SelfLink(_) => (0o555, c.euid),
+        Target::File(f) => match owner(cx.id, target) {
+            Ok((u, _)) => (f.mode(), u),
+            Err(e) => return e,
+        },
+        _ => return EINVAL,
     };
-    exists.err().unwrap_or(0)
+    path::access_rule(mode, if cx.nr == 439 { flags } else { 0 }, uid, perm, owner_uid).err().unwrap_or(0)
 }
 
 /// The fields of a pseudo file's `stat`.
@@ -343,7 +348,7 @@ fn limits(id: u64, who: Who) -> Result<[(u64, u64); text::NLIMITS], i64> {
 /// info call (`LX_IPC_OP_SYSVIPC`, a delegated direct call: lx-ipc finds the reader's IPC
 /// namespace), chunk by chunk. `ENOENT` when the IPC calls are the kernel's (`lx.ipc=kernel`:
 /// `ipcs` then asks with `shmctl`).
-fn sysvipc(kind: u8) -> Result<Vec<u8>, i64> {
+fn sysvipc(kind: u8, ns: u64) -> Result<Vec<u8>, i64> {
     let mut text = Vec::new();
     let mut cursor = 0u64;
     let mut out = alloc::vec![0u8; 2048];
@@ -351,7 +356,7 @@ fn sysvipc(kind: u8) -> Result<Vec<u8>, i64> {
         let mut input = [0u8; 24];
         input[..8].copy_from_slice(&(kind as u64).to_le_bytes());
         input[8..16].copy_from_slice(&cursor.to_le_bytes());
-        input[16..].copy_from_slice(&u64::MAX.to_le_bytes());
+        input[16..].copy_from_slice(&ns.to_le_bytes());
         let n = hydra_rt::svccall::dcall(LXS_IPC, LX_IPC_OP_SYSVIPC, &input, &mut out);
         if n < 8 {
             return Err(ENOENT);
@@ -367,8 +372,9 @@ fn sysvipc(kind: u8) -> Result<Vec<u8>, i64> {
 }
 // wave10 G8-2 end
 
-/// The text of `file` for the caller of request `id`.
-fn make(id: u64, file: File) -> Result<Vec<u8>, i64> {
+/// The text of `file` for the caller of request `id` (`ipc_ns`: the IPC namespace for
+/// `sysvipc`, `u64::MAX`: the caller's).
+fn make(id: u64, file: File, ipc_ns: u64) -> Result<Vec<u8>, i64> {
     Ok(match file {
         File::Static(t) => t.to_vec(),
         File::Version => text::VERSION.to_vec(),
@@ -381,7 +387,7 @@ fn make(id: u64, file: File) -> Result<Vec<u8>, i64> {
             }
         }
         File::Meminfo => text::meminfo(&sysinfo(LX_INFO_SYS_MEM)?),
-        File::SysvIpc(kind) => sysvipc(kind)?,
+        File::SysvIpc(kind) => sysvipc(kind, ipc_ns)?,
         File::Cpuinfo => text::cpuinfo(sysinfo(0)?.ncpu.max(1)),
         File::Pid { who, tid, file } => match file {
             PidFile::Stat => text::stat(&task(id, who, tid)?),
@@ -441,7 +447,7 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
     // left to a laxer rule; other errors (the process went meanwhile) are the kernel's
     let text = match made {
         Some(t) => t,
-        None => match make(cx.id, file) {
+        None => match make(cx.id, file, u64::MAX) {
             Ok(t) => t,
             Err(EACCES) => return Some(EACCES),
             Err(_) => return None,
@@ -484,16 +490,44 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
 /// primitives do not answer for (another namespace) gets their error.
 pub fn remake(cx: &Cx) -> Answer {
     let Some((file, start)) = path::of_ident([cx.args[0], cx.args[3], cx.args[4], cx.args[5]]) else { return (EINVAL, 0) };
-    if let File::Pid { who, tid, .. } = file {
-        match task(cx.id, who, tid | LX_INFO_TASK_NOMEM >> 32) {
-            Ok(i) if i.start.max(1) == start => {}
-            Ok(_) => return (ESRCH, 0),
-            Err(e) => return (e, 0),
+    // (the kernel answers this request with the rights of the process that opened the file,
+    // and names the opener's IPC namespace in the call)
+    let text = match file {
+        // A process's file: pinned by its start time. stat/status/statm/comm are made from
+        // the very lookup that checks it; the others check it before and after making the
+        // text (process and thread IDs are never reused: the kernel counts them up, so a
+        // thread of `task/<tid>` is the one opened while the lookup finds it in the process)
+        File::Pid { who, tid, file: pf } => {
+            let mem = matches!(pf, PidFile::Stat | PidFile::Status | PidFile::Statm);
+            let i = match task(cx.id, who, if mem { tid } else { tid | LX_INFO_TASK_NOMEM >> 32 }) {
+                Ok(i) if i.start.max(1) == start => i,
+                Ok(_) => return (ESRCH, 0),
+                Err(e) => return (e, 0),
+            };
+            let made = match pf {
+                PidFile::Stat => Ok(text::stat(&i)),
+                PidFile::Status => Ok(text::status(&i)),
+                PidFile::Statm => Ok(text::statm(&i)),
+                PidFile::Comm => Ok(text::comm_file(&i)),
+                _ => make(cx.id, file, cx.c.ipc_ns),
+            };
+            let t = match made {
+                Ok(t) => t,
+                Err(e) => return (e, 0),
+            };
+            if !mem && pf != PidFile::Comm {
+                match task(cx.id, who, tid | LX_INFO_TASK_NOMEM >> 32) {
+                    Ok(j) if j.start.max(1) == start => {}
+                    Ok(_) => return (ESRCH, 0),
+                    Err(e) => return (e, 0),
+                }
+            }
+            t
         }
-    }
-    let text = match make(cx.id, file) {
-        Ok(t) => t,
-        Err(e) => return (e, 0),
+        _ => match make(cx.id, file, cx.c.ipc_ns) {
+            Ok(t) => t,
+            Err(e) => return (e, 0),
+        },
     };
     if text.len() as u64 <= cx.args[2] {
         return match cx.copy_out_any(cx.args[1], &text) {

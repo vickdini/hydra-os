@@ -235,24 +235,30 @@ fn zero_led(s: &str) -> bool {
     s.len() > 1 && s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// `access` of a served file (mode 0444) or, `dir`, of `/proc/self` (0555), for real or
-/// effective user `uid`: `mode` bits beyond `R_OK | W_OK | X_OK` and `faccessat2` flags beyond
-/// `AT_SYMLINK_NOFOLLOW | AT_EACCESS | AT_EMPTY_PATH` are `EINVAL`; writing is root's only
-/// (it overrides the mode bits); executing needs an `x` bit, which only directories have
-/// (root too needs one).
-pub fn access_rule(mode: u64, flags: u64, uid: u32, dir: bool) -> Result<(), i64> {
+/// `access` of a served file or directory of permission bits `perm` (0444, `environ` 0400,
+/// directories 0555) owned by `owner`, for real or effective user `uid`: `mode` bits beyond
+/// `R_OK | W_OK | X_OK` and `faccessat2` flags beyond `AT_SYMLINK_NOFOLLOW | AT_EACCESS |
+/// AT_EMPTY_PATH` are `EINVAL`; root may read and write whatever the bits say but execute
+/// only with an `x` bit; anyone else gets the owner's bits when it is the owner, the others'
+/// bits otherwise (wave10 G7b-2: `environ` is its owner's alone).
+pub fn access_rule(mode: u64, flags: u64, uid: u32, perm: u32, owner: u32) -> Result<(), i64> {
     const EINVAL: i64 = -22;
     const EACCES: i64 = -13;
     if mode & !7 != 0 || flags & !(0x100 | 0x200 | 0x1000) != 0 {
         return Err(EINVAL);
     }
-    if mode & 2 != 0 && uid != 0 {
-        return Err(EACCES);
+    let want = (mode & 7) as u32;
+    let ok = if uid == 0 {
+        want & 1 == 0 || perm & 0o111 != 0
+    } else {
+        let bits = if uid == owner { (perm >> 6) & 7 } else { perm & 7 };
+        want & !bits == 0
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(EACCES)
     }
-    if mode & 1 != 0 && !dir {
-        return Err(EACCES);
-    }
-    Ok(())
 }
 
 fn pid_file(name: &str, in_task: bool) -> Option<PidFile> {

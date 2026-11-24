@@ -30,23 +30,27 @@ fn to_caller_renumbers_only_the_init() {
 fn may_see_follows_the_ptrace_read_rule() {
     let all = |x: u32| (x, x, x);
     // itself, always (even a service)
-    assert!(may_see(true, true, (1000, 1000), 0, all(0), all(0)));
+    assert!(may_see(true, true, (1000, 1000), 0, all(0), all(0), true));
     // a service's process: never
-    assert!(!may_see(false, true, (0, 0), CAP_SYS_PTRACE, all(0), all(0)));
+    assert!(!may_see(false, true, (0, 0), CAP_SYS_PTRACE, all(0), all(0), true));
     // same user and group in all three ids
-    assert!(may_see(false, false, (1000, 100), 0, all(1000), all(100)));
+    assert!(may_see(false, false, (1000, 100), 0, all(1000), all(100), true));
     // a set-user-ID target (euid or suid differs): no
-    assert!(!may_see(false, false, (1000, 100), 0, (1000, 0, 1000), all(100)));
-    assert!(!may_see(false, false, (1000, 100), 0, (1000, 1000, 0), all(100)));
+    assert!(!may_see(false, false, (1000, 100), 0, (1000, 0, 1000), all(100), true));
+    assert!(!may_see(false, false, (1000, 100), 0, (1000, 1000, 0), all(100), true));
     // a set-group-ID target (egid or sgid differs): no (Linux checks the groups too)
-    assert!(!may_see(false, false, (1000, 100), 0, all(1000), (100, 42, 100)));
-    assert!(!may_see(false, false, (1000, 100), 0, all(1000), (100, 100, 42)));
+    assert!(!may_see(false, false, (1000, 100), 0, all(1000), (100, 42, 100), true));
+    assert!(!may_see(false, false, (1000, 100), 0, all(1000), (100, 100, 42), true));
     // a caller of another group: no
-    assert!(!may_see(false, false, (1000, 7), 0, all(1000), all(100)));
+    assert!(!may_see(false, false, (1000, 7), 0, all(1000), all(100), true));
     // CAP_SYS_PTRACE: yes
-    assert!(may_see(false, false, (1000, 100), CAP_SYS_PTRACE, all(0), all(0)));
+    assert!(may_see(false, false, (1000, 100), CAP_SYS_PTRACE, all(0), all(0), true));
     // other capabilities do not count
-    assert!(!may_see(false, false, (1000, 100), !CAP_SYS_PTRACE, all(0), all(0)));
+    assert!(!may_see(false, false, (1000, 100), !CAP_SYS_PTRACE, all(0), all(0), true));
+    // wave10 G7b-2: a target that is not dumpable: only CAP_SYS_PTRACE (or itself)
+    assert!(!may_see(false, false, (1000, 100), 0, all(1000), all(100), false));
+    assert!(may_see(false, false, (1000, 100), CAP_SYS_PTRACE, all(1000), all(100), false));
+    assert!(may_see(true, false, (1000, 100), 0, all(1000), all(100), false));
 }
 
 #[test]
@@ -592,18 +596,24 @@ fn classify_rejects_leading_zeros() {
 #[test]
 fn access_rule_for_read_only_files_and_the_self_link() {
     use crate::pseudo::path::access_rule;
-    // F_OK, R_OK: anyone
-    assert_eq!(access_rule(0, 0, 1000, false), Ok(()));
-    assert_eq!(access_rule(4, 0, 1000, false), Ok(()));
+    // F_OK, R_OK: anyone (0444)
+    assert_eq!(access_rule(0, 0, 1000, 0o444, 0), Ok(()));
+    assert_eq!(access_rule(4, 0, 1000, 0o444, 0), Ok(()));
     // W_OK: root only (it overrides the mode bits)
-    assert_eq!(access_rule(2, 0, 1000, false), Err(-13));
-    assert_eq!(access_rule(2, 0, 0, false), Ok(()));
+    assert_eq!(access_rule(2, 0, 1000, 0o444, 1000), Err(-13));
+    assert_eq!(access_rule(2, 0, 0, 0o444, 1000), Ok(()));
     // X_OK: never on a file (no x bit; root too), fine on the directory
-    assert_eq!(access_rule(1, 0, 0, false), Err(-13));
-    assert_eq!(access_rule(1, 0, 1000, true), Ok(()));
-    assert_eq!(access_rule(5, 0, 1000, true), Ok(()));
+    assert_eq!(access_rule(1, 0, 0, 0o444, 0), Err(-13));
+    assert_eq!(access_rule(1, 0, 1000, 0o555, 0), Ok(()));
+    assert_eq!(access_rule(5, 0, 1000, 0o555, 0), Ok(()));
+    assert_eq!(access_rule(1, 0, 0, 0o555, 7), Ok(()));
+    // wave10 G7b-2: environ (0400): its owner and root read it, nobody else
+    assert_eq!(access_rule(4, 0, 1000, 0o400, 1000), Ok(()));
+    assert_eq!(access_rule(4, 0, 1001, 0o400, 1000), Err(-13));
+    assert_eq!(access_rule(0, 0, 1001, 0o400, 1000), Ok(()));
+    assert_eq!(access_rule(4, 0, 0, 0o400, 1000), Ok(()));
     // bad mode bits and faccessat2 flags
-    assert_eq!(access_rule(8, 0, 0, false), Err(-22));
-    assert_eq!(access_rule(4, 0x200 | 0x100 | 0x1000, 0, false), Ok(()));
-    assert_eq!(access_rule(4, 0x400, 0, false), Err(-22));
+    assert_eq!(access_rule(8, 0, 0, 0o444, 0), Err(-22));
+    assert_eq!(access_rule(4, 0x200 | 0x100 | 0x1000, 0, 0o444, 0), Ok(()));
+    assert_eq!(access_rule(4, 0x400, 0, 0o444, 0), Err(-22));
 }

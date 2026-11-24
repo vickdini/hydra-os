@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -144,7 +145,10 @@ static void checks(void) {
     waitpid(c, NULL, 0);
     CHECK(pread(f, buf, 16, 2) == 16, "old text still readable after exit");
     errno = 0;
-    CHECK(lseek(f, 0, SEEK_SET) == -1 && errno == ESRCH, "rewind after exit is ESRCH");
+    /* (lseek always works; the read after it makes the text again and reports ESRCH) */
+    CHECK(lseek(f, 0, SEEK_SET) == 0, "rewind after exit works");
+    errno = 0;
+    CHECK(read(f, buf, 16) == -1 && errno == ESRCH, "read after the rewind is ESRCH");
     close(f);
     CHECK(open(pidpath, O_RDONLY) < 0, "open of a gone process fails");
 
@@ -166,6 +170,56 @@ static void checks(void) {
     CHECK(stat("/proc/self/task", &st2) == 0 && st2.st_nlink >= 3, "task nlink %lu", (unsigned long)st2.st_nlink);
     CHECK(access(pidpath, R_OK | X_OK) == 0, "pid dir access");
     CHECK(stat("/proc/999999999", &st2) == -1 && errno == ENOENT, "missing pid dir");
+
+    /* a process that is not dumpable: its environ and maps are hidden from its user (not
+     * from root, which holds CAP_SYS_PTRACE) */
+    int p2[2], q2[2];
+    pipe(p2);
+    pipe(q2);
+    c = fork();
+    if (c == 0) {
+        char x;
+        prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+        write(q2[1], "r", 1);
+        read(p2[0], &x, 1);
+        _exit(0);
+    }
+    {
+        char x;
+        read(q2[0], &x, 1);
+    }
+    snprintf(pidpath, sizeof pidpath, "/proc/%d/environ", c);
+    long ne = slurp(pidpath, buf, sizeof buf);
+    snprintf(pidpath, sizeof pidpath, "/proc/%d/maps", c);
+    long nm = slurp(pidpath, buf, sizeof buf);
+    if (geteuid() != 0) {
+        CHECK(ne == -EACCES, "undumpable environ refused: %ld", ne);
+        CHECK(nm == -EACCES || nm == -EPERM || nm == -ENOENT, "undumpable maps refused: %ld", nm);
+    } else {
+        CHECK(ne >= 0 && nm > 0, "root reads an undumpable process: %ld %ld", ne, nm);
+    }
+    write(p2[1], "x", 1);
+    waitpid(c, NULL, 0);
+
+    /* root only: rights are the opener's (a rewind after setuid keeps working), and another
+     * user's access(R_OK) of root's environ is refused */
+    if (geteuid() == 0) {
+        pid_t me = getpid();
+        c = fork();
+        if (c == 0) {
+            char pp[64];
+            snprintf(pp, sizeof pp, "/proc/%d/environ", me);
+            int e = open(pp, O_RDONLY);
+            if (e < 0 || setgid(1000) || setuid(1000)) _exit(2);
+            if (lseek(e, 0, SEEK_SET) != 0 || read(e, buf, sizeof buf) <= 0) _exit(3);
+            if (pread(e, buf, 16, 0) <= 0) _exit(4);
+            if (open(pp, O_RDONLY) >= 0 || errno != EACCES) _exit(5);
+            if (access(pp, R_OK) == 0 || errno != EACCES) _exit(6);
+            _exit(0);
+        }
+        waitpid(c, &s, 0);
+        CHECK(WIFEXITED(s) && WEXITSTATUS(s) == 0, "opener's rights after setuid (child rc %d)", WIFEXITED(s) ? WEXITSTATUS(s) : -1);
+    }
 
     /* the version file is fixed text */
     CHECK(slurp("/proc/version", buf, sizeof buf) > 0 && !strncmp(buf, "Linux version", 13), "version");

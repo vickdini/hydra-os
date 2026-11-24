@@ -2741,7 +2741,8 @@ pub const LX_PSNAP_FILL: u64 = 2;
 /// `args[3..6]` the snapshot's identity ([`LxSnapIo::ident`]), `args[1]` a kernel buffer of
 /// `args[2]` bytes. lx-proc writes a text that fits there and answers its length + 1; a
 /// longer one it gives with [`LX_PSNAP_FILL`] and answers 0; or an error (`-ESRCH`: the
-/// pinned process is gone).
+/// pinned process is gone). The info primitives answer such a request with the rights of the
+/// process that opened the file, and `LxCall::ipc_ns` is the opener's IPC namespace.
 pub const LX_KCALL_PREMAKE: u64 = 0x6793;
 /// The largest snapshot text (bytes).
 pub const LX_PSNAP_MAX: usize = 16 << 20;
