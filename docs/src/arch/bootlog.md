@@ -27,7 +27,13 @@ harnesses boot), that partition gets `\logs\bootNNN.txt`:
 
 On the live stick, the start also copies an installed Hydra's `\logs\boot*.txt` (any other
 EFI volume with `\EFI\hydra\hydra.efi` and no `\hydra\live`) into `\logs\disk\`, so one stick
-brings every log to Windows.
+brings every log to Windows. It first connects the firmware's drivers for the mass-storage
+controllers on the root PCI bus and the disks (at most 16 each, never every controller), and
+copies a file only when its fingerprint differs from the one in `\logs\disk\index.txt`
+(written last). Writes after the takeover stay inside the file's clusters and the partition
+(checked against the partition's length and the boot sector), and stop if the boot partition
+is no longer at the disk index found at boot. The writer's lock is taken with a deadline,
+never spun for.
 
 ## Start menu and boot words
 
@@ -35,7 +41,9 @@ brings every log to Windows.
 (lines of words, `#` comments) and, when `\hydra\menu` exists (`timeout=N`; the stick: 5 s,
 an installed disk: 3 s), a text menu: 1 normal, 2 safe mode
 (`safe iommu=off pcid=off cpus=1 verbose`), 3 safe mode without the desktop (`nodesktop`).
-New words: `cpus=N` (processors started), `nodesktop`.
+New words: `cpus=N` (processors started), `nodesktop`. The menu never waits for ever: keys
+already waiting are dropped, special keys (F-keys, arrows) do not stop the countdown, and after
+any other key entry 1 starts after 30 s without a key.
 
 ## Power
 
