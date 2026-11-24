@@ -3,6 +3,7 @@
 //   devwalk            checks (prints FAIL lines, then DEVWALK PASS / DEVWALK FAIL n); as root
 //                      also the checks for another user (setresuid) and a chown of a node
 //   devwalk bench N    N rounds: /dev/null open+close, a /sys file read, chdir, statfs
+//   devwalk kill S     the calls in a loop for S seconds (services killed meanwhile)
 //
 // Covers: walks relative to /sys and /dev directory descriptors (systemd's O_PATH chase,
 // faccessat2, readlinkat), /sys files served by linux-server (cpu ranges) by absolute path,
@@ -319,6 +320,35 @@ static void dangling(void) {
     CHECK(open(l, O_CREAT | O_WRONLY, 0600) < 0 && errno == ENOENT, "a link into a missing directory");
 }
 
+// The device and /sys calls in a loop for `secs` seconds while services are killed: every
+// call must succeed (vfs-server restarts invisibly); terminal opens are counted apart
+// (tty-server's objects fail with it).
+static int killloop(int secs) {
+    double end = now() + secs;
+    long rounds = 0, bad = 0, ptybad = 0;
+    char buf[256], cwd[256];
+    int sysfd = open("/sys/class", O_PATH | O_DIRECTORY);
+    while (now() < end) {
+        int fd = open("/dev/null", O_WRONLY);
+        if (fd < 0 || write(fd, "x", 1) != 1) { bad++; printf("bad /dev/null errno %d\n", errno); }
+        if (fd >= 0) close(fd);
+        fd = open("/sys/class/drm/card0/uevent", O_RDONLY);
+        if (fd < 0 || read(fd, buf, sizeof buf) <= 0) { bad++; printf("bad uevent errno %d\n", errno); }
+        if (fd >= 0) close(fd);
+        fd = openat(sysfd, "drm/card0", O_PATH);
+        if (fd < 0) { bad++; printf("bad openat sys errno %d\n", errno); } else close(fd);
+        if (chdir("/sys/class") != 0 || !getcwd(cwd, sizeof cwd) || strcmp(cwd, "/sys/class") != 0) { bad++; printf("bad chdir errno %d\n", errno); }
+        if (fstype("/sys") != SYSFS_MAGIC) { bad++; printf("bad statfs errno %d\n", errno); }
+        int m = open("/dev/ptmx", O_RDWR | O_NOCTTY);
+        if (m < 0) ptybad++; else close(m);
+        rounds++;
+        usleep(2000);
+    }
+    chdir("/");
+    printf("DEVWALKKILL rounds=%ld bad=%ld ptybad=%ld %s\n", rounds, bad, ptybad, bad ? "FAIL" : "PASS");
+    return bad != 0;
+}
+
 static void bench(int n) {
     double t0 = now();
     for (int i = 0; i < n; i++) close(open("/dev/null", O_WRONLY));
@@ -335,10 +365,20 @@ static void bench(int n) {
     int sysfd = open("/sys/class/drm", O_PATH | O_DIRECTORY);
     for (int i = 0; i < n; i++) close(openat(sysfd, "card0", O_PATH));
     double t4 = now();
+    for (int i = 0; i < n; i++) close(openat(sysfd, "card0", O_PATH | O_NOFOLLOW));
+    double t5 = now();
+    struct stat st;
+    for (int i = 0; i < n; i++) stat("/sys/class/drm/card0/uevent", &st);
+    double t6 = now();
+    for (int i = 0; i < n; i++) stat("/sys/class/drm/version", &st);
+    double t7 = now();
     printf("BENCH devnull_open_close %.2f us\n", (t1 - t0) * 1e6 / n);
     printf("BENCH sys_open_read_close %.2f us\n", (t2 - t1) * 1e6 / n);
     printf("BENCH chdir %.2f us\n", (t3 - t2) * 1e6 / n);
     printf("BENCH sys_openat_opath %.2f us\n", (t4 - t3) * 1e6 / n);
+    printf("BENCH sys_openat_opath_nofollow %.2f us\n", (t5 - t4) * 1e6 / n);
+    printf("BENCH sys_stat_through_link %.2f us\n", (t6 - t5) * 1e6 / n);
+    printf("BENCH sys_stat_plain %.2f us\n", (t7 - t6) * 1e6 / n);
 }
 
 int main(int argc, char **argv) {
@@ -347,6 +387,7 @@ int main(int argc, char **argv) {
         bench(atoi(argv[2]));
         return 0;
     }
+    if (argc > 2 && strcmp(argv[1], "kill") == 0) return killloop(atoi(argv[2]));
     mkdir(D, 0755);
     sys_relative();
     sys_served();

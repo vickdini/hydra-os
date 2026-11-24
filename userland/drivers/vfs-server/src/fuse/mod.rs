@@ -112,6 +112,8 @@ struct Conn {
     shots: BTreeMap<(u64, Vec<u8>), (Result<u64, i64>, u64)>,
     attr_shots: BTreeMap<u64, (Result<[u8; ATTR], i64>, u64)>,
     link_shots: BTreeMap<u64, (Result<Vec<u8>, i64>, u64)>,
+    /// wave10 GV2: the daemon's `statfs` answer fetched for a call that runs again.
+    statfs_shot: Option<(Result<Vec<u8>, i64>, u64)>,
 }
 
 impl Conn {
@@ -135,6 +137,7 @@ impl Conn {
             shots: BTreeMap::new(),
             attr_shots: BTreeMap::new(),
             link_shots: BTreeMap::new(),
+            statfs_shot: None,
         }
     }
 
@@ -1117,6 +1120,8 @@ enum MissKind {
     Lookup(Vec<u8>),
     Getattr,
     Readlink,
+    /// wave10 GV2: the file system's figures (`statfs` of a path in the mount).
+    Statfs,
 }
 
 /// A walk's question, until its call waits for the answer (`wait_miss`).
@@ -1162,7 +1167,8 @@ fn miss(conn: u16, local: u64, kind: MissKind) -> i64 {
 /// stat family, access, readlink, and opens (the creating and truncating ones went to the
 /// kernel before their walk). Nothing in them changes anything before the walk ends.
 pub fn rerunnable(nr: u64) -> bool {
-    matches!(nr, 4 | 6 | 262 | 332 | 21 | 269 | 439 | 89 | 267 | 2 | 257)
+    // (wave10 GV2: and statfs, which asks the daemon for its figures)
+    matches!(nr, 4 | 6 | 262 | 332 | 21 | 269 | 439 | 89 | 267 | 2 | 257 | 137)
 }
 
 /// For the pool's back end: a FUSE node is never its (the kernel answers).
@@ -1282,6 +1288,50 @@ pub fn be_readlink(n: Node, euid: u32) -> Result<Vec<u8>, i64> {
     Err(miss(conn, local, MissKind::Readlink))
 }
 
+// wave10 GV2 begin: statfs of a FUSE file system
+/// The figures of the file system FUSE node `n` is in, as `statfs` asks: the daemon's
+/// `fuse_kstatfs` fetched for this call, or a miss.
+pub fn be_statfs(n: Node, euid: u32) -> Result<Vec<u8>, i64> {
+    let (conn, local) = split(n.ino).ok_or(EINVAL)?;
+    let mut st = ST.lock();
+    let c = walk_conn(&mut st, conn, euid)?;
+    if let Some((r, until)) = &c.statfs_shot {
+        if hydra_rt::svcrt::now_ms() < *until {
+            return r.clone();
+        }
+    }
+    Err(miss(conn, local, MissKind::Statfs))
+}
+
+/// `struct statfs` of FUSE inode `ino` from the daemon's `fuse_kstatfs` `r` (empty: a
+/// daemon without STATFS), as the kernel's client made it (`fuse::statfs_of`).
+pub fn statfs_bytes(ino: u64, r: &[u8]) -> [u8; 120] {
+    let bsize = match u32_at(r, 40) {
+        0 => 512,
+        b => b,
+    };
+    let namelen = match u32_at(r, 44) {
+        0 => 255,
+        n => n,
+    };
+    let frsize = match u32_at(r, 48) {
+        0 => bsize,
+        f => f,
+    };
+    let vals: [u64; 7] = [0x6573_5546, bsize as u64, u64_at(r, 0), u64_at(r, 8), u64_at(r, 16), u64_at(r, 24), u64_at(r, 32)];
+    let mut b = [0u8; 120];
+    for (i, v) in vals.iter().enumerate() {
+        b[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+    }
+    let minor = 60 + split(ino).map_or(0, |s| s.0 as u64);
+    let dev = (minor & 0xFF) | ((minor & !0xFF) << 12);
+    b[56..60].copy_from_slice(&(dev as u32).to_le_bytes());
+    b[64..72].copy_from_slice(&(namelen as u64).to_le_bytes());
+    b[72..80].copy_from_slice(&(frsize as u64).to_le_bytes());
+    b
+}
+// wave10 GV2 end
+
 /// Call `call`'s walk asked `e` of a daemon: the question goes to the daemon and the call
 /// waits (`true`), or it cannot (`false`: the kernel answers the call).
 pub fn wait_miss(e: i64, call: &LxCall) -> bool {
@@ -1302,6 +1352,7 @@ pub fn wait_miss(e: i64, call: &LxCall) -> bool {
             MissKind::Lookup(name) => (LOOKUP, cstr(name)),
             MissKind::Getattr => (GETATTR, alloc::vec![0u8; 16]),
             MissKind::Readlink => (READLINK, Vec::new()),
+            MissKind::Statfs => (STATFS, Vec::new()), // wave10 GV2
         };
         WAITED.fetch_add(1, Ordering::Relaxed);
         send(c, opcode, nodeid, who, &[&args], Wait::Rerun(Box::new(Rerun { call: *call, local: m.local, kind: m.kind })), &mut fin);
@@ -1363,6 +1414,11 @@ fn took_rerun(c: &mut Conn, rr: &Rerun, err: i32, body: &[u8]) {
         }
         MissKind::Readlink => {
             c.link_shots.insert(rr.local, (if err != 0 { Err(err) } else { Ok(body.to_vec()) }, now + SHOT_MS));
+        }
+        // wave10 GV2: (a daemon without STATFS: zero figures, as the kernel's client)
+        MissKind::Statfs => {
+            let r = if err == ENOSYS { Ok(Vec::new()) } else if err != 0 { Err(err) } else { Ok(body[..body.len().min(80)].to_vec()) };
+            c.statfs_shot = Some((r, now + SHOT_MS));
         }
     }
 }

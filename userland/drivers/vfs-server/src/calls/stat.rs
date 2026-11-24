@@ -154,9 +154,12 @@ pub fn fstatfs(cx: &Cx) -> Result<i64, i64> {
 /// mount: a mount with flags answers as the others.)
 fn statfs_of(cx: &Cx, n: crate::ctx::Node, out: u64) -> Result<i64, i64> {
     let c = &cx.c;
-    // (a FUSE file system: the daemon's figures, the kernel's)
+    // (a FUSE file system: the daemon's figures; wave10 GV2: asked here, the call waits for
+    // the daemon and runs again, `fuse::be_statfs`)
     if crate::fuse::wire::split(n.ino).is_some() {
-        return Err(ctxt::KERNEL);
+        let r = crate::fuse::be_statfs(n, c.euid)?;
+        cx.copy_out(out, &crate::fuse::statfs_bytes(n.ino, &r))?;
+        return Ok(0);
     }
     if n.mnt != 0 && ctxt::walker(c)?.view.is_tmpfs(n.mnt) {
         let usage = crate::tmem::mount_id(c.mnt_ns, n.mnt).and_then(crate::tmem::usage);
