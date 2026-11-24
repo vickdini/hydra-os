@@ -60,7 +60,37 @@ pub fn to_caller(id: u64, init: Option<u64>) -> u64 {
 /// shared with lx-proc's tracing decisions and the kernel's copy; the callers here are in the
 /// first namespaces, so capabilities count over every target).
 pub fn may_see(same: bool, target_service: bool, caller: (u32, u32), caller_caps: u64, target_uids: (u32, u32, u32), target_gids: (u32, u32, u32)) -> bool {
-    // wave10 G8-1 begin
+    // wave10 G8-1: a dumpable, capability-less target in the caller's user namespace
+    may_read(same, target_service, caller, caller_caps, target_uids, target_gids, true, TargetCaps::PLAIN)
+}
+
+// wave10 G8-1 begin
+/// What the ptrace read rule's capability part reads of a target: its permitted
+/// capabilities and how its user namespace stands to the caller's (as the ptrace facts:
+/// `lx::trace`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetCaps {
+    /// Permitted capabilities.
+    pub perm: u64,
+    /// Its user namespace is the caller's or lies below it.
+    pub within: bool,
+    /// Its user namespace is the caller's own.
+    pub same_ns: bool,
+    /// Its user namespace lies below the caller's and the caller's user made it.
+    pub owned: bool,
+}
+
+impl TargetCaps {
+    /// A capability-less target in the caller's user namespace.
+    pub const PLAIN: TargetCaps = TargetCaps { perm: 0, within: true, same_ns: true, owned: false };
+}
+
+/// [`may_see`] with every input of the rule (`PTRACE_MODE_READ_FSCREDS` of
+/// `lx::ptrace_rules::may_access`): also the target's dumpable flag and its capabilities and
+/// user namespace (Linux's commoncap test: a target in another user namespace, or holding
+/// capabilities the caller lacks, is readable only with `CAP_SYS_PTRACE` over it).
+#[allow(clippy::too_many_arguments)]
+pub fn may_read(same: bool, target_service: bool, caller: (u32, u32), caller_caps: u64, target_uids: (u32, u32, u32), target_gids: (u32, u32, u32), target_dumpable: bool, tc: TargetCaps) -> bool {
     use super::ptrace_rules::{may_access, Target, Who, MODE_FSCREDS, MODE_READ};
     let (u, g) = caller;
     let who = Who { uid: [u; 3], gid: [g; 3], caps: caller_caps, perm: caller_caps, in_userns: false, seccomp: false, suspended: false };
@@ -71,18 +101,16 @@ pub fn may_see(same: bool, target_service: bool, caller: (u32, u32), caller_caps
         gid: [target_gids.0, target_gids.1, target_gids.2],
         same,
         service: target_service,
-        within: true,
-        // (the target's capabilities and user namespace are not among this rule's inputs
-        // here: the commoncap part holds as for a capability-less target in the caller's)
-        same_ns: true,
-        owned: false,
+        within: tc.within,
+        same_ns: tc.same_ns,
+        owned: tc.owned,
         tracer_cap: false,
-        dumpable: 1,
-        perm: 0,
+        dumpable: target_dumpable as u8,
+        perm: tc.perm,
     };
     may_access(MODE_READ | MODE_FSCREDS, &who, &t).is_ok()
-    // wave10 G8-1 end
 }
+// wave10 G8-1 end
 
 /// Whether the info primitives answer for a caller (`init`: its PID namespace's init, `None`
 /// in the first; `in_userns`: it is in a user namespace of its own) about a target (a
@@ -286,6 +314,19 @@ pub mod glue {
         Ok(Caller { tgid, euid, egid, caps, init })
     }
 
+    // wave10 G8-1 begin
+    /// Process `pid`'s capability facts for the read rule of caller process `ctgid`
+    /// (effective user `euid`), as `lx::trace` gathers them for the ptrace facts.
+    fn target_caps(pid: u64, ctgid: u64, euid: u32, perm: u64) -> TargetCaps {
+        if pid == ctgid {
+            return TargetCaps { perm, ..TargetCaps::PLAIN };
+        }
+        let rel = crate::compat::linux::ns::user_rel_in(&crate::compat::linux::proc::PROCS.lock(), pid, ctgid, euid);
+        let (within, same_ns, owned) = rel.unwrap_or((false, false, false));
+        TargetCaps { perm, within, same_ns, owned }
+    }
+    // wave10 G8-1 end
+
     /// The caller of a request, as the operations check it.
     struct Caller {
         tgid: u64,
@@ -435,15 +476,18 @@ pub mod glue {
         };
         let Ok(cap) = check_len(len) else { return EINVAL };
         let pid = resolve_pid(who, ctgid, init);
-        let Some((uids, gids, service, mm)) =
-            crate::task::SCHEDULER.lock().with_process(pid, |t| ((t.uid, t.euid, t.suid), (t.gid, t.egid, t.sgid), t.service.is_some(), t.mm.clone()))
+        // (wave10 G8-1: + the target's permitted capabilities)
+        let Some((uids, gids, service, mm, perm)) = crate::task::SCHEDULER
+            .lock()
+            .with_process(pid, |t| ((t.uid, t.euid, t.suid), (t.gid, t.egid, t.sgid), t.service.is_some(), t.mm.clone(), t.caps.permitted))
         else {
             return ESRCH;
         };
         if let Err(e) = may_query(init, false, service) {
             return e;
         }
-        if !may_see(pid == ctgid, service, (euid, egid), caps, uids, gids) {
+        // wave10 G8-1: the whole read rule: dumpable, capabilities, user namespace
+        if !may_read(pid == ctgid, service, (euid, egid), caps, uids, gids, crate::lx::proc::proc_attrs(pid).dumpable == 1, target_caps(pid, ctgid, euid, perm)) {
             return EACCES;
         }
         let entries = mm.map(|m| m.lock().maps_entries()).unwrap_or_default();

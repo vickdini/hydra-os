@@ -177,6 +177,18 @@ static int perf_open(pid_t p, int cpu, int kernel) {
     return 0;
 }
 
+// /proc/<pid>/<file> read: 0 when some bytes came, else -errno (EOF: -1000)
+static int try_proc(pid_t p, const char *file) {
+    char path[64], buf[256];
+    snprintf(path, sizeof path, "/proc/%d/%s", p, file);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -errno;
+    long n = read(fd, buf, sizeof buf);
+    int e = errno;
+    close(fd);
+    return n > 0 ? 0 : n == 0 ? -1000 : -e;
+}
+
 static int try_perf(pid_t p) {
     return perf_open(p, -1, 0);
 }
@@ -192,6 +204,9 @@ static void t_same_user(void) {
     CHECK(try_kcmp(t.pid) == 0, "kcmp own uid: %d", try_kcmp(t.pid));
     CHECK(try_getfd(t.pid) == 0, "pidfd_getfd own uid: %d", try_getfd(t.pid));
     CHECK(try_perf(t.pid) == 0, "perf_event_open own uid: %d", try_perf(t.pid));
+    CHECK(try_proc(t.pid, "maps") == 0, "/proc maps own uid: %d", try_proc(t.pid, "maps"));
+    // (environ: ENOENT where /proc does not serve it yet: before 7b-2)
+    CHECK(try_proc(t.pid, "environ") == 0 || try_proc(t.pid, "environ") == -1000 || try_proc(t.pid, "environ") == -ENOENT, "/proc environ own uid: %d", try_proc(t.pid, "environ"));
     release(&t);
 }
 
@@ -327,11 +342,12 @@ static void t_userns_sandbox(void) {
         struct iovec l = {&v, 8}, r = {(void *)&magic, 8};
         long n = syscall(SYS_process_vm_writev, parent, &l, 1, &r, 1, 0);
         int w = n < 0 ? -errno : 0;
-        _exit((a == -EPERM ? 0 : 1) | (w == -EPERM ? 0 : 2));
+        int m = try_proc(parent, "maps"), e = try_proc(parent, "environ");
+        _exit((a == -EPERM ? 0 : 1) | (w == -EPERM ? 0 : 2) | (m != 0 ? 0 : 4) | (e != 0 ? 0 : 8));
     }
     int st = 0;
     waitpid(p, &st, 0);
-    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "sandbox in a child user namespace reached its parent (attach bit 1, process_vm_writev bit 2: status %#x)", st);
+    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "sandbox in a child user namespace reached its parent (attach bit 1, process_vm_writev bit 2, maps 4, environ 8: status %#x)", st);
 }
 
 // Review 10-81 finding 1: a same-uid process holding file capabilities (dumpable again) is
@@ -375,11 +391,12 @@ static void t_file_caps(void) {
             become(1000);
             int r = try_attach(p);
             int v = try_vm(p);
-            _exit((r == -EPERM ? 0 : 1) | (v == -EPERM ? 0 : 2));
+            int m = try_proc(p, "maps"), e = try_proc(p, "environ");
+            _exit((r == -EPERM ? 0 : 1) | (v == -EPERM ? 0 : 2) | (m != 0 ? 0 : 4) | (e != 0 ? 0 : 8));
         }
         int st = 0;
         waitpid(q, &st, 0);
-        CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "a capability-less user reached its capable process (attach bit 1, process_vm_readv bit 2: status %#x)", st);
+        CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "a capability-less user reached its capable process (attach bit 1, process_vm_readv bit 2, maps 4, environ 8: status %#x)", st);
     }
     close(hold[1]);
     kill(p, SIGKILL);
