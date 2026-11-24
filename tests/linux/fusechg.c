@@ -438,8 +438,8 @@ static void checks(void) {
     check(rename(at("d/h"), at("d/h2")) == 0 && access(at("d/h"), F_OK) < 0 && access(at("d/h2"), F_OK) == 0, "rename");
     check(rename(at("d/h2"), at("d/n")) == 0 && stat(at("d/n"), &st) == 0 && st.st_size == 10, "rename over an existing name");
     check(syscall(SYS_renameat2, AT_FDCWD, at("d/n"), AT_FDCWD, at("d/l"), 1) < 0 && errno == EEXIST, "renameat2 RENAME_NOREPLACE: EEXIST");
-    check(rename(at("d/n"), "/tmp/fusechg.out") < 0 && errno == EXDEV, "rename out of the mount: EXDEV");
-    check(link(at("d/n"), "/tmp/fusechg.out") < 0 && errno == EXDEV, "link out of the mount: EXDEV");
+    check(rename(at("d/n"), "/tmp/fusechg.xdev") < 0 && errno == EXDEV, "rename out of the mount: EXDEV");
+    { int r = link(at("d/n"), "/tmp/fusechg.xdev"), e = errno; if (!(r < 0 && e == EXDEV)) printf("     (link: r=%d errno=%d)\n", r, e); check(r < 0 && e == EXDEV, "link out of the mount: EXDEV"); }
     check(mkdir(at("d/sub"), 0700) == 0 && rename(at("d/n"), at("d/sub/n")) == 0 && access(at("d/sub/n"), F_OK) == 0, "rename into another directory");
     check(rmdir(at("d/sub")) < 0 && errno == ENOTEMPTY, "rmdir of a full directory: ENOTEMPTY");
     check(unlink(at("d/sub/n")) == 0 && rmdir(at("d/sub")) == 0 && !dir_has(at("d"), "sub"), "unlink, rmdir");
