@@ -1211,7 +1211,10 @@ the move fewer than 512 do in the same session.
   its text is lx-proc's entry list (`ino`, type, name). The kernel's `getdents64` walks it
   (`CharDevice::getdents64`, no round trip), `lseek(fd, 0, SEEK_SET)` (`rewinddir`) makes the
   list again through `LX_KCALL_PREMAKE`, a read is `EISDIR`. Like the files they survive
-  lx-proc's restarts.
+  lx-proc's restarts. Every snapshot (file or directory) reports its text's length as
+  `fstat`'s `st_size` (dbus-daemon reads `fdinfo` up to it and takes an early end as an error),
+  polls readable only, and is edge-triggered once in `epoll` (`CharDevice::edges`, as the
+  kernel's own files: a level-triggered `mountinfo` watch spun the SDDM greeter).
 - **Walks relative to a `/proc` directory descriptor** (the system monitor opens
   `<pid>/stat` from its `/proc` descriptor; Chromium's sandbox walks `self/...`): such a call
   goes from the kernel straight to lx-proc (`fileh::proc_dirfd_call`: a redirected call with
@@ -1219,7 +1222,8 @@ the move fewer than 512 do in the same session.
   `LX_PSNAP_IDENT` (op 80 sub-op 3) and classifies `base/path`. vfs-server is not asked.
 - **Magic links** `fd/N`, `exe`, `cwd`, `root`, `ns/<kind>`: `readlink`, `lstat` and the
   `fd/` listing are lx-proc's, under the `ptrace` read rule (`fd/` of another process now
-  works for `lsof`; the kernel's copy showed only the caller's own). `stat` of a namespace
+  works for `lsof`; the kernel's copy showed only the caller's own). `exe` and `root` stay
+  readable by everyone, as before (KWin reads a client's `exe`). `stat` of a namespace
   link answers the namespace's inode number (nsfs device 0:4; the kernel's `fstat` of an
   opened namespace descriptor says the same). **Following** a link (`open`, `stat`,
   `execve`, `linkat` of `/proc/self/fd/N`, a walk through `root/` or `cwd/`, opening a
@@ -1241,7 +1245,8 @@ the move fewer than 512 do in the same session.
   answer them (`info::may_query` no longer refuses), translate the IDs (`to_caller` for pid,
   tid, parent, group, session, tracer, the `/proc` listing; the user namespace's map for the
   user and group ids) and hide processes outside the caller's PID namespace (`info::in_view`).
-- **Still the kernel's `/proc`:** the link resolution above; `net/*` (the kernel relays
+- **Still the kernel's `/proc`:** the link resolution above; the sound card's stream files
+  (`asound/card0/pcm0p/sub0/status`, ...); `net/*` (the kernel relays
   lx-net's and lx-ipc's tables and keeps the interface ones), `keys`,
   `sys/user/max_user_namespaces`, `<pid>/mem`, `thread-self/` as a directory, `..` walks,
   `chdir` into `/proc`, and boot before lx-proc runs.
