@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w11_h"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group H host unit tests (wave 11): the boot log's ring and FAT32 walk, the boot words, the ACPI power-off values, compiled from their own sources"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

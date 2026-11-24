@@ -49,6 +49,13 @@ const REG_CTRL_EXT: usize = 0x0018;
 const REG_MDIC: usize = 0x0020;
 const REG_FEXTNVM3: usize = 0x003C;
 const REG_EXTCNF_CTRL: usize = 0x0F00;
+/// wave11 GH: the management firmware's status (PCH): FW_VALID (bit 15) when the chipset's
+/// firmware runs, RSPCIPHY (bit 6) clear when it blocks PHY resets.
+const REG_FWSM: usize = 0x5B54;
+const FWSM_FW_VALID: u32 = 1 << 15;
+const FWSM_RSPCIPHY: u32 = 1 << 6;
+/// CTRL_EXT: the MAC talks to the PHY over SMBus (its low-power path), not MDIO.
+const CTRL_EXT_FORCE_SMBUS: u32 = 1 << 11;
 const REG_ICR: usize = 0x00C0;
 const REG_IMS: usize = 0x00D0;
 const REG_IMC: usize = 0x00D8;
@@ -311,15 +318,71 @@ impl Nic {
         sys::sleep_ms(30);
     }
 
+    // wave11 GH begin
+    /// The PHY's identifier (registers 2 and 3), when the PHY answers on MDIO.
+    fn phy_id(&self) -> Option<u32> {
+        let hi = self.mdic(2, None)?;
+        let lo = self.mdic(3, None)?;
+        (hi != 0xFFFF && lo != 0xFFFF && (hi, lo) != (0, 0)).then_some((hi as u32) << 16 | lo as u32)
+    }
+
+    /// Makes a PCH PHY reachable on MDIO, as Linux's `e1000_init_phy_workarounds_pchlan`
+    /// does for Lynx Point (I217/I218): a PHY left in its low-power (SMBus) mode by the
+    /// firmware or another operating system answers only after the MAC is switched to
+    /// SMBus and back, or after a LANPHYPC power cycle (not when the chipset's management
+    /// firmware blocks PHY resets). Logs what it found: the NUC run's log tells.
+    fn pch_phy_reachable(&self) -> bool {
+        let fwsm = self.read(REG_FWSM);
+        println!(
+            "[e1000-driver] PCH: FWSM {:#x} (management firmware {}, PHY resets {}), STATUS {:#x}, CTRL_EXT {:#x}",
+            fwsm,
+            if fwsm & FWSM_FW_VALID != 0 { "running" } else { "off" },
+            if fwsm & FWSM_RSPCIPHY == 0 { "blocked" } else { "allowed" },
+            self.read(REG_STATUS),
+            self.read(REG_CTRL_EXT)
+        );
+        if let Some(id) = self.phy_id() {
+            println!("[e1000-driver] PHY {:#010x} answers", id);
+            return true;
+        }
+        // The MAC through SMBus for a moment (50 ms for it to finish its retries)
+        self.write(REG_CTRL_EXT, self.read(REG_CTRL_EXT) | CTRL_EXT_FORCE_SMBUS);
+        sys::sleep_ms(50);
+        if let Some(id) = self.phy_id() {
+            println!("[e1000-driver] PHY {:#010x} answers after the SMBus switch", id);
+            self.write(REG_CTRL_EXT, self.read(REG_CTRL_EXT) & !CTRL_EXT_FORCE_SMBUS);
+            return true;
+        }
+        if fwsm & FWSM_RSPCIPHY == 0 {
+            println!("[e1000-driver] the PHY does not answer and the management firmware blocks its power cycle");
+            self.write(REG_CTRL_EXT, self.read(REG_CTRL_EXT) & !CTRL_EXT_FORCE_SMBUS);
+            return false;
+        }
+        println!("[e1000-driver] the PHY does not answer; power-cycling it (LANPHYPC)");
+        self.toggle_lanphypc();
+        // The power cycle takes the PHY out of SMBus mode: the MAC too
+        self.write(REG_CTRL_EXT, self.read(REG_CTRL_EXT) & !CTRL_EXT_FORCE_SMBUS);
+        match self.phy_id() {
+            Some(id) => {
+                println!("[e1000-driver] PHY {:#010x} answers after the power cycle", id);
+                true
+            }
+            None => {
+                println!("[e1000-driver] the PHY still does not answer");
+                false
+            }
+        }
+    }
+    // wave11 GH end
+
     /// Makes sure the PHY is powered and negotiating (82574 and PCH: the MAC follows the
     /// speed and duplex the PHY negotiated).
     fn phy_up(&self) {
-        let mut bmcr = self.mdic(PHY_BMCR, None);
-        if self.model == Model::Pch && matches!(bmcr, None | Some(0xFFFF)) {
-            println!("[e1000-driver] the PHY does not answer; power-cycling it");
-            self.toggle_lanphypc();
-            bmcr = self.mdic(PHY_BMCR, None);
+        // wave11 GH: the PCH PHY reachable first (low-power mode, see pch_phy_reachable)
+        if self.model == Model::Pch {
+            self.pch_phy_reachable();
         }
+        let bmcr = self.mdic(PHY_BMCR, None);
         match bmcr {
             Some(b) if b != 0xFFFF => {
                 if b & BMCR_POWER_DOWN != 0 || b & BMCR_ANEG_ENABLE == 0 {

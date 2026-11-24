@@ -26,6 +26,7 @@ pub mod bootfs; // boot-volume (UEFI FAT) files, moved out of the shell (group 4
 pub mod client;
 pub mod firstboot; // Group G: installer first-boot settings
 pub mod cursor; // wave7 G7-7: the shared offset of by-path descriptors
+pub mod fat32; // wave11 GH: the boot log file's clusters
 pub mod fd;
 pub mod gpt;
 pub mod pipe;

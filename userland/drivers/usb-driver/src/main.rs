@@ -910,6 +910,9 @@ impl Xhci {
             return self.setup_storage(di, &dd, m, config_value);
         }
         if found.is_empty() {
+            // wave11 GH: say so (the log then names the device, e.g. a Wi-Fi adapter Hydra
+            // has no driver for yet)
+            println!("[usb-driver] {}: device {:04x}:{:04x}: no Hydra driver for it; ignored", self.loc(di), vendor, product);
             return Ok(());
         }
         self.control(di, 0x00, 9, config_value as u16, 0, 0)?;

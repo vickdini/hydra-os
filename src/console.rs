@@ -394,6 +394,7 @@ impl Write for Console {
             // The boot logo shows: the firmware console would draw over it
             serial_write(s);
         } else {
+            crate::arch::bootlog::append(s.as_bytes()); // wave11 GH
             uefi::system::with_stdout(|stdout| {
                 let _ = stdout.write_str(s);
             });
@@ -476,6 +477,7 @@ impl core::fmt::Write for SerialOnly {
 /// * `s` - The UTF-8 string slice to transmit over `COM1`.
 pub fn serial_write(s: &str) {
     use x86_64::instructions::port::Port;
+    crate::arch::bootlog::append(s.as_bytes()); // wave11 GH
     const COM1: u16 = 0x3F8;
     let mut data: Port<u8> = Port::new(COM1);
     let mut status: Port<u8> = Port::new(COM1 + 5);

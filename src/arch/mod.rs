@@ -28,6 +28,32 @@
 
 /// UEFI Boot Services termination and full bare-metal hardware takeover sequence.
 pub mod boot_services;
+// wave11 GH begin
+/// ACPI power-off and reset values from the FADT and DSDT (plain logic).
+pub mod acpi_s5;
+/// The boot log on the EFI partition.
+#[cfg(target_os = "uefi")]
+pub mod bootlog;
+/// Host builds (unit tests): the boot log does nothing.
+#[cfg(not(target_os = "uefi"))]
+pub mod bootlog {
+    pub fn append(_text: &[u8]) {}
+    pub fn at_power(_what: &'static str) {}
+    pub fn boot_disk() -> Option<usize> {
+        None
+    }
+    pub fn disk_present(_idx: usize, _sector: &mut [u8; 512]) -> bool {
+        true
+    }
+    pub fn after_panic() {}
+}
+/// The boot words and the start menu.
+pub mod bootopts;
+/// The boot words' plain logic.
+pub mod bootwords;
+/// The boot log's memory (plain logic).
+pub mod logring;
+// wave11 GH end
 pub mod bootdisk;
 /// Boot stage timing ([`boottime::mark`], printed by [`boottime::report`]).
 pub mod boottime;

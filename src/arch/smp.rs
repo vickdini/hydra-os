@@ -857,7 +857,12 @@ fn send_ipi(apic: u32, icr: u32) {
 pub fn start_aps() {
     let tramp = TRAMPOLINE.load(Ordering::Relaxed);
     let ids = APIC_IDS.lock().clone();
-    if tramp == 0 || ids.len() < 2 {
+    // wave11 GH: the boot word `cpus=N` (safe mode: 1) starts at most N processors
+    let limit = crate::arch::bootopts::max_cpus().unwrap_or(MAX_CPUS).min(MAX_CPUS);
+    if limit < ids.len() {
+        crate::kprintln!("[smp] boot word cpus={}: starting {} of {} processors", limit, limit, ids.len());
+    }
+    if tramp == 0 || ids.len() < 2 || limit < 2 {
         x86_64::instructions::interrupts::without_interrupts(enable_x2apic);
         return;
     }
@@ -881,7 +886,7 @@ pub fn start_aps() {
     }
     let mut next = 1;
     for &id in ids.iter().filter(|&&i| i != me) {
-        if next >= MAX_CPUS {
+        if next >= limit {
             break;
         }
         // Its stack (never freed: the CPU keeps it)

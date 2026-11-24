@@ -228,6 +228,7 @@ def main():
     ap.add_argument("--machine", default="pc", choices=["pc", "q35"],
                     help="the chipset: pc (i440fx, IDE) or q35 (ICH9; -drive if=ide lands on its built-in AHCI)")
     ap.add_argument("--iommu", action="store_true", help="add an Intel VT-d IOMMU (intel-iommu; implies --machine q35)")
+    ap.add_argument("--allow-reboot", action="store_true", help="wave11 GH: a restart restarts the VM (default: QEMU exits, -no-reboot)")
     ap.add_argument("--iommu-test", action="store_true",
                     help="tell the kernel (fw_cfg opt/hydra/iommu=test) to allow the rogue-DMA test (`iommu dmatest`)")
     ap.add_argument("--iommu-off", action="store_true", help="tell the kernel (fw_cfg opt/hydra/iommu=off) not to use the IOMMU")
@@ -294,8 +295,7 @@ def main():
         "-m", a.mem, "-smp", str(a.smp), "-vga", "std", "-display", "none",
         "-serial", f"file:{a.log}",
         "-qmp", "stdio",
-        "-no-reboot",
-    ]
+    ] + ([] if a.allow_reboot else ["-no-reboot"])
     if a.machine == "q35":
         args += ["-machine", "q35"]
         if a.iommu:

@@ -18,6 +18,12 @@
 #             booted as a live session that fetches it into /opt/hydra-install/ -> work/live.raw
 #   liveiso   (not in "all") only work/hydra-live-test.iso: the tree's boot ISO with \hydra\live,
 #             to try the live session on a pool disk without the stick
+#   espimg    (not in "all"; wave 11) only work/esp-test.img: the stick's EFI partition
+#   restick   (not in "all"; wave 11) out/hydra-live.img from an existing stick image (BASE,
+#             default the lead's /root/pool/m-out/hydra-live.img, only read) with this tree's
+#             kernel and boot files: on the stick's EFI partition and in its install set
+#             (/opt/hydra-install/esp in the live pool, what the installer copies to the disk).
+#             No pool snapshot and no cleaning: for a kernel-side change. Needs one VM boot.
 #   stick     out/hydra-live.img: GPT disk image, EFI partition (kernel, boot files, \hydra\live)
 #             + Hydra pool partition (work/live.raw)
 #
@@ -123,7 +129,29 @@ esp_tree() {
     cp "$dist/bootx64.efi" "$d/EFI/hydra/hydra.efi"
     cp -r "$TREE"/esp/bin/* "$d/bin/"
     [ -f "$TREE/esp/readme.txt" ] && cp "$TREE/esp/readme.txt" "$d/README.TXT"
+    # wave11 GH: the start menu (normal / safe mode / safe mode, console), shown briefly
+    # on an installed system; the stick waits longer (see the stick steps)
+    mkdir -p "$d/hydra"
+    printf '# Hydra start menu: shown at every start; entry 1 starts after this many seconds.\r\ntimeout=3\r\n' > "$d/hydra/menu"
     return 0
+}
+
+# wave11 GH: the stick's EFI partition image (512 MiB FAT32) into file $1: the tree's EFI
+# files, the live flag, a 5 s start menu and a short note for whoever opens the stick on
+# another computer
+esp_image() {
+    local E=$1
+    rm -f "$E"
+    mkfs.vfat -F 32 -n HYDRA-LIVE -C "$E" $((ESP_MIB << 10)) >/dev/null
+    esp_tree "$R$WORK/esptree"
+    mkdir -p "$R$WORK/esptree/hydra"
+    printf 'Hydra live session: this file makes Hydra start as "try Hydra" from this stick.\r\n' > "$R$WORK/esptree/hydra/live"
+    printf '# Hydra start menu: shown at every start; entry 1 starts after this many seconds.\r\ntimeout=5\r\n' > "$R$WORK/esptree/hydra/menu"
+    printf '# Extra start words for Hydra, one or more per line (# starts a comment), e.g.\r\n#   verbose      boot messages instead of the logo\r\n#   iommu=off    no DMA remapping\r\n#   cpus=1       one processor\r\n' > "$R$WORK/esptree/hydra/options.txt"
+    mkdir -p "$R$WORK/esptree/logs"
+    printf 'Hydra writes a log of every start here: boot001.txt, boot002.txt, ... (the highest number is the newest).\r\nPlease send the newest one (or all of them) back.\r\n' > "$R$WORK/esptree/logs/README.TXT"
+    mcopy -s -i "$E" "$R$WORK"/esptree/* ::/
+    rm -rf "$R$WORK/esptree"
 }
 
 for step in $STEPS; do
@@ -225,20 +253,73 @@ start=2048, size=$((esp_bytes / 512)), type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
 start=$((2048 + esp_bytes / 512)), size=$((pool_bytes / 512)), type=7685A0B8-DF41-47EB-AF4F-02CE6FB01879, name="Hydra"
 EOF
         # The EFI partition: the kernel at the fallback path and Hydra's own, the boot files the
-        # kernel imports, and the live flag
+        # kernel imports, the live flag and the start menu (esp_image)
         E=$R$WORK/esp.img
-        mkfs.vfat -F 32 -n HYDRA-LIVE -C "$E" $((esp_bytes / 1024)) >/dev/null
-        esp_tree "$R$WORK/esptree"
-        mkdir -p "$R$WORK/esptree/hydra"
-        printf 'Hydra live session: this file makes Hydra start as "try Hydra" from this stick.\r\n' > "$R$WORK/esptree/hydra/live"
-        mcopy -s -i "$E" "$R$WORK"/esptree/* ::/
-        rm -rf "$R$WORK/esptree"
+        esp_image "$E"
         dd if="$E" of="$S" bs=1M seek=1 conv=notrunc,sparse status=none
         dd if="$L" of="$S" bs=1M seek=$((1 + ESP_MIB)) conv=notrunc,sparse status=none
         rm -f "$E"
         sfdisk --list "$S"
         (cd "$R$OUT" && sha256sum hydra-live.img > hydra-live.img.sha256)
         say "stick image: $OUT/hydra-live.img ($(numfmt --to=iec "$total")), $(cat "$R$OUT/hydra-live.img.sha256")"
+        ;;
+    restick)
+        # wave11 GH: a stick from an existing one, with this tree's EFI files
+        BASE=${BASE:-/root/pool/m-out/hydra-live.img}
+        [ -f "$R$BASE" ] || die "no base stick $BASE"
+        # The base's partition 1 must be the EFI partition this script makes (1 MiB, ESP_MIB)
+        p1=$(sfdisk --dump "$R$BASE" | sed -n 's/.*: start= *\([0-9]*\), size= *\([0-9]*\), type=C12A7328.*/\1 \2/p' | head -1)
+        [ "$p1" = "2048 $((ESP_MIB << 11))" ] || die "the base stick's EFI partition is not at 1 MiB with $ESP_MIB MiB ($p1)"
+        live_iso
+        inroot "set -e; cd '$WORK'; rm -f restick.qcow2; qemu-img create -q -f qcow2 -F raw -b $BASE restick.qcow2"
+        # The install set's EFI files (what the installer copies to the disk)
+        esp_tree "$R$WORK/esptree"
+        tar -C "$R$WORK/esptree" -cf "$R$OUT/esp.tar" .
+        rm -rf "$R$WORK/esptree"
+        cat > "$R$OUT/restick-inside.sh" <<'INSIDE'
+#!/bin/bash
+# Runs inside the stick's live pool (booted from the build's test ISO): replaces the install
+# set's EFI files with the build host's, then powers off. Prints RESTICK-OK or RESTICK-FAILED.
+D=/opt/hydra-install
+ok=1
+curl -sSf --retry 3 -o /tmp/esp.tar "http://10.0.2.2:$PORT/esp.tar" || ok=0
+if [ $ok = 1 ] && [ -d "$D" ]; then
+    rm -rf "$D/esp.new" && mkdir -p "$D/esp.new" && tar -C "$D/esp.new" -xf /tmp/esp.tar --no-same-owner || ok=0
+    [ -f "$D/esp.new/EFI/BOOT/BOOTX64.EFI" ] || ok=0
+    if [ $ok = 1 ]; then rm -rf "$D/esp" && mv "$D/esp.new" "$D/esp" && chmod -R a+rX "$D/esp"; fi
+else
+    ok=0
+fi
+sha256sum "$D/esp/EFI/BOOT/BOOTX64.EFI"; find "$D/esp" -maxdepth 2 | head -20
+rm -f /tmp/esp.tar
+if [ $ok = 1 ]; then echo RESTICK-OK; else echo RESTICK-FAILED; fi
+sync
+/sbin/poweroff -f
+INSIDE
+        serve "$OUT"
+        vm "$WORK/restick.qcow2" restick.log "Powering off" 900 --login "" \
+            "linux chroot /ubuntu /usr/bin/bash -c \"curl -s http://10.0.2.2:$PORT/restick-inside.sh -o /tmp/r.sh; PORT=$PORT bash /tmp/r.sh\""
+        stop_serving
+        rm -f "$R$OUT/restick-inside.sh"
+        grep -q "^RESTICK-OK" "$R$OUT/restick.log.txt" || die "the install set was not updated (see $OUT/restick.log.txt)"
+        grep -a "BOOTX64.EFI" "$R$OUT/restick.log.txt" | head -2 || true
+        sha256sum "$TREE/dist/x86_64/bootx64.efi"
+        # The new EFI partition, then the whole stick as a raw image
+        esp_image "$R$WORK/esp.img"
+        heavy "set -e; cd '$WORK'
+                qemu-io -f qcow2 -c 'write -q -s $WORK/esp.img 1048576 $((ESP_MIB << 20))' restick.qcow2
+                rm -f '$OUT/hydra-live.img'
+                qemu-img convert -O raw restick.qcow2 '$OUT/hydra-live.img'
+                rm -f restick.qcow2 esp.img"
+        sfdisk --list "$R$OUT/hydra-live.img"
+        (cd "$R$OUT" && sha256sum hydra-live.img > hydra-live.img.sha256)
+        say "stick image: $OUT/hydra-live.img, $(cat "$R$OUT/hydra-live.img.sha256")"
+        ;;
+    espimg)
+        # wave11 GH (not in "all"): only work/esp-test.img, the stick's EFI partition from this
+        # tree, for tests that put it on an overlay of a stick (qemu-io write at 1 MiB)
+        esp_image "$R$WORK/esp-test.img"
+        say "EFI partition image: $WORK/esp-test.img"
         ;;
     liveiso)
         # Only the test ISO (the kernel of the tree with \hydra\live): work/hydra-live-test.iso
