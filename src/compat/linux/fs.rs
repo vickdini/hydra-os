@@ -262,6 +262,39 @@ pub(crate) fn live_cmdline(pid: u64) -> Option<alloc::vec::Vec<u8>> {
     Some(text)
 }
 
+// wave10 G7b-2 begin
+/// `Some(())` when the caller may read process `pid`'s memory facts as far as dumpable goes:
+/// itself, a dumpable process, or `CAP_SYS_PTRACE` (as `lx::info::may_see`).
+fn may_read_undumpable(pid: u64) -> Option<()> {
+    if pid == super::proc::current_ids().1 || crate::lx::proc::proc_attrs(pid).dumpable == 1 {
+        return Some(());
+    }
+    let caps = crate::task::with_current_task_mut(|t| if t.caps.in_userns { 0 } else { t.caps.effective }).unwrap_or(0);
+    // (CAP_SYS_PTRACE)
+    (caps & (1 << 19) != 0).then_some(())
+}
+
+/// A process's environment as it is now in its memory (`/proc/<pid>/environ`: the area
+/// after the arguments, at most 128 KiB). `None` when the process has no address space or
+/// its exec did not record the area.
+pub(crate) fn live_environ(pid: u64) -> Option<alloc::vec::Vec<u8>> {
+    let mm = crate::task::SCHEDULER.lock().with_process(pid, |t| t.mm.clone()).flatten()?;
+    let (start, end, env_end) = mm.lock().args;
+    if start == 0 || env_end <= end {
+        return None;
+    }
+    let to = env_end.min(end + 128 * 1024);
+    let mut out = alloc::vec::Vec::with_capacity((to - end) as usize);
+    let mut at = end;
+    while at < to {
+        let n = (to - at).min(4096 - at % 4096);
+        out.extend_from_slice(&super::extra::remote_copy(&mm, at, None, n)?);
+        at += n;
+    }
+    Some(out)
+}
+// wave10 G7b-2 end
+
 /// Whether `rest` (a path after `/proc/`) names `<pid>/cmdline`, `<pid>/comm` or
 /// `<pid>/fdinfo/<fd>`, with `<pid>` also `self` or `thread-self`. Takes no locks: path
 /// lookups run under the scheduler lock.
@@ -339,6 +372,7 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
     if file == "maps" {
         // Another process's mappings (debuggers, profilers)
         super::extra::may_access(pid).ok()?;
+        may_read_undumpable(pid)?;
         let mm = crate::task::SCHEDULER.lock().with_process(pid, |t| t.mm.clone()).flatten()?;
         let text = mm.lock().maps_text();
         return Some(text.into_bytes());
@@ -349,6 +383,7 @@ pub fn proc_pid_file_text(rest: &str) -> Option<alloc::vec::Vec<u8>> {
     if file == "auxv" {
         // Another process's auxiliary vector (debuggers find where a program was loaded)
         super::extra::may_access(pid).ok()?;
+        may_read_undumpable(pid)?;
         let mm = crate::task::SCHEDULER.lock().with_process(pid, |t| t.mm.clone()).flatten()?;
         let auxv = mm.lock().auxv.clone();
         return Some(auxv);

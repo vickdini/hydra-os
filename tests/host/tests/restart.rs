@@ -444,3 +444,13 @@ fn kept_too_small_area() {
     assert_eq!(k.count(), 0);
     assert_eq!(k.get(0), None);
 }
+
+// wave10 G7b-2: the kernel's remake of a `/proc` snapshot (`LX_KCALL_PREMAKE`, 0x6793)
+// only makes text: sent again after an lx-proc crash
+#[test]
+fn idempotent_marks_proc_remake() {
+    assert!(idempotent(0x6793, &[3, 0, 0, 0, 0, 0]));
+    assert!(idempotent(0x6793, &[17, 1234, 0, 99, 0, 0]));
+    // its neighbours are not
+    assert!(!idempotent(0x6794, &[0; 6]));
+}

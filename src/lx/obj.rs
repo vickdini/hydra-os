@@ -692,6 +692,12 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
         return super::procsvc::ctl(h, a, b, c);
     }
     // wave10 G7b-1 end
+    // wave10 G7b-2 begin: `/proc` snapshots from lx-proc (op 80)
+    #[cfg(target_os = "uefi")]
+    if op == crate::ipc::protocol::LX_OBJ_PSNAP {
+        return super::procsnap::glue::ctl(h, a, b, c);
+    }
+    // wave10 G7b-2 end
     // wave9 G6b-3: Landlock domains and ABAC decisions for the file service (76, 77)
     if op == crate::ipc::protocol::LX_FH_LANDLOCK || op == crate::ipc::protocol::LX_FH_ABAC {
         return super::fileh::ctl(h, op, a, b, c);
