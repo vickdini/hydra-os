@@ -905,8 +905,14 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
         return None;
     }
     let (fds, _) = super::cached_fds(id)?;
+    // (wave10 GV2: and whether a call on a descriptor is on a file of the file code at all,
+    // counted by number as on the ordinary path)
+    let mut vnode = sh != Shape::Handle;
     let r = match fds.try_lock() {
-        Some(t) => fill(&mut c, &t, sh, false),
+        Some(t) => {
+            vnode |= matches!(t.get(c.args[0] as i32 as usize), Some(FileDescriptor::Vnode(_)));
+            fill(&mut c, &t, sh, false)
+        }
         None => Err(()),
     };
     super::drop_last(fds);
@@ -915,7 +921,9 @@ pub(super) fn fast(id: &super::Ident, frame: &SyscallFrame) -> Option<i64> {
         // A call on a descriptor that is not a handle: the kernel, without asking again
         Ok(None) => {
             KEPT.fetch_add(1, Ordering::Relaxed);
-            count_kernel(nr, false);
+            if vnode {
+                count_kernel(nr, false);
+            }
             set_mark(id.tid, nr);
             return None;
         }

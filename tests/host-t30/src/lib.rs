@@ -1085,6 +1085,18 @@ pub mod compat {
             pub fn ns0_any() -> bool {
                 crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 16 != 0
             }
+            /// *stub* wave10 GV2: the ns-0 FUSE list vfs-server writes through (recorded
+            /// for the tests).
+            pub static NS0_RECORDS: spin::Mutex<alloc::vec::Vec<(u64, u64, alloc::string::String)>> = spin::Mutex::new(alloc::vec::Vec::new());
+            pub fn ns0_record(mountpoint: u64, root: u64, path: alloc::string::String, _fstype: alloc::string::String, _source: alloc::string::String, _flags: u64, _owner: (u32, u32, bool)) {
+                NS0_RECORDS.lock().push((mountpoint, root, path));
+            }
+            pub fn ns0_forget(root: u64) -> bool {
+                let mut l = NS0_RECORDS.lock();
+                let n = l.len();
+                l.retain(|r| r.1 != root);
+                l.len() != n
+            }
         }
         pub mod landlock {
             pub fn active() -> bool {

@@ -723,6 +723,24 @@ fn a_device_answer_opens_the_device_on_the_ordinary_path() {
     assert_eq!(r, Some(-6));
     assert_eq!(DEV_OPENS.load(Ordering::Relaxed), before + 1);
 }
+
+#[test]
+fn the_initial_namespaces_fuse_mounts_are_written_through() {
+    crate::fake::user_space_on();
+    let mut m = LxNs0Fuse { req: 7, mountpoint: 40, root: (1 << 62) | (0x8001 << 40) | 1, flags: 6, uid: 1000, gid: 1000, other: 0, path_kind: LX_FHP_ABS, path_len: 0, fstype_len: 0, source_len: 0, pad: 0, path: [0; LX_FH_PATH_MAX], fstype: [0; LX_NS0FUSE_NAME_MAX], source: [0; LX_NS0FUSE_NAME_MAX] };
+    let p = b"/run/user/1000/../1000/doc";
+    m.path[..p.len()].copy_from_slice(p);
+    m.path_len = p.len() as u32;
+    let ptr = Box::leak(Box::new(m)) as *const LxNs0Fuse as u64;
+    // (a request not the service's: refused)
+    assert_eq!(ns0fuse(LX_NS0FUSE_ADD, ptr, &|_| false), ESRCH);
+    assert_eq!(ns0fuse(LX_NS0FUSE_ADD, ptr, &|_| true), 0);
+    let root = (1u64 << 62) | (0x8001 << 40) | 1;
+    assert!(crate::compat::linux::fuse::NS0_RECORDS.lock().iter().any(|r| r.0 == 40 && r.1 == root && r.2 == "/run/user/1000/doc"));
+    assert_eq!(ns0fuse(LX_NS0FUSE_REMOVE, root, &|_| true), 0);
+    assert_eq!(ns0fuse(LX_NS0FUSE_REMOVE, root, &|_| true), ENOENT);
+    assert_eq!(ns0fuse(9, 0, &|_| true), EINVAL);
+}
 // wave10 GV2 end
 
 

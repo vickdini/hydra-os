@@ -291,9 +291,10 @@ fn pseudo_file_systems_under_the_root_redirect() {
     let jail = t.fs.mkdir(ROOT, "jail", 0o755);
     let jcx = Ctx::new(0, 0, 0, Node::new(0, jail));
     assert_eq!(redir(walk::walk(&t.fs, &jcx, Start::Root, b"/proc/x", 0)).svc, LXS_PROC);
-    // The boot table names proc, sys, dev; off: nothing
+    // The boot table names proc (wave10 GV2: sys and dev are pool trees now); off: nothing
     let b = BootMounts { pseudo: true };
-    assert_eq!(b.pseudo_at_root(0, b"sys").map(|p| p.0), Some(LXS_LINUX));
+    assert_eq!(b.pseudo_at_root(0, b"sys"), None);
+    assert_eq!(b.pseudo_at_root(0, b"dev"), None);
     assert_eq!(b.pseudo_at_root(0, b"proc").map(|p| p.0), Some(LXS_PROC));
     assert_eq!(b.pseudo_at_root(0, b"usr"), None);
     assert_eq!(BootMounts { pseudo: false }.pseudo_at_root(0, b"proc"), None);
