@@ -183,6 +183,8 @@ fn lists_hide_trusted_names_and_reads_fit_or_say_erange() {
     let names = b"user.a\0trusted.b\0security.c\0\0";
     assert_eq!(xattr_list_shown(names, true), b"user.a\0trusted.b\0security.c\0".to_vec());
     assert_eq!(xattr_list_shown(names, false), b"user.a\0security.c\0".to_vec());
+    // wave10 GV1: vfs-server's O_TMPFILE mark is never listed
+    assert_eq!(xattr_list_shown(b"trusted.hydra.tmpfile\0user.a\0", true), b"user.a\0".to_vec());
     assert_eq!(xattr_fits(10, 0), Ok(10));
     assert_eq!(xattr_fits(10, 10), Ok(10));
     assert_eq!(xattr_fits(10, 9), Err(ERANGE));

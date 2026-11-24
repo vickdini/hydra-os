@@ -8,7 +8,6 @@
 //! (default ACL, labels: `super::xattr::new_mode`), and tells the caches (vfs-server's, the
 //! kernel's names and attributes, and the kernel's in-memory tmpfs files: `crate::tmem`).
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,7 +20,6 @@ use super::rules;
 use crate::cache;
 use crate::ctx::Node;
 use crate::fs::fsproto::{Attr, FS_CREATE, FS_LINK, FS_MKNOD, FS_UNLINK};
-use crate::lock::YLock;
 use crate::policy::{self, ll};
 use crate::proto::{LxFhDesc, LX_FHC_ATTR, LX_FH_INSTALL, LX_FS_DEVCG, LX_FS_FANOTIFY, LX_FS_INOTIFY};
 use crate::walk::{self, Backend, ParentWalked};
@@ -40,59 +38,16 @@ const EACCES: i64 = -13;
 const NEED: u32 = LX_FS_INOTIFY | LX_FS_FANOTIFY;
 const AT_SYMLINK_FOLLOW: u64 = 0x400;
 
-/// The objects made by `O_TMPFILE` that have no name yet ([`Tmpfiles`]). Lost with a restart
-/// (a `linkat` of one then answers `ENOENT`, as for any file without names).
-static TMPFILES: YLock<Tmpfiles> = YLock::new(Tmpfiles::new());
-/// At most this many are remembered (dead ones go first, then the oldest).
-const MAX_TMPFILES: usize = 4096;
+/// The mark of an `O_TMPFILE` object without a name that may get one (not `O_EXCL`): an
+/// extended attribute on the object itself, so it survives a vfs-server restart, goes with
+/// the object when its last close frees it, and cannot belong to a reused inode number
+/// (review 4). `trusted.*`: only `CAP_SYS_ADMIN` could set it on another file; lists hide
+/// it (`rules::xattr_list_shown`).
+pub const TMPFILE_MARK: &[u8] = b"trusted.hydra.tmpfile";
 
-/// `O_TMPFILE` objects without a name: object -> (generation, may be linked: not `O_EXCL`,
-/// order made); the order -> object, for evicting the oldest (review 4).
-pub struct Tmpfiles {
-    by_ino: BTreeMap<u64, (u64, bool, u64)>,
-    by_age: BTreeMap<u64, u64>,
-    seq: u64,
-}
-
-impl Tmpfiles {
-    const fn new() -> Self {
-        Self { by_ino: BTreeMap::new(), by_age: BTreeMap::new(), seq: 0 }
-    }
-
-    /// Remembers object `ino` of generation `gen`; when full, first drops the objects that are
-    /// gone (closed: zfs-server freed them, or their generation changed), then the oldest.
-    fn insert(&mut self, ino: u64, gen: u64, linkable: bool, alive: impl Fn(u64, u64) -> bool) {
-        if self.by_ino.len() >= MAX_TMPFILES {
-            let dead: Vec<u64> = self.by_ino.iter().filter(|(&i, &(g, _, _))| !alive(i, g)).map(|(&i, _)| i).collect();
-            for i in dead {
-                self.remove(i);
-            }
-        }
-        while self.by_ino.len() >= MAX_TMPFILES {
-            let Some((_, &oldest)) = self.by_age.iter().next() else { break };
-            self.remove(oldest);
-        }
-        self.remove(ino);
-        self.seq += 1;
-        self.by_ino.insert(ino, (gen, linkable, self.seq));
-        self.by_age.insert(self.seq, ino);
-    }
-
-    /// Whether object `ino` of generation `gen` is an `O_TMPFILE` one that may be linked.
-    fn linkable(&self, ino: u64, gen: u64) -> bool {
-        matches!(self.by_ino.get(&ino), Some(&(g, true, _)) if g == gen)
-    }
-
-    fn remove(&mut self, ino: u64) {
-        if let Some((_, _, s)) = self.by_ino.remove(&ino) {
-            self.by_age.remove(&s);
-        }
-    }
-}
-
-/// Whether object `ino` still exists with generation `gen`.
-fn alive(ino: u64, gen: u64) -> bool {
-    matches!(zfs::getattr(ino), Ok(a) if a.generation == gen)
+/// Whether object `ino`, without names, carries the [`TMPFILE_MARK`].
+fn linkable_tmpfile(ino: u64) -> bool {
+    zfs::getxattr(ino, TMPFILE_MARK).is_ok()
 }
 
 /// Tells the kernel that regular file `ino`, new in `dir`, may be an in-memory tmpfs file
@@ -224,7 +179,7 @@ pub fn link(cx: &Cx) -> Result<i64, i64> {
     }
     // A file without names: only an O_TMPFILE one (not O_EXCL) may get one
     if attr.nlink == 0 {
-        let linkable = TMPFILES.lock().linkable(src.ino, attr.generation);
+        let linkable = linkable_tmpfile(src.ino);
         if !linkable {
             return Err(ENOENT);
         }
@@ -243,8 +198,12 @@ pub fn link(cx: &Cx) -> Result<i64, i64> {
         w.bytes(&p.name);
     });
     crate::notify::changed(&r, &who);
-    if r.is_ok() {
-        TMPFILES.lock().remove(src.ino);
+    // (named now: the mark goes)
+    if r.is_ok() && attr.nlink == 0 {
+        let _ = zfs::request(crate::fs::fsproto::FS_REMOVEXATTR, |w| {
+            w.u64(src.ino);
+            w.bytes(TMPFILE_MARK);
+        });
     }
     cache::CACHE.forget_attr(src);
     names_changed(&[p.dir], None);
@@ -452,7 +411,13 @@ pub fn tmpfile(cx: &Cx, k: &Call, path: &[u8], flags: u32, mode: u32, dirfd: i32
     }
     cache::CACHE.forget_object(ino);
     super::change::tell_kernel(ino, LX_FHC_ATTR, 0);
-    let generation = zfs::getattr(ino).map(|a| a.generation).unwrap_or(0);
-    TMPFILES.lock().insert(ino, generation, flags & rules::O_EXCL == 0, alive);
+    if flags & rules::O_EXCL == 0 {
+        let _ = zfs::request(crate::fs::fsproto::FS_SETXATTR, |w| {
+            w.u64(ino);
+            w.bytes(TMPFILE_MARK);
+            w.bytes(b"1");
+            w.u64(0);
+        });
+    }
     Ok(fd as i64)
 }

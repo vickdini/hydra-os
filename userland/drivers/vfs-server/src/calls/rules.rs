@@ -163,7 +163,8 @@ pub fn fcaps_valid(data: &[u8]) -> bool {
 pub fn xattr_list_shown(names: &[u8], admin: bool) -> alloc::vec::Vec<u8> {
     let mut shown = alloc::vec::Vec::new();
     for n in names.split(|&b| b == 0).filter(|n| !n.is_empty()) {
-        if admin || !n.starts_with(b"trusted.") {
+        // (wave10 GV1: vfs-server's own mark of an unnamed O_TMPFILE object is never shown)
+        if (admin || !n.starts_with(b"trusted.")) && n != b"trusted.hydra.tmpfile" {
             shown.extend_from_slice(n);
             shown.push(0);
         }
