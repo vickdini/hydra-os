@@ -47,7 +47,7 @@ back (part D). Nothing you can do here can harm the NUC's hardware.
    appears. Choose the USB stick (its "UEFI" entry if there are two).
 6. **What you should see:**
    - First a short text menu, **"Hydra - how to start"**, counting down 5 seconds. Do
-     nothing: entry 1 starts by itself.
+     nothing: entry 1 starts by itself. (If it does not count down, press **1**.)
    - Then the Hydra logo with a spinning circle, for up to a minute or two.
    - Then the desktop with a window **"You are trying Hydra"**. This is the live session:
      it runs from the stick and changes nothing on the NUC.
@@ -65,8 +65,9 @@ back (part D). Nothing you can do here can harm the NUC's hardware.
 
 1. Start the stick again as in B.5. In the "You are trying Hydra" window click **Install
    Hydra** (or the "Install Hydra" icon on the desktop).
-2. Follow the pages: language, keyboard, **the disk** (the NUC's Samsung SSD, about 250 GB),
-   your name and password. Confirm that the disk will be erased.
+2. Follow the pages: language, keyboard, **the disk** (the NUC's internal disk: check that its
+   size matches it, and never choose the USB stick), your name and password. Confirm that the
+   disk will be erased.
 3. Copying takes about 5 to 10 minutes. At the end click **Restart now**. When the black
    screen asks for it, remove the stick and press Enter (if you already pulled the stick
    earlier, Hydra restarts by itself now).
