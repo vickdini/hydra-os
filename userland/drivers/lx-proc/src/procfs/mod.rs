@@ -746,6 +746,8 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
     };
     let (start, uid, gid, made) = match (once, file) {
         (Some(o), _) => o,
+        // (wave11 GP: `/proc/1/cgroup` without a process 1: the kernel's `init.scope`)
+        (None, File::Pid { who: Who::Pid(1), tid: 0, file: PidFile::Cgroup }) if task(cx.id, Who::Pid(1), LX_INFO_TASK_NOMEM >> 32).is_err() => (0, 0, 0, None),
         (None, File::Pid { who, tid, .. }) => {
             let i = task(cx.id, who, tid | LX_INFO_TASK_NOMEM >> 32).ok()?;
             (i.start.max(1), i.ids[1], i.ids[4], None)

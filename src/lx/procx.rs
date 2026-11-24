@@ -94,6 +94,11 @@ mod glue {
 
     fn run(c: &Caller, what: u64, x: &mut LxProcxIo) -> i64 {
         let pid = resolve_pid(x.pid, c.tgid, c.init);
+        // (pid 1 is the kernel's on Hydra: its control group is the root's `init.scope`, as
+        // the kernel copy answered; libsystemd reads it)
+        if what == LX_PX_CGROUP && pid == 1 && c.init.is_none() && lx::proc::PROCS.lock().get(&1).is_none() {
+            return out_bytes(x.buf, x.cap, b"/init.scope");
+        }
         if per_process(what) {
             if pid > u32::MAX as u64 || is_service(pid) != Some(false) || !visible(pid, c.init, x.pid) {
                 return ESRCH;
