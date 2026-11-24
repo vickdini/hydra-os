@@ -676,6 +676,32 @@ fn truncation_unmaps_only_that_files_pages_past_the_end() {
         assert_eq!(mm.zap_file_from(77, 10), 0);
     });
 }
+
+#[test]
+fn truncation_keeps_pages_copied_into_private_mappings() {
+    // review of V1: a private mapping's own copies are not the file's pages any more
+    with_mm(|mm| {
+        let file = Arc::new(FileObj(object(3), 80));
+        mm.mmap(A, 3 * P, RW, false, true, false, Backing::Object { obj: file, pgoff: 0 }).unwrap();
+        mm.handle_fault(A + P, false, false).unwrap(); // read: the file's page
+        mm.write_bytes(A + 2 * P, b"mine").unwrap(); // written: a private copy
+        assert_eq!(mm.zap_file_from(80, 1), 1);
+        assert!(mm.translate(A + P).is_none(), "the file's page goes");
+        assert_eq!(read(mm, A + 2 * P, 4), b"mine", "the copy stays");
+    });
+}
+
+#[test]
+fn a_program_runs_from_its_named_mapping() {
+    with_mm(|mm| {
+        let file = Arc::new(FileObj(object(1), 81));
+        mm.mmap(A, P, PROT_READ, true, true, false, Backing::Object { obj: file, pgoff: 0 }).unwrap();
+        assert!(!mm.runs_file(81, "/usr/bin/x"), "an unnamed mapping is no program");
+        mm.set_name(A, A + P, Some("/usr/bin/x"));
+        assert!(mm.runs_file(81, "/usr/bin/x"));
+        assert!(!mm.runs_file(81, "/usr/bin/y") && !mm.runs_file(82, "/usr/bin/x"));
+    });
+}
 // wave10 GV1 end
 
 #[test]

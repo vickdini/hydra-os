@@ -130,6 +130,12 @@ impl InodeObject {
 const READ_AHEAD_PAGES: u64 = 16;
 
 impl MappedObject for InodeObject {
+    /// wave10 GV1: programs map the page cache's object itself (`inode_source`): a
+    /// truncation unmaps the cut pages there too, and `text_busy` finds the program.
+    fn inode(&self) -> Option<u64> {
+        Some(self.ino)
+    }
+
     fn get_page(&self, pgoff: u64) -> Option<PhysFrame<Size4KiB>> {
         if let Some(&f) = self.pages.lock().get(&pgoff) {
             return Some(f);
@@ -396,6 +402,7 @@ pub fn cache_truncated(ino: u64, size: u64) {
     let first_gone = size.div_ceil(PAGE_SIZE);
     let mut pages = obj.pages.lock();
     let gone: alloc::vec::Vec<u64> = pages.range(first_gone..).map(|(&p, _)| p).collect();
+    let any_cut = !gone.is_empty(); // wave10 GV1
     for p in gone {
         if let Some(f) = pages.remove(&p) {
             CACHED_PAGES.fetch_sub(1, Ordering::Relaxed);
@@ -416,8 +423,9 @@ pub fn cache_truncated(ino: u64, size: u64) {
     }
     drop(pages);
     obj.dirty.lock().retain(|&p| p < first_gone);
-    // wave10 GV1: mappings of the cut pages go (the next touch faults)
-    if obj.maps.load(Ordering::Acquire) > 0 {
+    // wave10 GV1: mappings of the cut pages go (the next touch faults); only pages the cache
+    // held can be mapped, so nothing to do when none was cut or nothing maps the file
+    if any_cut && obj.maps.load(Ordering::Acquire) > 0 {
         unmap_past(ino, size);
     }
 }
@@ -440,6 +448,19 @@ pub fn unmap_past(ino: u64, size: u64) {
     for m in spaces {
         m.lock().zap_file_from(ino, first);
     }
+}
+/// Whether file `ino` runs as some process's program (`ETXTBSY` for opening it for writing
+/// or truncating it, as on Linux; vfs-server asks: `LX_TMEM_TEXT_BUSY`).
+pub fn text_busy(ino: u64) -> bool {
+    let mut spaces: Vec<(Arc<Mutex<Mm>>, alloc::sync::Arc<str>)> = Vec::new();
+    crate::task::SCHEDULER.lock().for_each_task_mut(|t| {
+        if let (Some(m), Some(e)) = (&t.mm, &t.exe) {
+            if !spaces.iter().any(|s| Arc::ptr_eq(&s.0, m)) {
+                spaces.push((m.clone(), e.clone()));
+            }
+        }
+    });
+    spaces.iter().any(|(m, e)| m.lock().runs_file(ino, e))
 }
 // wave10 GV1 end
 

@@ -506,6 +506,74 @@ static void nodes(void) {
 }
 
 // --- O_PATH ----------------------------------------------------------------------------------
+// --- review fixes: ETXTBSY, private copies kept, ACL flags, fchmodat2 on a link -------------
+static void review(void) {
+    char p[256], l[256];
+    // A running program's file: not opened for writing nor truncated (ETXTBSY)
+    path(p, "xsleep");
+    unlink(p);
+    char cmd[512];
+    snprintf(cmd, sizeof cmd, "cp /bin/sleep %s", p);
+    CHECK(system(cmd) == 0, "copy sleep");
+    pid_t k = fork();
+    if (k == 0) {
+        execl(p, "xsleep", "5", (char *)0);
+        _exit(127);
+    }
+    usleep(500000);
+    int fd = open(p, O_WRONLY);
+    CHECK(fd < 0 && errno == ETXTBSY, "open for writing a running program: ETXTBSY");
+    if (fd >= 0) close(fd);
+    CHECK(truncate(p, 0) < 0 && errno == ETXTBSY, "truncate of a running program: ETXTBSY");
+    fd = open(p, O_RDONLY);
+    CHECK(fd >= 0, "reading it is fine");
+    if (fd >= 0) close(fd);
+    kill(k, SIGKILL);
+    waitpid(k, 0, 0);
+    fd = open(p, O_WRONLY);
+    CHECK(fd >= 0, "writable once it no longer runs");
+    if (fd >= 0) close(fd);
+    // A private mapping keeps the page it copied when the file is truncated
+    long pg = sysconf(_SC_PAGESIZE);
+    path(p, "privmap");
+    unlink(p);
+    fd = open(p, O_CREAT | O_RDWR, 0644);
+    char *buf = malloc(2 * pg);
+    memset(buf, 'f', 2 * pg);
+    CHECK(fd >= 0 && pwrite(fd, buf, 2 * pg, 0) == 2 * pg, "write");
+    char *m = mmap(0, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    CHECK(m != MAP_FAILED, "mmap private");
+    if (m != MAP_FAILED) {
+        m[pg] = 'P'; // copied
+        CHECK(ftruncate(fd, 0) == 0, "ftruncate");
+        CHECK(m[pg] == 'P', "the copied private page survives the truncation: %c", m[pg]);
+        munmap(m, 2 * pg);
+    }
+    free(buf);
+    close(fd);
+    // ACLs: XATTR_CREATE/XATTR_REPLACE do not matter; both together: EINVAL
+    struct acl_e e[] = {{1, 6, 0}, {2, 4, 1000}, {4, 4, 0}, {0x10, 4, 0}, {0x20, 0, 0}};
+    char a[64];
+    size_t n = acl_make(a, e, 5);
+    CHECK(setxattr(p, "system.posix_acl_access", a, n, XATTR_REPLACE) == 0, "ACL with XATTR_REPLACE on a file without one");
+    CHECK(setxattr(p, "system.posix_acl_access", a, n, XATTR_CREATE) == 0, "ACL with XATTR_CREATE on a file with one");
+    CHECK(setxattr(p, "user.both", "1", 1, XATTR_CREATE | XATTR_REPLACE) < 0 && errno == EINVAL, "both flags: EINVAL");
+    // fchmodat2 with AT_SYMLINK_NOFOLLOW on a link: EOPNOTSUPP
+    path(l, "chmodlink");
+    unlink(l);
+    CHECK(symlink("privmap", l) == 0, "symlink");
+    CHECK(syscall(452, AT_FDCWD, l, 0600, AT_SYMLINK_NOFOLLOW) < 0 && errno == EOPNOTSUPP, "fchmodat2 NOFOLLOW on a link: EOPNOTSUPP");
+    // O_TMPFILE: the file gets its mode once it has no name; no hidden name left
+    mode_t um = umask(022);
+    fd = open(D, O_TMPFILE | O_RDWR, 0640);
+    struct stat st;
+    CHECK(fd >= 0 && fstat(fd, &st) == 0 && (st.st_mode & 0777) == 0640, "tmpfile mode %o", st.st_mode & 0777);
+    umask(um);
+    if (fd >= 0) close(fd);
+    snprintf(cmd, sizeof cmd, "ls -a %s | grep -c hydra-tmpfile", D);
+    CHECK(system(cmd) != 0, "no hidden name left");
+}
+
 static void opath(void) {
     char p[256], l[256];
     path(p, "opath");
@@ -757,6 +825,7 @@ int main(int argc, char **argv) {
     times();
     nodes();
     opath();
+    review();
     statfss();
     ns_test();
     if (fails) {

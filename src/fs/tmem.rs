@@ -294,13 +294,14 @@ impl TmemFile {
             gone
         };
         // (a mapping that still maps a cut page keeps it, and it stays counted, until unmapped)
+        let any_cut = !gone.is_empty(); // wave10 GV1
         self.inst.cut(gone);
         self.size.store(size, Ordering::Release);
         self.mtime.store(now_ns(), Ordering::Release);
         // wave10 GV1: mappings of the cut pages go (after the writers' lock: a fault holds
         // its address space's lock while it asks for a page)
         drop(_io);
-        if size < old {
+        if size < old && any_cut {
             crate::compat::linux::mm::unmap_past(self.ino, size);
         }
         Ok(())

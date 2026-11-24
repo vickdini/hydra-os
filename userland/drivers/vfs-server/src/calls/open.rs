@@ -74,6 +74,11 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
         return Err(KERNEL);
     }
     let path = ctxt::path(cx, path_ptr, false)?;
+    // (wave10 GV1: a path too long for a handle is the kernel's: decided before anything is
+    // made or truncated here)
+    if path.len() > crate::proto::LX_FH_PATH_MAX {
+        return Err(KERNEL);
+    }
     let k = ctxt::call(c)?; // wave9 GP2
     let who = &k.who;
     let follow = flags & O_NOFOLLOW == 0;
@@ -88,6 +93,7 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     // A file this call makes opens with the access asked for, whatever its new mode says
     // (creat(path, 0444) returns a writable descriptor); it is not truncated
     let mut created = false;
+    let mut made: Option<(crate::ctx::Node, alloc::vec::Vec<u8>)> = None;
     // wave10 GV1 end
     let (n, attr) = if flags & O_CREAT != 0 {
         // O_EXCL never follows the last component: a symlink there (even dangling) exists
@@ -96,8 +102,9 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
             Ok(f) => f,
             // wave10 GV1: a new file, made here
             Err(rules::ENOENT) => match super::make::create(cx, &k, &path, flags, mode)? {
-                super::make::Made::New(n, a) => {
+                super::make::Made::New(n, a, dir, name) => {
                     created = true;
+                    made = Some((dir, name));
                     (n, a)
                 }
                 super::make::Made::Exists => k.find(c, &path, follow)?,
@@ -139,6 +146,10 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
         if !ctxt::allowed(who, &attr, acl.as_deref(), c.euid, c.egid, want, &path)? {
             return Err(EACCES);
         }
+        // wave10 GV1 (review 3): a running program's file is not opened for writing
+        if (flags & rules::O_ACCMODE != rules::O_RDONLY || flags & rules::O_TRUNC != 0) && crate::tmem::text_busy_attr(&attr) {
+            return Err(-26); // ETXTBSY
+        }
     }
     // wave9 G6b-3 begin: Landlock, as the kernel's open: the open's rights, and TRUNCATE
     // for every file (a later ftruncate on the handle depends on it)
@@ -162,9 +173,9 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     // wave10 GV1: a truncating open of a regular file for writing (an in-memory tmpfs file's
     // pool size is 0 whatever its data: asked)
     let trunc = flags & rules::O_TRUNC != 0 && attr.mode & rules::S_IFMT == rules::S_IFREG && flags & rules::O_ACCMODE != rules::O_RDONLY && !created;
-    if trunc && (attr.size != 0 || (crate::tmem::candidate(&attr) && crate::tmem::is_tmem(n.ino))) {
-        super::change::truncate_for_open(who, n, &attr)?;
-    }
+    // (review 2: the handle is installed first, then the file is truncated, so an open that
+    // fails to install — EMFILE — leaves the data; a file this open made goes again)
+    let trunc = trunc && (attr.size != 0 || (crate::tmem::candidate(&attr) && crate::tmem::is_tmem(n.ino)));
     let mut d = rules::handle_desc(c, n.ino, n.mnt, attr.is_dir(), flags, &path, dirfd)?;
     if notrunc {
         d.flags |= LX_FH_NOTRUNC; // wave9 G6b-3
@@ -172,7 +183,7 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     // wave9 GP2: the kernel takes the handle with the answer (no LX_FH_INSTALL round): not
     // for FUSE files (counted here), flags beyond the plain ones (6b-3's NOTRUNC), or a call
     // run again
-    if c.flags & crate::proto::LX_CALL_FHANSWER != 0 && !cx.page().is_null() && n.ino != 0 && n.ino < 1 << 45 && crate::fuse::wire::split(n.ino).is_none() && d.flags & !rules::FH_PLAIN == 0 {
+    if !trunc && !created && c.flags & crate::proto::LX_CALL_FHANSWER != 0 && !cx.page().is_null() && n.ino != 0 && n.ino < 1 << 45 && crate::fuse::wire::split(n.ino).is_none() && d.flags & !rules::FH_PLAIN == 0 {
         *fifo = n.ino | (n.mnt as u64) << 45 | (attr.is_dir() as u64) << 61;
         return Err(FHANSWER);
     }
@@ -184,9 +195,17 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
             if fuse {
                 crate::fuse::local_release(n.ino);
             }
+            if let Some((dir, name)) = &made {
+                super::make::undo_create(*dir, name, n.ino);
+            }
             return Err(e);
         }
     };
+    // (a truncation that fails after the install answers its error; the descriptor stays
+    // open: there is no way to close it from here, and it is rare — EIO)
+    if trunc {
+        super::change::truncate_for_open(who, n, &attr)?;
+    }
     Ok(fd as i64)
 }
 

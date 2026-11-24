@@ -2857,6 +2857,10 @@ pub const LX_TMEM_MAY_MOVE: u64 = 8;
 /// [`LX_FH_TMEM`] sub-op: `(ino, 0)`: in-memory file `ino`'s data time was set
 /// (`utimensat`): the pool's times are its own again.
 pub const LX_TMEM_TIMES: u64 = 9;
+/// [`LX_FH_TMEM`] sub-op (any file, not only in-memory ones: kept with the other file-data
+/// questions so no new op number is needed): `(ino, 0)`: 1 if file `ino` runs as some
+/// process's program (vfs-server answers `ETXTBSY` for writing or truncating it), else 0.
+pub const LX_TMEM_TEXT_BUSY: u64 = 10;
 /// [`LX_FH_CHANGED`] `what`: an access-control label attribute (`security.hydra.labels`)
 /// changed: the kernel's ABAC caches forget their labels.
 pub const LX_FHC_LABELS: u64 = 64;

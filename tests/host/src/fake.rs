@@ -114,6 +114,8 @@ pub struct Task {
     pub service: Option<u32>,
     /// Debug registers (`ptrace` `PTRACE_PEEKUSER`).
     pub debugregs: [u64; 8],
+    /// wave10 GV1: the program's path (`mm::text_busy`); none on the host.
+    pub exe: Option<alloc::sync::Arc<str>>,
 }
 
 /// Thread id, as in the kernel's `task::TaskId`.
@@ -139,6 +141,7 @@ impl Task {
             robust_list: 0,
             service: None,
             debugregs: [0; 8],
+            exe: None,
         }
     }
 }
@@ -187,6 +190,7 @@ pub fn with_current_task_mut<R>(f: impl FnOnce(&mut Task) -> R) -> Option<R> {
         robust_list: 0,
         service: None,
         debugregs: [0; 8],
+        exe: None,
     };
     let r = f(&mut t);
     CAPS.set(Some(t.caps.effective));

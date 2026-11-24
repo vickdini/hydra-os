@@ -110,6 +110,18 @@ pub fn mount_id(ns: u32, mnt: u16) -> Option<u64> {
     Some(id)
 }
 
+/// Whether file `ino` runs as some process's program (`ETXTBSY` for writing it). Asked only
+/// for regular files with an execute bit.
+pub fn text_busy(ino: u64) -> bool {
+    matches!(sys::lx_obj(LX_FH_TMEM, crate::proto::LX_TMEM_TEXT_BUSY, ino, 0), Ok(1))
+}
+
+/// Whether writing to or truncating regular file `a` (an execute bit set) must answer
+/// `ETXTBSY`.
+pub fn text_busy_attr(a: &Attr) -> bool {
+    a.mode & 0o170000 == 0o100000 && a.mode & 0o111 != 0 && text_busy(a.ino)
+}
+
 /// `(limit, used, files)` of tmpfs `id`.
 pub fn usage(id: u64) -> Option<(u64, u64, u64)> {
     let mut v = [0u64; 3];

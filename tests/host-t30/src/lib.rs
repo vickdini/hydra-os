@@ -1107,6 +1107,10 @@ pub mod compat {
             pub fn cache_forget(ino: u64) {
                 crate::fake::rec(|r| r.fs_truncated.push((ino, u64::MAX)));
             }
+            /// *stub* wave10 GV1: no program runs from inode 4242 only.
+            pub fn text_busy(ino: u64) -> bool {
+                ino == 4242
+            }
             pub fn cache_truncated(ino: u64, size: u64) {
                 crate::fake::rec(|r| r.fs_truncated.push((ino, size)));
             }

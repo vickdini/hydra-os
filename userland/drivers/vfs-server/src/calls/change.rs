@@ -67,7 +67,7 @@ pub(super) fn setattr(who: &Ctx, n: Node, a: &Attr, mut set: SetAttr) -> Result<
     let mem = (set.size.is_some() || set.mtime.is_some()) && crate::tmem::candidate(a) && crate::tmem::is_tmem(n.ino);
     // A truncation by a caller without CAP_FSETID drops the set-ID bits, as a write does
     if let (Some(_), None) = (set.size, set.mode) {
-        if !who.has_cap(CAP_FSETID) && a.mode & 0o170000 != 0o040000 {
+        if !who.cap(CAP_FSETID) && a.mode & 0o170000 != 0o040000 {
             let mut groups = alloc::vec![who.gid];
             groups.extend_from_slice(&who.groups[..who.ngroups]);
             let m = suid_killed(a.mode & 0o7777, a.gid, &groups);
@@ -78,6 +78,13 @@ pub(super) fn setattr(who: &Ctx, n: Node, a: &Attr, mut set: SetAttr) -> Result<
     }
     // wave10 GV1 begin
     let cut = if mem { set.size.take() } else { None };
+    // (the in-memory data first: a truncation the tmpfs refuses (EFBIG, its size=) changes
+    // nothing else — review 9)
+    if let Some(size) = cut {
+        if let Err(e) = crate::tmem::truncate(n.ino, size) {
+            return Err(e);
+        }
+    }
     if mem && set.mtime.is_some() {
         crate::tmem::times_set(n.ino);
     }
@@ -104,11 +111,6 @@ pub(super) fn setattr(who: &Ctx, n: Node, a: &Attr, mut set: SetAttr) -> Result<
     if let (Ok(_), Some(mode), true) = (&r, set.mode, a.has_xattr) {
         acl_follows_mode(n, mode);
     }
-    // wave10 GV1: an in-memory file's size is the kernel's
-    let r = match (r, cut) {
-        (Ok(()), Some(size)) => crate::tmem::truncate(n.ino, size),
-        (r, _) => r,
-    };
     cache::forget_attr(n);
     // (the page cache is cut only when the file was)
     let size = set.size.unwrap_or(0);
@@ -168,6 +170,10 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
                 _ => (0, a[1], true, true),
             };
             let (n, at) = target(cx, &who, ptr, follow, empty)?;
+            // (wave10 GV1: fchmodat2 with AT_SYMLINK_NOFOLLOW on a link: Linux's EOPNOTSUPP)
+            if !follow && at.mode & 0o170000 == 0o120000 {
+                return Err(-95);
+            }
             // (wave10 GV1: an access ACL takes the new bits in `setattr`)
             ctxt::writable(c, n)?; // wave7 G7-7
             if !owner(&who, &at) {
@@ -214,6 +220,10 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
             let acl = ctxt::acl_of(n, &at)?;
             if !ctxt::allowed(&who, &at, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE, b"")? {
                 return Err(EPERM);
+            }
+            // wave10 GV1 (review 3): a running program's file is not truncated
+            if crate::tmem::text_busy_attr(&at) {
+                return Err(-26); // ETXTBSY
             }
             setattr(&who, n, &at, SetAttr { size: Some(a[1]), ..SetAttr::default() })
         }

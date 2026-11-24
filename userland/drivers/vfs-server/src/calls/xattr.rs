@@ -65,7 +65,7 @@ pub fn serve(cx: &Cx) -> Result<i64, i64> {
     };
     if kind == 2 {
         let names = zfs::listxattr(n.ino)?;
-        return out(&rules::xattr_list_shown(&names, who.has_cap(CAP_SYS_ADMIN)), a[1], a[2]);
+        return out(&rules::xattr_list_shown(&names, who.cap(CAP_SYS_ADMIN)), a[1], a[2]);
     }
     let name = cx.user_cstr(a[1])?;
     let ns = rules::xattr_ns(&name)?;
@@ -80,7 +80,7 @@ pub fn serve(cx: &Cx) -> Result<i64, i64> {
         return acl_remove(&who, n, &attr, default);
     }
     match ns {
-        XattrNs::Trusted if !who.has_cap(CAP_SYS_ADMIN) => return Err(if write { EPERM } else { ENODATA }),
+        XattrNs::Trusted if !who.cap(CAP_SYS_ADMIN) => return Err(if write { EPERM } else { ENODATA }),
         XattrNs::User => {
             let t = attr.mode & 0o170000;
             if t != 0o100000 && t != 0o040000 {
@@ -93,7 +93,7 @@ pub fn serve(cx: &Cx) -> Result<i64, i64> {
         }
         XattrNs::Security if write => {
             let needed = if &name[..] == b"security.capability" { CAP_SETFCAP } else { CAP_SYS_ADMIN };
-            if !who.has_cap(needed) {
+            if !who.cap(needed) {
                 return Err(EPERM);
             }
         }
@@ -114,7 +114,8 @@ pub fn serve(cx: &Cx) -> Result<i64, i64> {
         }
         _ => {
             let (value, size, flags) = (a[2], a[3], a[4]);
-            if flags & !3 != 0 {
+            // (both XATTR_CREATE and XATTR_REPLACE: EINVAL, as Linux)
+            if flags & !3 != 0 || flags == 3 {
                 return Err(EINVAL);
             }
             if size > SIZE_MAX {
@@ -125,7 +126,8 @@ pub fn serve(cx: &Cx) -> Result<i64, i64> {
                 return Err(EINVAL);
             }
             if let XattrNs::Acl(default) = ns {
-                return acl_set(&who, c.egid, n, &attr, default, &data, flags as u32);
+                // (Linux ignores XATTR_CREATE/XATTR_REPLACE for ACLs)
+                return acl_set(&who, c.egid, n, &attr, default, &data, 0);
             }
             set(&who, n, &name, &data, flags as u32)
         }
@@ -160,7 +162,7 @@ fn changed(who: &Ctx, n: Node, name: &[u8], r: &Result<zfs::Reply, i64>) {
 
 /// Whether the caller may change `attr`'s ACLs (its owner, or `CAP_FOWNER`).
 fn may_change(who: &Ctx, attr: &Attr) -> bool {
-    who.uid == attr.uid || who.has_cap(CAP_FOWNER)
+    who.uid == attr.uid || who.cap(CAP_FOWNER)
 }
 
 /// Removes `n`'s access or default ACL (the mode stays).
@@ -197,7 +199,7 @@ fn acl_set(who: &Ctx, egid: u32, n: Node, attr: &Attr, default: bool, value: &[u
     if default {
         return set(who, n, acl::DEFAULT, &acl::encode(&e), flags);
     }
-    let in_group = egid == attr.gid || who.in_group(attr.gid) || who.has_cap(CAP_FSETID);
+    let in_group = egid == attr.gid || who.in_group(attr.gid) || who.cap(CAP_FSETID);
     let (keep, mode) = acl::set_access(value, attr.mode, in_group)?;
     match keep {
         Some(b) => {

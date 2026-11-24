@@ -40,12 +40,60 @@ const EACCES: i64 = -13;
 const NEED: u32 = LX_FS_INOTIFY | LX_FS_FANOTIFY;
 const AT_SYMLINK_FOLLOW: u64 = 0x400;
 
-/// The objects made by `O_TMPFILE` that have no name yet: object -> may be linked (not
-/// `O_EXCL`). Kept until they get one; lost with a restart (a `linkat` of one then answers
-/// `ENOENT`, as for any file without names).
-static TMPFILES: YLock<BTreeMap<u64, bool>> = YLock::new(BTreeMap::new());
-/// At most this many are remembered (the oldest go).
+/// The objects made by `O_TMPFILE` that have no name yet ([`Tmpfiles`]). Lost with a restart
+/// (a `linkat` of one then answers `ENOENT`, as for any file without names).
+static TMPFILES: YLock<Tmpfiles> = YLock::new(Tmpfiles::new());
+/// At most this many are remembered (dead ones go first, then the oldest).
 const MAX_TMPFILES: usize = 4096;
+
+/// `O_TMPFILE` objects without a name: object -> (generation, may be linked: not `O_EXCL`,
+/// order made); the order -> object, for evicting the oldest (review 4).
+pub struct Tmpfiles {
+    by_ino: BTreeMap<u64, (u64, bool, u64)>,
+    by_age: BTreeMap<u64, u64>,
+    seq: u64,
+}
+
+impl Tmpfiles {
+    const fn new() -> Self {
+        Self { by_ino: BTreeMap::new(), by_age: BTreeMap::new(), seq: 0 }
+    }
+
+    /// Remembers object `ino` of generation `gen`; when full, first drops the objects that are
+    /// gone (closed: zfs-server freed them, or their generation changed), then the oldest.
+    fn insert(&mut self, ino: u64, gen: u64, linkable: bool, alive: impl Fn(u64, u64) -> bool) {
+        if self.by_ino.len() >= MAX_TMPFILES {
+            let dead: Vec<u64> = self.by_ino.iter().filter(|(&i, &(g, _, _))| !alive(i, g)).map(|(&i, _)| i).collect();
+            for i in dead {
+                self.remove(i);
+            }
+        }
+        while self.by_ino.len() >= MAX_TMPFILES {
+            let Some((_, &oldest)) = self.by_age.iter().next() else { break };
+            self.remove(oldest);
+        }
+        self.remove(ino);
+        self.seq += 1;
+        self.by_ino.insert(ino, (gen, linkable, self.seq));
+        self.by_age.insert(self.seq, ino);
+    }
+
+    /// Whether object `ino` of generation `gen` is an `O_TMPFILE` one that may be linked.
+    fn linkable(&self, ino: u64, gen: u64) -> bool {
+        matches!(self.by_ino.get(&ino), Some(&(g, true, _)) if g == gen)
+    }
+
+    fn remove(&mut self, ino: u64) {
+        if let Some((_, _, s)) = self.by_ino.remove(&ino) {
+            self.by_age.remove(&s);
+        }
+    }
+}
+
+/// Whether object `ino` still exists with generation `gen`.
+fn alive(ino: u64, gen: u64) -> bool {
+    matches!(zfs::getattr(ino), Ok(a) if a.generation == gen)
+}
 
 /// Tells the kernel that regular file `ino`, new in `dir`, may be an in-memory tmpfs file
 /// (only a tmpfs mount's files can be: the initial namespace's `/dev/shm` is walked by the
@@ -176,7 +224,7 @@ pub fn link(cx: &Cx) -> Result<i64, i64> {
     }
     // A file without names: only an O_TMPFILE one (not O_EXCL) may get one
     if attr.nlink == 0 {
-        let linkable = TMPFILES.lock().get(&src.ino).copied().unwrap_or(false);
+        let linkable = TMPFILES.lock().linkable(src.ino, attr.generation);
         if !linkable {
             return Err(ENOENT);
         }
@@ -196,7 +244,7 @@ pub fn link(cx: &Cx) -> Result<i64, i64> {
     });
     crate::notify::changed(&r, &who);
     if r.is_ok() {
-        TMPFILES.lock().remove(&src.ino);
+        TMPFILES.lock().remove(src.ino);
     }
     cache::CACHE.forget_attr(src);
     names_changed(&[p.dir], None);
@@ -235,8 +283,9 @@ fn proc_fd_link(cx: &Cx, path: &[u8], follow: bool) -> Result<Option<Node>, i64>
 
 /// What [`create`] did.
 pub enum Made {
-    /// Made object `.0` (attributes `.1`).
-    New(Node, Attr),
+    /// Made object `.0` (attributes `.1`), named `.3` in directory `.2` (an open that then
+    /// fails to install its handle removes it again: [`undo_create`]).
+    New(Node, Attr, Node, Vec<u8>),
     /// The name exists after all (another caller made it first; not `O_EXCL`): open it.
     Exists,
 }
@@ -301,7 +350,23 @@ pub fn create(cx: &Cx, k: &Call, path: &[u8], flags: u32, mode: u32) -> Result<M
     if c.ll_dom != 0 {
         policy::hint(c.id, p.dir, &p.name, n);
     }
-    Ok(Made::New(n, ctxt::BE.getattr(n)?))
+    let a = ctxt::BE.getattr(n)?;
+    Ok(Made::New(n, a, p.dir, p.name))
+}
+
+/// Removes the file [`create`] made as `name` in `dir` (object `ino`) when its open failed
+/// afterwards (the handle could not be installed: `EMFILE`): no empty file is left behind,
+/// as on Linux, where the descriptor is reserved first. Only if the name still leads to it.
+pub fn undo_create(dir: Node, name: &[u8], ino: u64) {
+    if zfs::lookup(dir.ino, name) != Ok(ino) {
+        return;
+    }
+    let _ = zfs::request(FS_UNLINK, |w| {
+        w.u64(dir.ino);
+        w.bytes(name);
+    });
+    cache::CACHE.forget_object(ino);
+    names_changed(&[dir], Some(ino));
 }
 
 /// A number for hidden `O_TMPFILE` names.
@@ -335,6 +400,8 @@ pub fn tmpfile(cx: &Cx, k: &Call, path: &[u8], flags: u32, mode: u32, dirfd: i32
         policy::check_dir(&d, dir, ll::open_rights(flags & !rules::O_TRUNC, false))?;
     }
     let (perm, plan) = super::xattr::new_mode(dir, &dattr, mode & 0o7777, c.umask as u32, false)?;
+    // (review 5: made with mode 0 under its hidden name, so nobody else opens it in the
+    // moment the name exists; its mode and inherited ACL come after the name is gone)
     let mut name = Vec::from(&b".hydra-tmpfile-"[..]);
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let (s, ns) = sys::clock();
@@ -343,15 +410,12 @@ pub fn tmpfile(cx: &Cx, k: &Call, path: &[u8], flags: u32, mode: u32, dirfd: i32
     let ino = zfs::request(FS_CREATE, |w| {
         w.u64(dir.ino);
         w.bytes(&name);
-        w.u64(perm as u64);
+        w.u64(0);
         w.u64(c.euid as u64);
         w.u64(c.egid as u64);
     })?
     .value;
     tmem_created(ino, dir, c.mnt_ns, is_tmpfs(k, dir.mnt));
-    if !plan.is_empty() {
-        super::xattr::inherit(ino, &plan);
-    }
     let n = Node::new(dir.mnt, ino);
     // The handle: its path shows the directory and the object, as Linux's `#ino (deleted)`
     let mut shown = path.to_vec();
@@ -362,19 +426,33 @@ pub fn tmpfile(cx: &Cx, k: &Call, path: &[u8], flags: u32, mode: u32, dirfd: i32
     let fflags = (flags & !(rules::O_DIRECTORY | super::rules::O_TMPFILE_MASK)) | 0;
     let d = rules::handle_desc(c, n.ino, n.mnt, false, fflags, &shown, dirfd);
     let fd = d.and_then(|d| sys::lx_obj(LX_FH_INSTALL, cx.id, &d as *const LxFhDesc as u64, 0));
-    // The hidden name goes whatever happened (an open handle keeps the object)
-    let _ = zfs::request(FS_UNLINK, |w| {
-        w.u64(dir.ino);
-        w.bytes(&name);
-    });
+    // The hidden name goes whatever happened (an open handle keeps the object); tried twice
+    let unlink = || {
+        zfs::request(FS_UNLINK, |w| {
+            w.u64(dir.ino);
+            w.bytes(&name);
+        })
+    };
+    let gone = unlink().is_ok() || unlink().is_ok();
     names_changed(&[dir], None);
     let fd = fd?;
-    let mut t = TMPFILES.lock();
-    if t.len() >= MAX_TMPFILES {
-        if let Some(&first) = t.keys().next() {
-            t.remove(&first);
-        }
+    if !gone {
+        // (the descriptor is installed and cannot be taken back: the file keeps its hidden
+        // name and mode 0 — a stray name, not a file others can open)
+        hydra_rt::println!("[vfs-server] O_TMPFILE: hidden name {} left in directory {}", core::str::from_utf8(&name).unwrap_or("?"), dir.ino);
+        return Ok(fd as i64);
     }
-    t.insert(ino, flags & rules::O_EXCL == 0);
+    // Its mode and inherited ACL, now that it has no name
+    let _ = zfs::request(crate::fs::fsproto::FS_SETATTR, |w| {
+        w.u64(ino);
+        w.setattr(&crate::fs::fsproto::SetAttr { mode: Some(perm), ..Default::default() });
+    });
+    if !plan.is_empty() {
+        super::xattr::inherit(ino, &plan);
+    }
+    cache::CACHE.forget_object(ino);
+    super::change::tell_kernel(ino, LX_FHC_ATTR, 0);
+    let generation = zfs::getattr(ino).map(|a| a.generation).unwrap_or(0);
+    TMPFILES.lock().insert(ino, generation, flags & rules::O_EXCL == 0, alive);
     Ok(fd as i64)
 }

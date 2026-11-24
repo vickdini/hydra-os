@@ -95,4 +95,10 @@ impl Ctx {
     pub fn has_cap(&self, cap: u32) -> bool {
         self.uid == 0 || (cap < 64 && self.caps & (1 << cap) != 0)
     }
+
+    /// wave10 GV1: whether the caller's effective capability set holds `cap` (a bit
+    /// number), whatever its user (the kernel's `caps.has`: a root that dropped it has not).
+    pub fn cap(&self, cap: u32) -> bool {
+        cap < 64 && self.caps & (1 << cap) != 0
+    }
 }

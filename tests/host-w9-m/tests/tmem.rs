@@ -74,6 +74,8 @@ fn shrinking_unmaps_the_cut_pages_everywhere() {
     assert_eq!(f.inode(), Some(1012));
     hydra_hosttests_w9_m::compat::linux::mm::UNMAPS.lock().unwrap().clear();
     f.truncate(3 * 4096).unwrap();
+    f.truncate(4096).unwrap(); // (no pages: nothing to unmap — review 11)
+    f.write(Some(0), &[1u8; 3 * 4096]).unwrap();
     f.truncate(4096 + 10).unwrap();
     let u = hydra_hosttests_w9_m::compat::linux::mm::UNMAPS.lock().unwrap().clone();
     assert_eq!(u, vec![(1012, 4096 + 10)]);

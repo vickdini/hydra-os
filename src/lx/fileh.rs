@@ -1305,6 +1305,7 @@ fn tmem(sub: u64, a: u64, b: u64) -> i64 {
             crate::fs::zfs::tmem_unlinked(a);
             0
         }
+        crate::ipc::protocol::LX_TMEM_TEXT_BUSY => crate::compat::linux::mm::text_busy(a) as i64,
         LX_TMEM_MAY_MOVE => {
             if t::may_move(a, b) {
                 0

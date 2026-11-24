@@ -454,12 +454,15 @@ fn flush(pml4: PhysAddr, addr: u64) {
 
 impl Mm {
     // wave10 GV1 begin
-    /// Unmaps every page of file `ino` from file page `first` on, in every area that maps
-    /// it (a truncation: the next touch faults, `SIGBUS` past the end, or a fresh page);
-    /// copied private pages of that range go too, as Linux's `unmap_mapping_range` with
-    /// `even_cows`. Returns how many areas mapped it.
+    /// Unmaps the pages of file `ino` from file page `first` on, in every area that maps it
+    /// (a truncation: the next touch faults, `SIGBUS` past the end, or a fresh page). Shared
+    /// areas lose every page of the range; private areas keep the pages already copied into
+    /// them (writable ones: the file's own pages are mapped read-only there until written),
+    /// so a program's own data survives a truncation of the file it was mapped from (review
+    /// of V1: Linux's private copies are anonymous memory then). One TLB flush for the whole
+    /// address space at the end. Returns how many areas mapped it.
     pub fn zap_file_from(&mut self, ino: u64, first: u64) -> usize {
-        let ranges: Vec<(u64, u64)> = self
+        let ranges: Vec<(u64, u64, bool)> = self
             .vmas
             .values()
             .filter_map(|v| match &v.backing {
@@ -469,15 +472,41 @@ impl Mm {
                         return None;
                     }
                     let skip = first.saturating_sub(*pgoff);
-                    Some((v.start + skip * PAGE_SIZE, v.end))
+                    Some((v.start + skip * PAGE_SIZE, v.end, v.shared))
                 }
                 _ => None,
             })
             .collect();
-        for &(s, e) in &ranges {
-            self.zap_range(s, e);
+        let mut freed = Vec::new();
+        for &(s, e, shared) in &ranges {
+            let mut addr = s;
+            while addr < e {
+                match self.pte(addr, false) {
+                    Some(entry) => {
+                        if pte_holds_frame(entry) && (shared || !entry.flags().contains(PageTableFlags::WRITABLE)) {
+                            freed.push(PhysFrame::containing_address(entry.addr()));
+                            entry.set_unused();
+                        }
+                        addr += PAGE_SIZE;
+                    }
+                    None => addr = (addr + 0x20_0000) & !0x1F_FFFF,
+                }
+            }
+        }
+        if !freed.is_empty() {
+            // (every CPU running this address space forgets it before the frames go)
+            crate::arch::smp::shootdown(Some(self.pml4.as_u64()), None);
+            for f in freed {
+                frame_ref_dec(f);
+            }
         }
         ranges.len()
+    }
+
+    /// Whether this address space runs file `ino` as its program: an area of it named
+    /// `exe` (the task's executable path) maps that file (`ETXTBSY` for writing it).
+    pub fn runs_file(&self, ino: u64, exe: &str) -> bool {
+        self.vmas.values().any(|v| matches!(&v.backing, Backing::Object { obj, .. } if obj.inode() == Some(ino)) && v.name.as_deref() == Some(exe))
     }
     // wave10 GV1 end
 
