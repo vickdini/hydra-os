@@ -9,7 +9,7 @@ use crate::fs::fsproto::{Attr, ENOENT};
 use crate::fs::types::{S_IFDIR, S_IFLNK, S_IFREG};
 use crate::mount::{self, MTAB, TMPFS};
 use crate::mtab::{Caller, FsFactory, Loc, SvcId, CAP_SYS_ADMIN, MS_BIND};
-use crate::proto::{LXS_LINUX, LXS_PROC, LX_VFS_PSEUDO_PROC};
+use crate::proto::{LXS_PROC, LX_VFS_PSEUDO_PROC};
 use crate::walk::{self, Backend, Mounts, Start, Walked};
 
 /// The pool: `/` = 2, `/proc` 10, `/tmp` 20, `/usr` 30, `/usr/bin` 31 (a file), `/lnk` 40
@@ -112,7 +112,8 @@ fn the_walk_over_the_tables() {
     assert_eq!(MTAB.lock().as_ref().unwrap().ns(0).unwrap().get(1).unwrap().root, 2);
     // The boot answers (as 7-1's BootMounts)
     assert_eq!(redirected(0, "/proc/self/stat"), (LXS_PROC, LX_VFS_PSEUDO_PROC));
-    assert_eq!(redirected(0, "/dev/null").0, LXS_LINUX);
+    // (wave10 GV2: /dev and /sys are pool trees walked by vfs-server: not redirected)
+    assert!(found(0, "/dev/null").is_err());
     assert_eq!(found(0, "/usr/bin").unwrap().0, Node::new(0, 31));
     assert_eq!(mount::TABLES.covering(0, Node::new(0, 20)), None);
     assert_eq!(mount::TABLES.mount(0, 1), None);
@@ -157,8 +158,9 @@ fn the_walk_over_the_tables() {
     assert_eq!(found(0, "/tmp").unwrap().0, Node::new(0, 20));
     // /proc in the copy: a mount on the pool's directory, served by the process service
     assert_eq!(redirected(7, "/proc/self/stat"), (LXS_PROC, LX_VFS_PSEUDO_PROC));
-    // /dev had no directory in this pool: it stays by name
-    assert_eq!(redirected(7, "/dev/null").0, LXS_LINUX);
+    // /dev had no directory in this pool (wave10 GV2: a pool tree walked here, not
+    // redirected by name any more)
+    assert!(found(7, "/dev/null").is_err());
 
     // A bind of /usr inside the tmpfs: the walk crosses pool -> tmpfs -> pool
     {
@@ -173,7 +175,8 @@ fn the_walk_over_the_tables() {
     let info = mount::TABLES.mount(7, bin.mnt).unwrap();
     assert_eq!((info.parent, info.mountpoint, info.root), (tm as u16, Node::new(tm as u16, d), Node::new(bin.mnt, 30)));
     assert_eq!(mount::TABLES.covering(7, Node::new(tm as u16, d)), Some(bin.mnt));
-    assert_eq!(mount::TABLES.pseudo_at_root(7, b"dev"), Some((LXS_LINUX, crate::proto::LX_VFS_PSEUDO_DEV)));
+    // (wave10 GV2: dev and sys are pool trees here, never redirected by name)
+    assert_eq!(mount::TABLES.pseudo_at_root(7, b"dev"), None);
     assert_eq!(mount::TABLES.pseudo_at_root(7, b"proc"), None, "a mount on the object now");
 
     // tmpfs ACLs reach the permission checks

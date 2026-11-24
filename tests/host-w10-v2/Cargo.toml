@@ -1,0 +1,16 @@
+[package]
+name = "hydra_hosttests_w10_v2"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group V2's host unit tests (wave 10): /sys and /dev in vfs-server (the names other services serve, the walk's path for chdir, the trees statfs shows), tty-server's /dev/pts names"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"

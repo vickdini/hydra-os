@@ -170,7 +170,8 @@ impl Mounts for TableMounts {
             return BOOT.pseudo_at_root(ns, name);
         }
         let g = MTAB.lock();
-        table(g.as_ref()?, ns)?.pseudo_at_root(name)
+        // (wave10 GV2: `sys` and `dev` are pool trees walked here, as in the boot rule)
+        table(g.as_ref()?, ns)?.pseudo_at_root(name).filter(|&(_, obj)| obj & 0xFFFF_FFFF != LX_VFS_PSEUDO_SYS && obj & 0xFFFF_FFFF != LX_VFS_PSEUDO_DEV)
     }
 }
 

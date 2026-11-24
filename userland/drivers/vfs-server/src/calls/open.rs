@@ -33,6 +33,12 @@ pub fn serve(cx: &Cx) -> hydra_rt::svcrt::Answer {
         super::SERVED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return hydra_rt::svcrt::redirect(cx.page(), crate::proto::LX_REDIR_FH, fifo & ((1 << 45) - 1), (fifo >> 45) as u32);
     }
+    // wave10 GV2: a device node: the kernel opens the device by its number (`fifo` holds it)
+    if r == Err(DEVANSWER) {
+        super::SERVED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        super::DEV_OPENS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return hydra_rt::svcrt::redirect(cx.page(), crate::proto::LX_REDIR_DEV, fifo, 0);
+    }
     super::answer(cx, r)
 }
 
@@ -40,12 +46,14 @@ pub fn serve(cx: &Cx) -> hydra_rt::svcrt::Answer {
 const FIFO: i64 = i64::MIN + 1;
 /// wave9 GP2: answered with the handle for the kernel to make (`LX_REDIR_FH`).
 const FHANSWER: i64 = i64::MIN + 2;
+/// wave10 GV2: answered with the device for the kernel to open (`LX_REDIR_DEV`).
+const DEVANSWER: i64 = i64::MIN + 3;
 
 /// `open(path, flags, mode)`, `openat(dirfd, path, flags, mode)`.
 pub fn open(cx: &Cx) -> Result<i64, i64> {
     let mut fifo = 0;
     match open_or_fifo(cx, &mut fifo) {
-        Err(FIFO) | Err(FHANSWER) => Err(KERNEL),
+        Err(FIFO) | Err(FHANSWER) | Err(DEVANSWER) => Err(KERNEL),
         r => r,
     }
 }
@@ -72,6 +80,10 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     };
     if !rules::servable(flags) {
         return Err(KERNEL);
+    }
+    // wave10 GV2: Linux 6.4's answer (the kernel's copy made a file, then ENOTDIR)
+    if rules::creat_dir_flags(flags) {
+        return Err(rules::EINVAL);
     }
     let path = ctxt::path(cx, path_ptr, false)?;
     // (wave10 GV1: a path too long for a handle is the kernel's: decided before anything is
@@ -136,9 +148,12 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     }
     // wave7 G7-5 end
     let want = rules::decide(attr.mode, flags)?;
+    // wave10 GV2: a device node (opened by number in the kernel, after the checks below)
+    let kind = attr.mode & rules::S_IFMT;
+    let device = kind == rules::S_IFCHR || kind == rules::S_IFBLK;
     // wave7 G7-7: writing into a read-only mount (wave10 GV1: EROFS here, after the type
-    // checks, as the kernel's)
-    if flags & rules::O_ACCMODE != rules::O_RDONLY || flags & rules::O_TRUNC != 0 {
+    // checks, as the kernel's; wave10 GV2: not for devices, as on Linux and the kernel's)
+    if !device && (flags & rules::O_ACCMODE != rules::O_RDONLY || flags & rules::O_TRUNC != 0) {
         k.writable(n)?;
     }
     if !created {
@@ -170,6 +185,18 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
         notrunc = refused & ll::TRUNCATE != 0;
     }
     // wave9 G6b-3 end
+    // wave10 GV2: the device opens in the kernel (by number: its owner makes the object)
+    if device {
+        // (a FUSE daemon's device node: the kernel's, as before)
+        if crate::fuse::wire::split(n.ino).is_some() || cx.page().is_null() {
+            return Err(KERNEL);
+        }
+        *fifo = attr.rdev | if kind == rules::S_IFBLK { crate::proto::LX_REDIR_DEV_BLOCK } else { 0 };
+        if attr.rdev >= crate::proto::LX_REDIR_DEV_BLOCK {
+            return Err(rules::ENXIO);
+        }
+        return Err(DEVANSWER);
+    }
     // wave10 GV1: a truncating open of a regular file for writing (an in-memory tmpfs file's
     // pool size is 0 whatever its data: asked)
     let trunc = flags & rules::O_TRUNC != 0 && attr.mode & rules::S_IFMT == rules::S_IFREG && flags & rules::O_ACCMODE != rules::O_RDONLY && !created;

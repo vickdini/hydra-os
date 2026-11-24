@@ -130,6 +130,19 @@ pub fn statfs(total: u64, free: u64, objs: u64, fsid: [u32; 2]) -> [u8; STATFS_S
     b
 }
 
+// wave10 GV2 begin
+/// `struct statfs` of a file system shown by its type only (sysfs, cgroup2, efivarfs,
+/// devpts: the kernel's `statfs_out` for them): block size 1024 for devpts, else 4096.
+pub fn statfs_named(magic: i64) -> [u8; STATFS_SIZE] {
+    let mut b = [0u8; STATFS_SIZE];
+    put64(&mut b, 0, magic as u64);
+    put64(&mut b, 8, if magic == 0x1cd1 { 1024 } else { 4096 });
+    put64(&mut b, 64, 255);
+    put64(&mut b, 72, 4096);
+    b
+}
+// wave10 GV2 end
+
 // wave10 GV1 begin
 /// `f_type` of a tmpfs (`TMPFS_MAGIC`).
 pub const TMPFS_MAGIC: i64 = 0x0102_1994;

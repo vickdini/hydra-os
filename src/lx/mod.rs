@@ -1195,6 +1195,11 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
             if s == crate::ipc::protocol::LX_REDIR_SHM {
                 return shm::answer(x, &c, redir);
             }
+            // wave10 GV2 begin: a device node vfs-server found: the kernel opens the device
+            if s == crate::ipc::protocol::LX_REDIR_DEV {
+                return fileh::dev_answer(&c, redir);
+            }
+            // wave10 GV2 end
             // wave7 G7-2: service 0: the kernel's own code answers the call
             if s == 0 {
                 return fileh::LX_TO_KERNEL;

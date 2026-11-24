@@ -112,9 +112,17 @@ static void specials_run(void) {
     expect("proc svc", o.redir_svc, LXS_PROC);
     expect("proc obj", o.redir_obj, 1);
     expect("proc tail", o.redir_tail, 6);
-    expect("sys tail", (walk("/sys/class//net", NOREDIR, &o), o.redir_tail), 5);
+    // (wave10 GV2: /sys and /dev are pool trees vfs-server walks; the names other services
+    // serve in them are redirected at lookup: linux-server's cpu ranges, tty-server's /dev/pts)
+    expect("sys walked", walk("/sys/class", NOREDIR, &o), 0);
+    expect("sys walked svc", o.redir_svc, 0);
+    expect("sys tail", (walk("/sys/devices/system/cpu/online", NOREDIR, &o), o.redir_tail), 5);
     expect("sys svc", o.redir_svc, LXS_LINUX);
-    expect("dev obj", (walk("/dev/null", NOREDIR, &o), o.redir_obj), 3);
+    expect("dev walked", walk("/dev/null", NOREDIR, &o), 0);
+    expect("dev node", o.rdev, 0x103);
+    expect("pts obj", (walk("/dev/pts/0", NOREDIR, &o), o.redir_obj), 4);
+    expect("pts svc", o.redir_svc, 9);
+    expect("pts tail", o.redir_tail, 5);
     expect("proc itself", (walk("/proc", NOREDIR, &o), o.redir_tail), 5);
     expect("dotdot to proc", (walk("/usr/../proc/1", NOREDIR, &o), o.redir_tail), 13);
     // /etc/mtab -> ../proc/self/mounts: the rest is text (a ticket in the object, tail -1)
@@ -128,7 +136,8 @@ static void specials_run(void) {
     }
     // A redirect made: linux-server answers the redirected call (0x10000 * svc + 0x100 * obj + tail)
     expect("proc redirect", walk("/proc/self/stat", 0, &o), 0x10000 * LXS_PROC + 0x100 * 1 + 6);
-    expect("dev redirect", walk("/dev/null", 0, &o), 0x10000 * LXS_LINUX + 0x100 * 3 + 5);
+    expect("sys redirect", walk("/sys/devices/system/cpu/online", 0, &o), 0x10000 * LXS_LINUX + 0x100 * 2 + 5);
+    expect("pts redirect", walk("/dev/pts/0", 0, &o), 0x10000 * 9 + 0x100 * 4 + 5);
     // Errors
     expect("missing", walk("/nonexistent-vfswalk", 0, &o), -ENOENT);
     expect("empty", walk("", 0, &o), -ENOENT);

@@ -1684,6 +1684,67 @@ pub fn open_path(dirfd: i64, path: &[u8], flags: u32, mode: u32) -> Result<usize
     install(FileDescriptor::Vnode(file), flags)
 }
 
+// wave10 GV2 begin: a device opened by its number (vfs-server found the node and checked it)
+/// The path the kernel serves character device `rdev` by when no driver claims its number:
+/// the memory devices `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`.
+fn mem_device_path(rdev: u64) -> Option<&'static str> {
+    match (dev_major(rdev), dev_minor(rdev)) {
+        (1, 7) => Some("/dev/full"),
+        _ => chardev_path(rdev),
+    }
+}
+
+/// Whether character device `rdev` is the console or one of its virtual terminals
+/// (`/dev/console` 5:1, `/dev/tty0`..`/dev/tty63` 4:0..63).
+fn console_device(rdev: u64) -> bool {
+    matches!((dev_major(rdev), dev_minor(rdev)), (5, 1) | (4, 0..=63))
+}
+
+/// Opens device `rdev` (a block device when `block`) for the current process with `flags`,
+/// the way [`open_path`] opens a device node, without walking anything: vfs-server walked
+/// the path, found the node and checked its permissions (`LX_REDIR_DEV`). `shown`: the
+/// path the caller named (absolute), shown for the console. The device's own service
+/// makes the object (the number's owner: `chardev::open`, the terminals' tty-server).
+pub fn open_device(rdev: u64, block: bool, flags: u32, shown: &str) -> Result<usize, i64> {
+    let acc = flags & O_ACCMODE;
+    // Device control (cgroup bpf programs)
+    let access = if acc != O_WRONLY { super::bpf::DEV_READ } else { 0 } | if acc != O_RDONLY { super::bpf::DEV_WRITE } else { 0 };
+    let kind = if block { super::bpf::DEV_BLOCK } else { super::bpf::DEV_CHAR };
+    super::bpf::device_check(kind, dev_major(rdev), dev_minor(rdev), access)?;
+    if block {
+        return match super::blockdev::open(rdev, flags) {
+            Some(dev) => install(FileDescriptor::Device(dev?), flags),
+            None => Err(ENXIO),
+        };
+    }
+    if let Some(dev) = super::chardev::open(rdev, flags) {
+        return install(FileDescriptor::Device(dev?), flags);
+    }
+    if let Some(path) = pty_chardev_path(rdev) {
+        if let Some(desc) = open_pty_path(&path, flags)? {
+            return install(desc, flags);
+        }
+        // (`/dev/tty` without a controlling terminal is the console, as `open_path` has it)
+        if path != "/dev/tty" {
+            return Err(ENXIO);
+        }
+    }
+    if console_device(rdev) || pty_chardev_path(rdev).is_some() {
+        let fd = install(FileDescriptor::ConsoleOut, flags)?;
+        // (reached through a mount elsewhere, a sandbox's bind of /dev/tty: shown as named)
+        if !shown.starts_with("/dev/") {
+            CONSOLE_SHOWN.lock().insert((super::proc::current_ids().1, fd), String::from(shown));
+        }
+        return Ok(fd);
+    }
+    let dev = mem_device_path(rdev).ok_or(ENXIO)?;
+    install(
+        FileDescriptor::File { path: String::from(dev), cursor: crate::fs::FileCursor::new(0), readable: acc != O_WRONLY, writable: acc != O_RDONLY, append: false, shown: Some(String::from(shown)).filter(|s| s != dev) },
+        flags,
+    )
+}
+// wave10 GV2 end
+
 /// The process whose memory `/proc/<pid>/mem` or `/proc/<pid>/task/<tid>/mem` (or `self`,
 /// `thread-self`) names.
 fn proc_mem_target(abs: &str) -> Option<u64> {

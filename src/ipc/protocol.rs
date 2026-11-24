@@ -3030,3 +3030,12 @@ pub const LX_IPC_OP_SYSVIPC: u64 = 32;
 /// object key ([`lx_shm_key`]); the kernel maps that object into the caller (not a service).
 pub const LX_REDIR_SHM: SvcId = 0xFD;
 // wave10 G8-2 end
+// wave10 GV2 begin: /dev, the non-pool walks and FUSE mount(2) in vfs-server
+/// Redirect target of vfs-server's answer to an `open` of a device node it found and
+/// checked: `redir_obj` = the device number (Linux encoding) `| 1 << 40` for a block
+/// device; the kernel opens the device by number (`compat::linux::vfs::open_device`: the
+/// number's owner makes the object) without walking the path again (not a service).
+pub const LX_REDIR_DEV: SvcId = 0xFC;
+/// [`LX_REDIR_DEV`]: the device is a block device.
+pub const LX_REDIR_DEV_BLOCK: u64 = 1 << 40;
+// wave10 GV2 end

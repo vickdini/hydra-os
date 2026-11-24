@@ -922,6 +922,10 @@ pub mod compat {
             /// *stub* vfs-server's chroot moves the caller's CLONE_FS peers (wave 7, Group
             /// 7-3): no peers on the host.
             pub fn chroot_peers(_pid: u64, _root: u64, _root_mnt: usize) {}
+            /// *stub* wave10 GV2: a device opened by its number (no devices on the host).
+            pub fn open_device(_rdev: u64, _block: bool, _flags: u32, _shown: &str) -> Result<usize, i64> {
+                Err(-6)
+            }
             /// Host memory is user memory; null and bad pages fault.
             pub fn copy_in(ptr: u64, len: usize) -> Result<alloc::vec::Vec<u8>, i64> {
                 if ptr < 0x10000 || !crate::fake::prefault(ptr, len as u64) {

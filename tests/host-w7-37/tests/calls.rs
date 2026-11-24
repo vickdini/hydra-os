@@ -149,7 +149,11 @@ fn which_opens_are_served_here() {
     // the kernel's)
     assert!(!servable(O_TMPFILE_MASK | O_RDWR_FLAG));
     assert!(!servable(O_TMPFILE_MASK | O_DIRECTORY | O_CREAT | O_RDWR_FLAG));
-    assert!(!servable(O_CREAT | O_DIRECTORY));
+    // (wave10 GV2: answered here, EINVAL: `creat_dir_flags`)
+    assert!(servable(O_CREAT | O_DIRECTORY));
+    assert!(creat_dir_flags(O_CREAT | O_DIRECTORY));
+    assert!(!creat_dir_flags(O_CREAT));
+    assert!(!creat_dir_flags(O_TMPFILE_MASK | O_DIRECTORY | O_CREAT));
 }
 
 const O_RDWR_FLAG: u32 = 2;
@@ -165,9 +169,14 @@ fn open_checks_types_in_the_kernels_order() {
     assert_eq!(decide(0o100644, O_DIRECTORY), Err(ENOTDIR));
     // A link (O_NOFOLLOW met one): ELOOP before anything else
     assert_eq!(decide(0o120777, O_DIRECTORY | O_WRONLY), Err(ELOOP));
-    // Devices, FIFOs, sockets go to the kernel; with O_DIRECTORY they are ENOTDIR first
+    // FIFOs go to the kernel (wave10 GV2: devices are served, the device opened by number;
+    // a socket is ENXIO); with O_DIRECTORY they are ENOTDIR first
+    assert_eq!(decide(0o010644, O_RDONLY), Err(KERNEL));
+    assert_eq!(decide(0o020666, O_RDWR_FLAG), Ok(MAY_READ | MAY_WRITE));
+    assert_eq!(decide(0o060660, O_RDONLY), Ok(MAY_READ));
+    assert_eq!(decide(0o020666, O_WRONLY | O_TRUNC), Ok(MAY_WRITE));
+    assert_eq!(decide(0o140755, O_RDONLY), Err(-6));
     for m in [0o020666, 0o060660, 0o010644, 0o140755] {
-        assert_eq!(decide(m, O_RDONLY), Err(KERNEL), "{m:o}");
         assert_eq!(decide(m, O_DIRECTORY), Err(ENOTDIR), "{m:o}");
     }
 }

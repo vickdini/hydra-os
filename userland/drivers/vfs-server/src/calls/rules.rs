@@ -17,6 +17,13 @@ pub const S_IFMT: u32 = 0o170000;
 pub const S_IFREG: u32 = 0o100000;
 pub const S_IFDIR: u32 = 0o040000;
 pub const S_IFLNK: u32 = 0o120000;
+// wave10 GV2 begin: device nodes and sockets
+pub const S_IFCHR: u32 = 0o020000;
+pub const S_IFBLK: u32 = 0o060000;
+pub const S_IFSOCK: u32 = 0o140000;
+/// `ENXIO`.
+pub const ENXIO: i64 = -6;
+// wave10 GV2 end
 
 pub const O_ACCMODE: u32 = 0o3;
 pub const O_RDONLY: u32 = 0;
@@ -47,7 +54,15 @@ pub fn servable(flags: u32) -> bool {
         // O_TMPFILE needs O_DIRECTORY with it, no O_CREAT, no O_PATH
         return flags & O_DIRECTORY != 0 && flags & (O_CREAT | O_PATH) == 0;
     }
-    !(flags & O_CREAT != 0 && flags & O_DIRECTORY != 0)
+    // (wave10 GV2: `O_CREAT | O_DIRECTORY` is answered here too, `EINVAL` as on Linux 6.4+:
+    // [`creat_dir_flags`])
+    true
+}
+
+/// wave10 GV2: `O_CREAT` with `O_DIRECTORY` and no `O_TMPFILE`: `EINVAL` (Linux 6.4 and
+/// later; the kernel's copy made a file and then answered `ENOTDIR`).
+pub fn creat_dir_flags(flags: u32) -> bool {
+    flags & O_TMPFILE_MASK == 0 && flags & O_CREAT != 0 && flags & O_DIRECTORY != 0
 }
 
 // wave10 GV1 begin
@@ -183,8 +198,9 @@ pub fn xattr_fits(len: usize, size: u64) -> Result<usize, i64> {
 // wave10 GV1 end
 
 /// What an open of an object of mode `mode` with `flags` does: `Ok(want)` the access to
-/// check (`MAY_*`), `Err(e)` its error ([`KERNEL`] for devices, FIFOs, sockets). In the
-/// kernel's order, before the permission check.
+/// check (`MAY_*`), `Err(e)` its error ([`KERNEL`] for FIFOs; wave10 GV2: devices are
+/// served, the device opened by number, a socket is `ENXIO` as on Linux). In the kernel's
+/// order, before the permission check.
 pub fn decide(mode: u32, flags: u32) -> Result<u32, i64> {
     let acc = flags & O_ACCMODE;
     let kind = mode & S_IFMT;
@@ -197,6 +213,9 @@ pub fn decide(mode: u32, flags: u32) -> Result<u32, i64> {
     match kind {
         S_IFDIR if acc != O_RDONLY => return Err(EISDIR),
         S_IFDIR | S_IFREG => {}
+        // wave10 GV2: device nodes (the kernel opens the device by its number)
+        S_IFCHR | S_IFBLK => {}
+        S_IFSOCK => return Err(ENXIO),
         _ => return Err(KERNEL),
     }
     let want = match acc {
