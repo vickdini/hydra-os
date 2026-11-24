@@ -56,6 +56,23 @@ pub mod lx;
 /// (`#[cfg(not(target_os = "uefi"))]` branches): the yield and direct-switch vectors and the
 /// user-copy routines.
 pub mod host {
+    // wave10 G8-2 begin
+    /// *stub* `crate::lx::shm` (System V shared memory's attachments, `src/lx/shm.rs`; its
+    /// table is tested in host-w10-82): the `SYS_LX_OBJ` op answers ENOSYS.
+    pub mod lx_shm {
+        pub fn ctl(_h: crate::ipc::protocol::SvcId, _sub: u64, _b: u64, _c: u64) -> i64 {
+            -38
+        }
+        /// No shmat answer is ever kept here.
+        pub fn forward_kept() -> bool {
+            false
+        }
+        /// A redirect to `LX_REDIR_SHM`: EIO (no IPC service on the host).
+        pub fn answer(_x: &crate::lx::svc::Host, _c: &crate::ipc::protocol::LxCall, _redir: (u64, u64)) -> i64 {
+            -5
+        }
+    }
+    // wave10 G8-2 end
     // wave9 G7a begin
     /// *stub* `crate::lx::proc` (the kernel's process-identity primitives, `src/lx/proc.rs`,
     /// tested in host-t29): the call context from the fake process table.

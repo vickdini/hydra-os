@@ -44,9 +44,22 @@ the call; otherwise the kernel answers as before (one atomic load per call).
 Step 1 forwards `add_key` (248), `request_key` (249), `keyctl` (250) and Hydra's test call
 `0x6710` (`LX_NULL_NR`). Step 2 (wave 4, Group 9) adds the POSIX message queues
 (`mq_open` .. `mq_getsetattr`, 240–245), System V semaphores and message queues (`semget`,
-`semop`, `semctl`, `semtimedop`, `msgget`, `msgsnd`, `msgrcv`, `msgctl`; shared memory stays in
-the kernel) and `bpf` (321), listed in `lx::MOVED_STEP2`. While linux-server is not online the
+`semop`, `semctl`, `semtimedop`, `msgget`, `msgsnd`, `msgrcv`, `msgctl`; shared memory followed in
+wave 10, below) and `bpf` (321), listed in `lx::MOVED_STEP2`. While linux-server is not online the
 forwarded calls fail with `ENOSYS`.
+
+**System V shared memory (wave 10, Group 8-2)** is lx-ipc's too: `shmget`, `shmat` and `shmctl`
+are routed there (`T_IPC`); `shmdt` stays a kernel call. Each segment's pages are a kept memory
+object of lx-ipc (key `lx_shm_key(id)`, sparse, up to `SHMMAX` = 1 TiB with `LX_MEM_BIG`), so
+they survive an lx-ipc restart and attached programs never notice one. lx-ipc answers `shmat`
+(permission, IPC namespace, `shm_atime`/`shm_lpid`) with a redirect to `LX_REDIR_SHM` naming
+that object; the kernel takes the object from the kept registry and maps it (`lx::shm`). The
+kernel keeps the attachments (`lx::shm_table`: `shmat`, `shmdt`, `fork`, exit, `execve`),
+lx-ipc asks it for `shm_nattch` (`SYS_LX_OBJ` op `LX_OBJ_SHM`) and is told when one goes
+(`LX_NOTE_SHM`: `shm_dtime`, `shm_lpid`, a removed segment's last detach). `/proc/sysvipc/{shm,sem,msg}`
+are linux-server's pseudo files, made with lx-ipc's info call (direct call op
+`LX_IPC_OP_SYSVIPC`, which lx-proc can call the same way). `lx=kernel` and `lx.ipc=kernel` keep
+the in-kernel copy (`compat/linux/sysv.rs`) until 10-C.
 
 Each table entry was a byte of flags (wave 6 widened it to a u32 that also names the service, below): the server answers the call (`T_SERVER`), `args[0]` is a
 descriptor whose server object the call carries (`T_FD0`: `LxCall::obj`), and the call

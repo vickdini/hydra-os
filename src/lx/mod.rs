@@ -105,6 +105,14 @@ pub mod procsvc;
 // wave9 G6b-4 begin: io_uring and aio requests routed to each descriptor's owner
 pub mod uring;
 // wave9 G6b-4 end
+// wave10 G8-2 begin: System V shared memory in lx-ipc: the kernel keeps the attachments (the
+// host build of the forwarding core, tests/host-t30, brings its own `shm`)
+#[cfg(target_os = "uefi")]
+pub mod shm;
+#[cfg(not(target_os = "uefi"))]
+pub use crate::host::lx_shm as shm;
+pub mod shm_table;
+// wave10 G8-2 end
 
 // wave6 G21 begin: restart support for every service (design section 5)
 pub mod restart;
@@ -233,6 +241,12 @@ pub const MOVED_STEP2: &[(u64, u32, SvcId)] = &[
     (69, T_IPC, LXS_IPC),
     (70, T_IPC, LXS_IPC),
     (71, T_IPC, LXS_IPC),
+    // wave10 G8-2 begin: System V shared memory: shmget, shmat, shmctl (shmat's answer names
+    // the segment's memory, which the kernel then maps: `shm`; shmdt is the kernel's)
+    (29, T_IPC, LXS_IPC),
+    (30, T_IPC, LXS_IPC),
+    (31, T_IPC, LXS_IPC),
+    // wave10 G8-2 end
     // bpf (maps, programs, links: server objects; device programs come back to the kernel)
     (321, T_FDAT1, LXS_SEC),
 ];
@@ -603,6 +617,11 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
     if e & fileh::T_VFS != 0 {
         return fileh::forward(frame);
     }
+    // wave10 G8-2 begin: a shmat lx-ipc answered on the lock-free path: the kernel maps it
+    if nr == 30 && shm::forward_kept() {
+        return None;
+    }
+    // wave10 G8-2 end
     let r = forward_svc(frame, nr, e)?;
     if r == fileh::LX_TO_KERNEL {
         return None;
@@ -1172,6 +1191,10 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
                 return fileh::fh_answer(&c, redir);
             }
             // wave9 GP2 end
+            // wave10 G8-2: shmat's answer names a segment's memory (`shm`)
+            if s == crate::ipc::protocol::LX_REDIR_SHM {
+                return shm::answer(x, &c, redir);
+            }
             // wave7 G7-2: service 0: the kernel's own code answers the call
             if s == 0 {
                 return fileh::LX_TO_KERNEL;

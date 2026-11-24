@@ -1,5 +1,8 @@
 //! # System V IPC: shared memory, semaphores, message queues
 //!
+//! The in-kernel copy: these calls are served by lx-ipc (`lx::shm` for shared memory's
+//! mappings) unless `lx=kernel` or `lx.ipc=kernel` sends them here (wave 10 10-C deletes it).
+//!
 //! - **Shared memory** (`shmget`, `shmat`, `shmdt`, `shmctl`): a segment is a [`MemFd`]
 //!   object; `shmat` maps it shared into the caller, so every attached process sees the
 //!   same physical pages. A segment lives until it is removed (`IPC_RMID`) and the last
@@ -1065,6 +1068,7 @@ fn msgctl(id: i32, cmd: u64, buf: u64) -> i64 {
 /// * `parent` - Parent process ID.
 /// * `child` - Child process ID.
 pub fn on_fork(parent: u64, child: u64) {
+    crate::lx::shm::on_fork(parent, child); // wave10 G8-2: lx-ipc's segments
     let mut ipc = IPC.lock();
     let inherited: Vec<(u64, i32)> = ipc.attach.iter().filter(|((p, _), _)| *p == parent).map(|((_, a), id)| (*a, *id)).collect();
     for (addr, id) in inherited {
@@ -1082,6 +1086,7 @@ pub fn on_fork(parent: u64, child: u64) {
 /// * `pid` - Process ID.
 /// * `exiting` - The process is exiting (not just replacing its image).
 pub fn forget_process(pid: u64, exiting: bool) {
+    crate::lx::shm::forget(pid); // wave10 G8-2: lx-ipc's segments
     let mut ipc = IPC.lock();
     let ipc = &mut *ipc;
     let mine: Vec<((u64, u64), i32)> = ipc.attach.iter().filter(|((p, _), _)| *p == pid).map(|(k, v)| (*k, *v)).collect();
@@ -1121,6 +1126,12 @@ pub fn forget_process(pid: u64, exiting: bool) {
 /// `Some(result)` for these calls, `None` otherwise.
 pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
     let id = a[0] as i32;
+    // wave10 G8-2 begin: the segments are lx-ipc's (`shmget`/`shmctl` never get here then):
+    // the kernel maps and unmaps them (`lx::shm`)
+    if matches!(num, 30 | 67) && crate::lx::shm::active() {
+        return Some(if num == 30 { crate::lx::shm::shmat(id, a[1], a[2]) } else { crate::lx::shm::shmdt(a[0]) });
+    }
+    // wave10 G8-2 end
     Some(match num {
         29 => shmget(a[0] as i32, a[1], a[2]),
         30 => shmat(id, a[1], a[2]),

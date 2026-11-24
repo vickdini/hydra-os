@@ -701,6 +701,23 @@ pub mod personality {
 /// *stub* The forwarding to the ring-3 Linux server (wave 3, `src/lx`): the process
 /// events it is told about go nowhere on the host.
 pub mod lx {
+    // wave10 G8-2 begin: *stub* System V shared memory in lx-ipc (`src/lx/shm.rs`, its table
+    // tested in host-w10-82): never active on the host (the in-kernel copy answers)
+    pub mod shm {
+        pub fn active() -> bool {
+            false
+        }
+        pub fn shmat(_id: i32, _addr: u64, _flags: u64) -> i64 {
+            -38
+        }
+        pub fn shmdt(_addr: u64) -> i64 {
+            -38
+        }
+        pub fn on_fork(_parent: u64, _child: u64) {}
+        pub fn forget(_pid: u64) {}
+        pub fn after_unmap(_start: u64, _end: u64) {}
+    }
+    // wave10 G8-2 end
     // wave9 G7a begin: *stub* the process-identity primitives (`src/lx/proc.rs`, tested in
     // host-t29) over the real process table; the real rules
     pub mod proc {

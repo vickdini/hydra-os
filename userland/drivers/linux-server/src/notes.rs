@@ -63,6 +63,9 @@ fn take(seq: u64) {
         let e = (BASE.load(Ordering::Acquire) - LX_NOTES_OFF as u64 + LX_NOTES_ENTRY_OFF as u64 + (t % LX_NOTES) * 32) as *const u64;
         // SAFETY: the entry lies in the mapped window
         let (kind, a, b) = unsafe { (core::ptr::read_volatile(e), core::ptr::read_volatile(e.add(1)), core::ptr::read_volatile(e.add(2))) };
+        // wave10 G8-2: System V shared memory's attachment notes (`lx.ipc=linux`)
+        // SAFETY: as above
+        let c = unsafe { core::ptr::read_volatile(e.add(3)) };
         match kind {
             LX_NOTE_FORK => crate::keys::on_fork(a, b),
             LX_NOTE_EXEC => crate::keys::on_exec(a, b),
@@ -78,6 +81,7 @@ fn take(seq: u64) {
             LX_NOTE_TIMER => {
                 crate::ipcsvc::timer(a); // wave8 GX2
             }
+            hydra_rt::protocol::LX_NOTE_SHM => crate::sysv::on_shm_note(a, b, c), // wave10 G8-2
             _ => {}
         }
         t += 1;

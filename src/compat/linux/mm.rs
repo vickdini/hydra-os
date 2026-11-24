@@ -775,6 +775,11 @@ pub fn sys_mmap(mm: &Mutex<Mm>, addr: u64, len: u64, prot: u64, flags: u64, fd: 
             if !may_write {
                 m.deny_write(a, end);
             }
+            // wave10 G8-2: a fixed mapping may have replaced a System V attachment
+            if fixed {
+                drop(m);
+                crate::lx::shm::after_unmap(a, end);
+            }
             a as i64
         }
         Err(e) => e,
@@ -798,6 +803,7 @@ pub fn sys_munmap(mm: &Mutex<Mm>, addr: u64, len: u64) -> i64 {
     }
     let end = (addr + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     mm.lock().unmap(addr, end);
+    crate::lx::shm::after_unmap(addr, end); // wave10 G8-2: System V attachments unmapped
     0
 }
 
@@ -860,8 +866,16 @@ pub fn sys_mremap(mm: &Mutex<Mm>, old: u64, old_len: u64, new_len: u64, flags: u
     } else {
         None
     };
-    match mm.lock().mremap(old, old_len, new_len, flags & MREMAP_MAYMOVE != 0, fixed_to) {
-        Ok(a) => a as i64,
+    let r = mm.lock().mremap(old, old_len, new_len, flags & MREMAP_MAYMOVE != 0, fixed_to);
+    match r {
+        Ok(a) => {
+            // wave10 G8-2: System V attachments shrunk away or moved over
+            crate::lx::shm::after_unmap(old, old.saturating_add(old_len));
+            if let Some(n) = fixed_to {
+                crate::lx::shm::after_unmap(n, n.saturating_add(new_len));
+            }
+            a as i64
+        }
         Err(e) => e,
     }
 }

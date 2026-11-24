@@ -1,6 +1,14 @@
 //! System V message queues and semaphores, moved here from the kernel's
-//! `src/compat/linux/sysv.rs` (wave 4, step 2). Shared memory (`shm*`) stays in the kernel
-//! until step 8: it is memory mapping.
+//! `src/compat/linux/sysv.rs` (wave 4, step 2), and shared memory (wave 10, Group 8-2).
+//!
+//! **Shared memory:** a segment's pages are a kept memory object of lx-ipc's
+//! (`lx_shm_key(id)`, sparse, up to `SHMMAX`): they outlive an lx-ipc restart, and every
+//! attached program maps the same object. `shmget` and `shmctl` are served here; `shmat`
+//! asks here (permission, namespace, times) and the kernel maps the object named in the
+//! answer; `shmdt`, `fork`, `execve` and exit change the attachments in the kernel
+//! (`src/lx/shm.rs`), which keeps what they decide (`shm_nattch`, `shm_atime`,
+//! `shm_dtime`, `shm_lpid`: asked with `LX_OBJ_SHM`) and tells us when the last attachment
+//! of a removed segment goes (`LX_NOTE_SHM`: the segment goes then).
 //!
 //! Objects are per IPC namespace (the call carries the caller's: `LxCall::ipc_ns`); IDs are
 //! Linux's (a sequence number above the slot in the low 15 bits).
@@ -22,6 +30,9 @@ use alloc::vec::Vec;
 
 use hydra_rt::protocol::LX_REPLY_PENDING;
 use hydra_rt::sys;
+
+#[path = "sysvtext.rs"]
+pub mod sysvtext;
 
 use crate::arena::{self, Chain};
 use crate::client::Cx;
@@ -159,6 +170,18 @@ struct MsgQueue {
     receivers: Vec<MsgReceiver>,
 }
 
+// wave10 G8-2 begin
+/// A shared memory segment.
+struct Shm {
+    perm: Perm,
+    size: u64,
+    /// Its memory object's handle in this instance's table.
+    handle: u32,
+    ctime: i64,
+    cpid: u32,
+}
+// wave10 G8-2 end
+
 /// The objects of every IPC namespace. IDs are unique across namespaces; each object
 /// records its namespace.
 struct Ipc {
@@ -167,9 +190,11 @@ struct Ipc {
     next_seq: u16,
     /// `SEM_UNDO` adjustments: (process, set ID) -> per-semaphore adjustment.
     undo: BTreeMap<(u64, i32), Vec<i32>>,
+    /// wave10 G8-2: shared memory segments.
+    shm: BTreeMap<i32, (u64, Shm)>,
 }
 
-static IPC: YLock<Ipc> = YLock::new(Ipc { sem: BTreeMap::new(), msg: BTreeMap::new(), next_seq: 1, undo: BTreeMap::new() });
+static IPC: YLock<Ipc> = YLock::new(Ipc { sem: BTreeMap::new(), msg: BTreeMap::new(), next_seq: 1, undo: BTreeMap::new(), shm: BTreeMap::new() });
 
 /// Answers to give once the lock is let go: `(request id, result)`.
 type Done = Vec<(u64, i64)>;
@@ -911,12 +936,388 @@ fn msgctl(cx: &Cx) -> i64 {
 }
 
 // ---------------------------------------------------------------------------------------
+// wave10 G8-2 begin: Shared memory
+
+const SHM_RDONLY: u64 = 0o10000;
+const SHM_EXEC: u64 = 0o100000;
+const SHM_LOCK: u64 = 11;
+const SHM_UNLOCK: u64 = 12;
+const SHM_STAT: u64 = 13;
+const SHM_INFO: u64 = 14;
+const SHM_STAT_ANY: u64 = 15;
+const CAP_IPC_LOCK: u32 = 14;
+const ENOSYS: i64 = -38;
+
+use hydra_rt::protocol::{
+    lx_shm_key, LX_DCALL_OP_NULL, LX_REDIR_SHM, LX_IPC_OP_SYSVIPC, LX_MEM_ANON, LX_MEM_BIG, LX_MEM_CLOSE, LX_MEM_EXISTED, LX_MEM_KEPT, LX_MEM_UNKEEP, LX_OBJ_SHM, LX_SHM_IPCNS,
+    LX_SHM_FORGET, LX_SHM_NATTCH, LX_SHM_RESET, LX_SHM_RMID, LX_SHM_STAT, LxShmStat,
+};
+use sysvtext::{Ids, ShmView, SHMMNI, SHM_DEST, SHM_LOCKED};
+
+/// A new memory object of `size` bytes for segment `id`: a kept one (it outlives our
+/// restarts, and the kernel finds it by its key when it maps it). Its handle.
+fn shm_object(id: i32, size: u64) -> Result<u32, i64> {
+    let key = lx_shm_key(id);
+    for _ in 0..2 {
+        let r = sys::lx_mem(LX_MEM_ANON, size, LX_MEM_KEPT | LX_MEM_BIG, key, 0);
+        if r < 0 {
+            return Err(r);
+        }
+        if r & LX_MEM_EXISTED == 0 {
+            return Ok(r as u32);
+        }
+        // A leftover of an earlier segment with this id: a new one instead
+        sys::lx_mem(LX_MEM_CLOSE, r as u32 as u64, 0, 0, 0);
+        sys::lx_mem(LX_MEM_UNKEEP, key, 0, 0, 0);
+    }
+    Err(ENOSPC)
+}
+
+/// Lets go of segment `id`'s memory object (mappings keep their pages until they go).
+fn shm_free(id: i32, handle: u32) {
+    if handle != 0 {
+        sys::lx_mem(LX_MEM_CLOSE, handle as u64, 0, 0, 0);
+    }
+    sys::lx_mem(LX_MEM_UNKEEP, lx_shm_key(id), 0, 0, 0);
+}
+
+/// The kernel's attachment count of segment `id` (with `shmat` calls in flight).
+fn nattch(id: i32) -> u64 {
+    sys::lx_obj(LX_OBJ_SHM, LX_SHM_NATTCH, id as u32 as u64, 0).unwrap_or(0)
+}
+
+/// What the kernel knows of the segments `stats` name (their `id` filled in).
+fn kernel_stats(stats: &mut [LxShmStat]) {
+    if !stats.is_empty() && sys::lx_obj(LX_OBJ_SHM, LX_SHM_STAT, stats.as_mut_ptr() as u64, stats.len() as u64).is_err() {
+        for s in stats.iter_mut() {
+            *s = LxShmStat { id: s.id, ..LxShmStat::default() };
+        }
+    }
+}
+
+/// Segment `id` goes: its memory object, and what the kernel knew of it.
+fn shm_destroy(ipc: &mut Ipc, id: i32) {
+    if let Some((_, s)) = ipc.shm.remove(&id) {
+        shm_free(id, s.handle);
+        let _ = sys::lx_obj(LX_OBJ_SHM, LX_SHM_FORGET, id as u32 as u64, 0);
+    }
+}
+
+/// A removed segment goes once nothing is attached any more.
+fn shm_settle(ipc: &mut Ipc, id: i32) {
+    let removed = matches!(ipc.shm.get(&id), Some((_, s)) if s.perm.mode & SHM_DEST != 0);
+    if removed && nattch(id) == 0 {
+        shm_destroy(ipc, id);
+    }
+}
+
+fn ids_of(p: &Perm, id: i32) -> Ids {
+    Ids { key: p.key, id, mode: p.mode, uid: p.uid, gid: p.gid, cuid: p.cuid, cgid: p.cgid }
+}
+
+fn shm_view(id: i32, s: &Shm, k: &LxShmStat) -> ShmView {
+    ShmView { ids: ids_of(&s.perm, id), size: s.size, cpid: s.cpid, lpid: k.lpid as u32, nattch: k.nattch, atime: k.atime, dtime: k.dtime, ctime: s.ctime }
+}
+
+fn shmget(cx: &Cx) -> i64 {
+    let (key, size, flags) = (cx.args[0] as i32, cx.args[1], cx.args[2]);
+    let ns = cx.c.ipc_ns;
+    let mut guard = IPC.lock();
+    let ipc = &mut *guard;
+    match lookup(&ipc.shm, |s: &Shm| &s.perm, key, ns, flags, cx) {
+        Err(e) => e,
+        Ok(Some(id)) => {
+            if size > ipc.shm[&id].1.size {
+                return EINVAL;
+            }
+            id as i64
+        }
+        Ok(None) => {
+            if !sysvtext::new_size_ok(size) {
+                return EINVAL;
+            }
+            let Some((id, seq)) = new_id(&ipc.shm, &mut ipc.next_seq, SHMMNI) else { return ENOSPC };
+            // (too many handles or kept objects: as Linux out of ids)
+            let Ok(handle) = shm_object(id, size) else { return ENOSPC };
+            let s = Shm { perm: new_perm(key, flags, seq, cx), size, handle, ctime: now(), cpid: cx.c.tgid as u32 };
+            ipc.shm.insert(id, (ns, s));
+            id as i64
+        }
+    }
+}
+
+/// `shmat`: permission and namespace; the answer is a redirect to the kernel's
+/// `LX_REDIR_SHM` naming the segment's kept object, which the kernel maps into the caller
+/// (and counts, with `shm_atime` and `shm_lpid`).
+fn shmat(cx: &Cx) -> (i64, u64) {
+    let (id, flags) = (cx.args[0] as i32, cx.args[2]);
+    let ipc = IPC.lock();
+    let Some((n, s)) = ipc.shm.get(&id) else { return (EINVAL, 0) };
+    if *n != cx.c.ipc_ns {
+        return (EINVAL, 0);
+    }
+    let want = if flags & SHM_RDONLY != 0 { 4 } else { 6 } | if flags & SHM_EXEC != 0 { 1 } else { 0 };
+    if !allowed(&s.perm, cx, want) {
+        return (EACCES, 0);
+    }
+    if s.handle == 0 {
+        return (EIDRM, 0);
+    }
+    hydra_rt::svcrt::redirect(cx.page(), LX_REDIR_SHM, lx_shm_key(id), s.perm.key as u32)
+}
+
+fn shmctl(cx: &Cx) -> i64 {
+    let (id, cmd, buf) = (cx.args[0] as i32, cx.args[1] & !IPC_64, cx.args[2]);
+    let ns = cx.c.ipc_ns;
+    let mut guard = IPC.lock();
+    let ipc = &mut *guard;
+    match cmd {
+        IPC_INFO => {
+            drop(guard);
+            return if cx.copy_out(buf, &sysvtext::shminfo()).is_ok() { (SHMMNI - 1) as i64 } else { EFAULT };
+        }
+        SHM_INFO => {
+            let pages: Vec<u64> = ipc.shm.values().filter(|(n, _)| *n == ns).map(|(_, s)| sysvtext::pages(s.size)).collect();
+            let total: u64 = pages.iter().sum();
+            let b = sysvtext::shm_info(pages.len(), total, total);
+            let max = ipc.shm.keys().map(|k| k & 0x7fff).max().unwrap_or(0);
+            drop(guard);
+            return if cx.copy_out(buf, &b).is_ok() { max as i64 } else { EFAULT };
+        }
+        _ => {}
+    }
+    // SHM_STAT takes a slot index instead of an ID
+    let id = if matches!(cmd, SHM_STAT | SHM_STAT_ANY) {
+        match ipc.shm.keys().find(|k| **k & 0x7fff == id) {
+            Some(k) => *k,
+            None => return EINVAL,
+        }
+    } else {
+        id
+    };
+    let Some((n, s)) = ipc.shm.get_mut(&id) else { return EINVAL };
+    if *n != ns {
+        return EINVAL;
+    }
+    match cmd {
+        IPC_STAT | SHM_STAT | SHM_STAT_ANY => {
+            if cmd != SHM_STAT_ANY && !allowed(&s.perm, cx, 4) {
+                return EACCES;
+            }
+            let mut k = [LxShmStat { id: id as i64, ..LxShmStat::default() }];
+            kernel_stats(&mut k);
+            let b = sysvtext::shmid_ds(&shm_view(id, s, &k[0]), s.perm.seq);
+            drop(guard);
+            if cx.copy_out(buf, &b).is_err() {
+                return EFAULT;
+            }
+            if cmd == IPC_STAT {
+                0
+            } else {
+                id as i64
+            }
+        }
+        IPC_SET => {
+            if !owner(&s.perm, cx) {
+                return EPERM;
+            }
+            let raw = match cx.copy_in(buf, 48) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            set_perm(&mut s.perm, &raw);
+            s.ctime = now();
+            0
+        }
+        IPC_RMID => {
+            if !owner(&s.perm, cx) {
+                return EPERM;
+            }
+            // No longer found by key; gone once the last attachment is (the kernel tells)
+            s.perm.key = IPC_PRIVATE;
+            s.perm.mode |= SHM_DEST;
+            if sys::lx_obj(LX_OBJ_SHM, LX_SHM_RMID, id as u32 as u64, 0).map_or(true, |n| n == 0) {
+                shm_destroy(ipc, id);
+            }
+            0
+        }
+        SHM_LOCK | SHM_UNLOCK => {
+            if !cx.has_cap(CAP_IPC_LOCK) && !owner(&s.perm, cx) {
+                return EPERM;
+            }
+            // (nothing is ever swapped out: only the mode bit shows it)
+            if cmd == SHM_LOCK {
+                s.perm.mode |= SHM_LOCKED;
+            } else {
+                s.perm.mode &= !SHM_LOCKED;
+            }
+            0
+        }
+        _ => EINVAL,
+    }
+}
+
+/// The kernel's `LX_NOTE_SHM`: the last attachment of removed segment `id` went (checked
+/// again: an attach may have come since).
+pub fn on_shm_note(id: u64, _pid: u64, _c: u64) {
+    let id = id as u32 as i32;
+    let mut guard = IPC.lock();
+    let ipc = &mut *guard;
+    shm_settle(ipc, id);
+    if !ipc.shm.contains_key(&id) {
+        persist(ipc);
+    }
+}
+
+/// When [`shm_sweep`] last looked (ticks).
+#[allow(dead_code)] // (linux-server does not sweep)
+static SWEPT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The main thread, now and then (about once a second): removed segments with nothing
+/// attached go, in case the kernel's note of their last detach was lost (a full ring).
+#[allow(dead_code)]
+pub fn shm_sweep(now: u64) {
+    if now.saturating_sub(SWEPT.load(core::sync::atomic::Ordering::Relaxed)) < 100 {
+        return;
+    }
+    SWEPT.store(now, core::sync::atomic::Ordering::Relaxed);
+    let mut guard = IPC.lock();
+    let ipc = &mut *guard;
+    let removed: Vec<i32> = ipc.shm.iter().filter(|(_, (_, s))| s.perm.mode & SHM_DEST != 0).map(|(id, _)| *id).collect();
+    if removed.is_empty() {
+        return;
+    }
+    let mut k: Vec<LxShmStat> = removed.iter().map(|&id| LxShmStat { id: id as i64, ..LxShmStat::default() }).collect();
+    if sys::lx_obj(LX_OBJ_SHM, LX_SHM_STAT, k.as_mut_ptr() as u64, k.len() as u64).is_err() {
+        return;
+    }
+    let mut gone = false;
+    for s in &k {
+        if s.nattch == 0 {
+            shm_destroy(ipc, s.id as i32);
+            gone = true;
+        }
+    }
+    if gone {
+        persist(ipc);
+    }
+}
+
+/// lx-ipc starts without segments (a first start, or the restart ladder dropped the kept
+/// state): the kernel's attachments of the old ones stop counting, and kept objects of
+/// segments nobody knows any more go.
+#[allow(dead_code)] // (linux-server never restores)
+pub fn shm_fresh_start() {
+    let _ = sys::lx_obj(LX_OBJ_SHM, LX_SHM_RESET, 0, 0);
+    shm_unkeep_strays(&BTreeMap::new());
+}
+
+/// Unkeeps the kept segment objects that `known` does not name.
+#[allow(dead_code)] // (linux-server never restores)
+fn shm_unkeep_strays(known: &BTreeMap<i32, (u64, Shm)>) {
+    let mut keys = [0u64; 64];
+    let start = lx_shm_key(0);
+    let end = start + 0x1_0000_0000;
+    let mut from = start;
+    let mut stray = Vec::new();
+    while let Ok(n) = hydra_rt::mem::MemObj::kept_keys(from, &mut keys) {
+        for &k in &keys[..n] {
+            if (start..end).contains(&k) && !known.contains_key(&(k as u32 as i32)) {
+                stray.push(k);
+            }
+        }
+        if n < keys.len() || keys[n - 1] >= end {
+            break;
+        }
+        from = keys[n - 1] + 1;
+    }
+    for k in stray {
+        sys::lx_mem(LX_MEM_UNKEEP, k, 0, 0, 0);
+    }
+}
+
+/// The lines of `/proc/sysvipc/<kind>` (0 shm, 1 sem, 2 msg) of IPC namespace `ns`.
+pub fn proc_lines(kind: u64, ns: u64) -> Vec<alloc::string::String> {
+    let mut v = alloc::vec![alloc::string::String::from(sysvtext::header(kind))];
+    let ipc = IPC.lock();
+    match kind {
+        0 => {
+            let mine: Vec<(i32, &Shm)> = ipc.shm.iter().filter(|(_, (n, _))| *n == ns).map(|(id, (_, s))| (*id, s)).collect();
+            let mut k: Vec<LxShmStat> = mine.iter().map(|(id, _)| LxShmStat { id: *id as i64, ..LxShmStat::default() }).collect();
+            kernel_stats(&mut k);
+            for ((id, s), k) in mine.iter().zip(&k) {
+                v.push(sysvtext::shm_line(&shm_view(*id, s, k), 0));
+            }
+        }
+        1 => {
+            for (id, (_, s)) in ipc.sem.iter().filter(|(_, (n, _))| *n == ns) {
+                v.push(sysvtext::sem_line(&ids_of(&s.perm, *id), s.sems.len() as u64, s.otime, s.ctime));
+            }
+        }
+        _ => {
+            for (id, (_, q)) in ipc.msg.iter().filter(|(_, (n, _))| *n == ns) {
+                v.push(sysvtext::msg_line(&ids_of(&q.perm, *id), q.bytes, q.msgs.len() as u64, q.lspid, q.lrpid, q.stime, q.rtime, q.ctime));
+            }
+        }
+    }
+    v
+}
+
+/// A direct call to the IPC service: the info call of `/proc/sysvipc/*`
+/// ([`LX_IPC_OP_SYSVIPC`]), made by linux-server (later lx-proc) for the reader.
+pub fn dcall(cx: &Cx) -> i64 {
+    let a = hydra_rt::svccall::DcallArgs::of(&cx.c);
+    match a.op {
+        LX_DCALL_OP_NULL => 0,
+        LX_IPC_OP_SYSVIPC => {
+            let Ok(b) = cx.copy_in(a.input, a.input_len.min(24)) else { return EFAULT };
+            if b.len() < 24 || a.output_cap < 9 {
+                return EINVAL;
+            }
+            let (kind, cursor, ns) = (Cx::u64_at(&b, 0), Cx::u64_at(&b, 8), Cx::u64_at(&b, 16));
+            if kind > 2 {
+                return EINVAL;
+            }
+            let ns = if ns == u64::MAX {
+                match sys::lx_obj(LX_OBJ_SHM, LX_SHM_IPCNS, cx.c.tgid, 0) {
+                    Ok(n) => n,
+                    Err(e) => return e,
+                }
+            } else {
+                ns
+            };
+            let (text, next) = sysvtext::chunk(&proc_lines(kind, ns), cursor as usize, a.output_cap - 8);
+            let mut out = (next as u64).to_le_bytes().to_vec();
+            out.extend_from_slice(&text);
+            cx.copy_out_any(a.output, &out).map_or_else(|e| e, |()| out.len() as i64)
+        }
+        _ => ENOSYS,
+    }
+}
+// wave10 G8-2 end
+
+// ---------------------------------------------------------------------------------------
 // Events from the kernel and the main thread
 
 /// Handles `semget` (64), `semop` (65), `semctl` (66), `semtimedop` (220), `msgget` (68),
 /// `msgsnd` (69), `msgrcv` (70), `msgctl` (71): `(result, reply flags)`.
 pub fn dispatch(cx: &Cx) -> (i64, u64) {
+    // wave10 G8-2: the shared memory calls that change nothing here (shmat, the stat and info
+    // commands) are sent again if lx-ipc dies while it serves them (a Transparent restart
+    // then looks invisible to their callers)
+    let readonly = match cx.nr {
+        30 => true,
+        31 => matches!(cx.args[1] & !IPC_64, IPC_STAT | IPC_INFO | SHM_STAT | SHM_INFO | SHM_STAT_ANY),
+        _ => false,
+    };
+    if readonly {
+        kstore::resend_safe(cx.page(), cx.id, true);
+    }
     let r = match cx.nr {
+        // wave10 G8-2: shared memory
+        29 => (shmget(cx), 0),
+        30 => shmat(cx),
+        31 => (shmctl(cx), 0),
         64 => (semget(cx), 0),
         65 => semop(cx, false),
         66 => (semctl(cx), 0),
@@ -928,7 +1329,12 @@ pub fn dispatch(cx: &Cx) -> (i64, u64) {
         _ => (-38, 0),
     };
     // wave9 GX3: the tables are written before the answer leaves
-    persist(&IPC.lock());
+    // (wave10 G8-2: not after the shared memory calls that change nothing worth keeping:
+    // `shmat`, the stat and info commands, a failed call)
+    let quiet = readonly || matches!(cx.nr, 29 | 31) && r.0 < 0;
+    if !quiet {
+        persist(&IPC.lock());
+    }
     r
 }
 
@@ -953,7 +1359,7 @@ fn persist(ipc: &Ipc) {
     }
     let mut k = KEPT.lock();
     if k.0 == 0 {
-        if ipc.sem.is_empty() && ipc.msg.is_empty() {
+        if ipc.sem.is_empty() && ipc.msg.is_empty() && ipc.shm.is_empty() {
             return;
         }
         k.0 = kstore::id();
@@ -983,6 +1389,13 @@ fn persist(ipc: &Ipc) {
         for &a in v {
             w.u32(a as u32);
         }
+    }
+    // wave10 G8-2: the segments (their pages are kept objects of their own)
+    w.u32(ipc.shm.len() as u32);
+    for (&id, (ns, s)) in &ipc.shm {
+        w.u32(id as u32).u64(*ns);
+        perm_rec(&mut w, &s.perm);
+        w.u64(s.size).u64(s.ctime as u64).u32(s.cpid);
     }
     let a = arena::get();
     let mut c = Chain::new();
@@ -1018,7 +1431,7 @@ pub fn restore(id: u64, rec: &[u8]) -> bool {
     c.copy(a, 0, c.bytes, &mut b);
     let parsed = (|| {
         let mut r = kstore::R::new(&b);
-        let mut ipc = Ipc { sem: BTreeMap::new(), msg: BTreeMap::new(), next_seq: r.u32()? as u16, undo: BTreeMap::new() };
+        let mut ipc = Ipc { sem: BTreeMap::new(), msg: BTreeMap::new(), next_seq: r.u32()? as u16, undo: BTreeMap::new(), shm: BTreeMap::new() };
         for _ in 0..r.u32()? {
             let (id, ns) = (r.u32()? as i32, r.u64()?);
             let perm = perm_parse(&mut r)?;
@@ -1054,14 +1467,48 @@ pub fn restore(id: u64, rec: &[u8]) -> bool {
             }
             ipc.undo.insert((p, id), v);
         }
+        // wave10 G8-2: the segments (handles are opened below)
+        for _ in 0..r.u32()? {
+            let (id, ns) = (r.u32()? as i32, r.u64()?);
+            let perm = perm_parse(&mut r)?;
+            let (size, ctime, cpid) = (r.u64()?, r.u64()? as i64, r.u32()?);
+            if !sysvtext::new_size_ok(size) {
+                return None;
+            }
+            ipc.shm.insert(id, (ns, Shm { perm, size, handle: 0, ctime, cpid }));
+        }
         Some(ipc)
     })();
-    let Some(ipc) = parsed else {
+    let Some(mut ipc) = parsed else {
         let mut c = c;
         c.clear();
         c.release(a);
         return false;
     };
+    // wave10 G8-2: each segment's memory is the kept object of the old instance (a missing
+    // one, made afresh now, would be zeroes: the segment is dropped instead)
+    let ids: Vec<i32> = ipc.shm.keys().copied().collect();
+    for id in ids {
+        let size = ipc.shm[&id].1.size;
+        let r = sys::lx_mem(LX_MEM_ANON, size, LX_MEM_KEPT | LX_MEM_BIG, lx_shm_key(id), 0);
+        if r >= 0 && r & LX_MEM_EXISTED != 0 {
+            ipc.shm.get_mut(&id).unwrap().1.handle = r as u32;
+        } else {
+            if r >= 0 {
+                sys::lx_mem(LX_MEM_CLOSE, r as u32 as u64, 0, 0, 0);
+                sys::lx_mem(LX_MEM_UNKEEP, lx_shm_key(id), 0, 0, 0);
+            }
+            ipc.shm.remove(&id);
+            // (the kernel forgets what it knew of it: its id may come back one day)
+            let _ = sys::lx_obj(LX_OBJ_SHM, LX_SHM_FORGET, id as u32 as u64, 0);
+        }
+    }
+    shm_unkeep_strays(&ipc.shm);
+    // Removed segments whose last attachment went while we were away
+    let removed: Vec<i32> = ipc.shm.iter().filter(|(_, (_, s))| s.perm.mode & SHM_DEST != 0).map(|(id, _)| *id).collect();
+    for id in removed {
+        shm_settle(&mut ipc, id);
+    }
     *IPC.lock() = ipc;
     *KEPT.lock() = (id, c);
     true
@@ -1071,7 +1518,7 @@ pub fn restore(id: u64, rec: &[u8]) -> bool {
 #[allow(dead_code)]
 pub fn objects() -> usize {
     let ipc = IPC.lock();
-    ipc.sem.len() + ipc.msg.len()
+    ipc.sem.len() + ipc.msg.len() + ipc.shm.len()
 }
 // wave9 GX3 end
 

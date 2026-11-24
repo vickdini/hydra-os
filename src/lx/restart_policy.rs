@@ -217,6 +217,14 @@ pub fn idempotent(nr: u64, args: &[u64; 6]) -> bool {
         66 => matches!(args[2] & !0x100, 2 | 3 | 11 | 12 | 13 | 14 | 15 | 18 | 19 | 20),
         // msgctl: IPC_STAT, IPC_INFO, MSG_STAT, MSG_INFO, MSG_STAT_ANY
         71 => matches!(args[1] & !0x100, 2 | 3 | 11 | 12 | 13),
+        // wave10 G8-2 begin: System V shared memory in lx-ipc. shmget as semget (a named
+        // segment made but not yet kept is made again; kept, it is found by its key); shmat
+        // (lx-ipc only checks and names the segment: the kernel maps and counts); shmctl
+        // IPC_STAT, IPC_INFO, SHM_STAT, SHM_INFO, SHM_STAT_ANY
+        29 => args[0] != 0 && args[2] & 0o2000 == 0,
+        30 => true,
+        31 => matches!(args[1] & !0x100, 2 | 3 | 13 | 14 | 15),
+        // wave10 G8-2 end
         // bpf: MAP_LOOKUP_ELEM, MAP_GET_NEXT_KEY, PROG/MAP_GET_NEXT_ID, OBJ_GET_INFO_BY_FD,
         // PROG_QUERY, BTF_GET_NEXT_ID, LINK_GET_NEXT_ID
         321 => matches!(args[0], 1 | 4 | 11 | 12 | 15 | 16 | 23 | 31),
