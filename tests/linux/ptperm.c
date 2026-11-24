@@ -5,6 +5,7 @@
 //                     kcmp, pidfd_getfd, perf_event_open) and the dumpable rules
 //   ptperm bench N    timings: PTRACE_ATTACH, PTRACE_DETACH, PEEKDATA, GETREGS,
 //                     perf_event_open+close (microseconds per call, medians of 5 rounds)
+//   ptperm crash      dereferences NULL (for gdb -batch -ex run -ex bt)
 //   ptperm step S     attach to a child and single-step it for S seconds (kill tests):
 //                     prints steps every second, "STEP FAIL" on any error, "STEP PASS" at end
 #define _GNU_SOURCE
@@ -518,6 +519,11 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     self_path = argv[0][0] == '/' ? argv[0] : realpath(argv[0], NULL);
     if (argc > 1 && !strcmp(argv[1], "suidwait")) return suidwait();
+    if (argc > 1 && !strcmp(argv[1], "crash")) {
+        // (for gdb -batch -ex run -ex bt)
+        volatile int *p = (int *)(uintptr_t)(argc - 2);
+        return *p;
+    }
     if (argc > 2 && !strcmp(argv[1], "bench")) return bench(atoi(argv[2]));
     if (argc > 2 && !strcmp(argv[1], "step")) return step(atoi(argv[2]));
     if (geteuid() != 0) {
