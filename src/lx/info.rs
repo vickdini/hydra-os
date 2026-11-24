@@ -56,17 +56,26 @@ pub fn to_caller(id: u64, init: Option<u64>) -> u64 {
 /// process; with `CAP_SYS_PTRACE`; or when the caller's file-system user ID (here the
 /// effective one) is the target's real, effective and saved user ID **and** its file-system
 /// group ID the target's real, effective and saved group ID (a set-group-ID program is not
-/// readable by its user).
+/// readable by its user). wave10 G8-1: the one ptrace rule (`lx::ptrace_rules::may_access`,
+/// shared with lx-proc's tracing decisions and the kernel's copy; the callers here are in the
+/// first namespaces, so capabilities count over every target).
 pub fn may_see(same: bool, target_service: bool, caller: (u32, u32), caller_caps: u64, target_uids: (u32, u32, u32), target_gids: (u32, u32, u32)) -> bool {
-    if same {
-        return true;
-    }
-    if target_service {
-        return false;
-    }
+    // wave10 G8-1 begin
+    use super::ptrace_rules::{may_access, Target, Who, MODE_FSCREDS, MODE_READ};
     let (u, g) = caller;
-    caller_caps & CAP_SYS_PTRACE != 0
-        || (u == target_uids.0 && u == target_uids.1 && u == target_uids.2 && g == target_gids.0 && g == target_gids.1 && g == target_gids.2)
+    let who = Who { uid: [u; 3], gid: [g; 3], caps: caller_caps, in_userns: false, seccomp: false };
+    let t = Target {
+        tgid: 0,
+        tid: 0,
+        uid: [target_uids.0, target_uids.1, target_uids.2],
+        gid: [target_gids.0, target_gids.1, target_gids.2],
+        same,
+        service: target_service,
+        within: true,
+        dumpable: 1,
+    };
+    may_access(MODE_READ | MODE_FSCREDS, &who, &t).is_ok()
+    // wave10 G8-1 end
 }
 
 /// Whether the info primitives answer for a caller (`init`: its PID namespace's init, `None`

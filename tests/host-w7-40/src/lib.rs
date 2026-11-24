@@ -21,6 +21,9 @@ pub use ipc::protocol as proto;
 pub mod lx {
     #[path = "../../../../src/lx/info.rs"]
     pub mod info;
+    // wave10 G8-1: the ptrace rule `info::may_see` is built on
+    #[path = "../../../../src/lx/ptrace_rules.rs"]
+    pub mod ptrace_rules;
 }
 
 /// linux-server's pseudo file system logic.

@@ -271,6 +271,9 @@ pub fn idempotent(nr: u64, args: &[u64; 6]) -> bool {
         157 => matches!(args[0], 1 | 2 | 3 | 4 | 7 | 8 | 15 | 16 | 36 | 37 | 38 | 39),
         103 => matches!(args[0], 0 | 1 | 3 | 5 | 9 | 10),
         // wave10 G7b-1 end
+        // wave10 G8-1: the tracing calls: lx-proc only decides them (the kernel acts after its
+        // redirect), so a cut decision is simply made again
+        101 | 298 | 310 | 311 | 312 | 438 => true,
         _ => false,
     }
 }

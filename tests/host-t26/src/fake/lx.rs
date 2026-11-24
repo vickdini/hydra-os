@@ -8,6 +8,36 @@ use std::cell::{Cell, RefCell};
 
 use crate::compat::linux::chardev::CharDevice;
 
+// wave10 G8-1 begin: the tracing calls' rule (real) and a *stub* of the kernel's half
+// (`src/lx/trace.rs`): the facts from the fake tasks (the caller, the pidfd's process),
+// decided by the real `decide`
+#[path = "../../../../src/lx/ptrace_rules.rs"]
+pub mod ptrace_rules;
+pub mod trace {
+    use super::ptrace_rules::*;
+    fn ids(t: &crate::task::Task) -> ([u32; 3], [u32; 3]) {
+        ([t.uid, t.euid, t.suid], [t.gid, t.egid, t.sgid])
+    }
+    pub fn check(nr: u64, a: &[u64; 6], _extra: u32) -> Result<(), i64> {
+        let (uid, gid, caps, me) = crate::task::with_current_task_mut(|t| {
+            let (u, g) = ids(t);
+            (u, g, t.caps.effective, t.tgid)
+        })
+        .ok_or(ESRCH)?;
+        let who = Who { uid, gid, caps, in_userns: false, seccomp: false };
+        let pid = match nr {
+            NR_PIDFD_GETFD => crate::compat::linux::pidfd::pid_of(a[0])?,
+            _ => a[0],
+        };
+        let t = crate::task::SCHEDULER.lock().with_process(pid, |t| {
+            let (u, g) = ids(t);
+            Target { tgid: t.tgid, tid: t.tgid, uid: u, gid: g, same: t.tgid == me, service: t.service.is_some(), within: true, dumpable: 1 }
+        });
+        decide(&Facts { nr, who, t: [t, None], ..Facts::default() })
+    }
+}
+// wave10 G8-1 end
+
 /// *stub* wave8 GT: `crate::lx::console` (the terminals are never tty-server's here, so
 /// the in-kernel copies run; the rest is never reached).
 pub mod console {

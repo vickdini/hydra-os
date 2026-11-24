@@ -183,6 +183,8 @@ fn run(client: u64, tgid: u64, sub: u64, x: &mut LxProcIo) -> i64 {
                 -11 // EAGAIN: every slot holds another thread's mark
             }
         }
+        // wave10 G8-1: the facts of a tracing call (`lx::trace`)
+        LXP_TRACE_FACTS => super::trace::facts_op(client, x),
         _ => EINVAL,
     }
 }

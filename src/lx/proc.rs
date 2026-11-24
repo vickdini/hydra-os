@@ -65,13 +65,22 @@ pub fn task_creds(tid: u64) -> Option<(Creds, bool, bool)> {
 /// Sets the credentials of thread `tid` (0: the caller) to `new`; a change of user ids
 /// applies the capability rules (`Caps::on_uid_change`). `false`: no such thread.
 pub fn task_creds_set(tid: u64, new: Creds) -> bool {
-    with_thread(tid, |t| {
+    // (wave10 G8-1: + whether the change leaves the process not dumpable, and its process)
+    let r = with_thread(tid, |t| {
         let old = (t.uid, t.euid, t.suid);
+        let before = (t.euid, t.egid, t.caps.permitted);
         [t.uid, t.euid, t.suid] = new.uid;
         [t.gid, t.egid, t.sgid] = new.gid;
         t.caps.on_uid_change(old, (t.uid, t.euid, t.suid));
-    })
-    .is_some()
+        (super::ptrace_rules::creds_clear_dumpable(before, (t.euid, t.egid, t.caps.permitted)), t.tgid)
+    });
+    // wave10 G8-1: Linux's commit_creds: a change of the effective (file-system) ids or new
+    // permitted capabilities make the process not dumpable (suid_dumpable 0) until its next
+    // exec; the ptrace rule reads it
+    if let Some((true, tgid)) = r {
+        proc_attrs_set(tgid, |p| p.dumpable = 0);
+    }
+    r.is_some()
 }
 
 // ----------------------------------------------------------------------
@@ -533,6 +542,15 @@ pub fn attrs_on_exec(tid: u64, tgid: u64) {
         p.dumpable = 1;
     }
 }
+
+// wave10 G7b-2 begin
+/// Process `tgid` ran a program that gained privileges (set-user/group-ID to other ids, or
+/// file capabilities): it is not dumpable (Linux sets `suid_dumpable`, 0 here), so its
+/// memory facts (`environ`, `maps`) are hidden from its user.
+pub fn attrs_exec_secure(tgid: u64) {
+    PATTRS.lock().entry(tgid).or_default().dumpable = 0;
+}
+// wave10 G7b-2 end
 
 /// Process `tgid` ended: its records go.
 pub fn attrs_on_exit(tgid: u64) {

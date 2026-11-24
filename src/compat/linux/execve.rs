@@ -512,6 +512,11 @@ fn front_kernel(dirfd: i64, mut path: Vec<u8>, mut argv: Vec<Vec<u8>>, envp: &[V
 /// The point of no return: the new image `r` replaces the caller's (`task_exec`'s commit).
 fn commit(frame: &mut SyscallFrame, fpu: *mut FpuState, r: Ready) -> i64 {
     let Ready { image, abs_path, argv, set_uid, set_gid, file_caps, via_script } = r;
+    // wave10 G7b-2: a program that gains privileges is not dumpable (see below)
+    let gains = {
+        let c = creds();
+        (!via_script && (set_uid.is_some_and(|u| u != c.uid) || set_gid.is_some_and(|g| g != c.gid))) || (file_caps.is_some_and(|(p, _)| p != 0) && c.euid != 0)
+    };
     // ---- Point of no return ----
     // Robust mutexes the old image holds are released as at exit (Linux's
     // futex_exec_release), while it is still mapped
@@ -590,6 +595,9 @@ fn commit(frame: &mut SyscallFrame, fpu: *mut FpuState, r: Ready) -> i64 {
     crate::lx::note(crate::ipc::protocol::LX_NOTE_EXEC, tid, tgid, 0);
     // wave10 G7b-1: the new program's name; dumpable again
     crate::lx::proc::attrs_on_exec(tid, tgid);
+    if gains {
+        crate::lx::proc::attrs_exec_secure(tgid);
+    }
     super::limits::on_exec(tgid);
     super::ptrace::on_exec(tgid, tid);
     super::perf::on_exec(tgid);

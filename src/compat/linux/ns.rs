@@ -667,6 +667,17 @@ fn user_ns_within(inner: &Option<Arc<UserNs>>, outer: &Option<Arc<UserNs>>) -> b
     }
 }
 
+// wave10 G8-1 begin: the ptrace rule's "capabilities count over the target"
+/// Whether process `target`'s user namespace is process `caller`'s or lies below it
+/// (`false` when `target` is gone).
+pub fn user_within(target: u64, caller: u64) -> bool {
+    let procs = super::proc::PROCS.lock();
+    let Some(t) = procs.get(&target) else { return false };
+    let mine = procs.get(&caller).and_then(|p| p.ns.user.clone());
+    user_ns_within(&t.ns.user, &mine)
+}
+// wave10 G8-1 end
+
 // wave10 G7b-1 begin: what lx-proc's setns/unshare rules need (`LXP_NS_FD`, `LXP_NS_GET`)
 /// The process and the namespace kinds `setns(fd, nstype)` names in descriptor table `fds`:
 /// a pidfd's process (`nstype` the kinds), or a `/proc/<pid>/ns/*` file's.

@@ -963,6 +963,10 @@ pub fn sys_ptrace(req: u64, pid: u64, addr: u64, data: u64) -> i64 {
     let (my_tid, me) = super::proc::current_ids();
     match req {
         TRACEME => {
+            // wave10 G8-1: the decision (lx-proc's, or the rule here)
+            if let Err(e) = crate::lx::trace::check(101, &[req, pid, addr, data, 0, 0], 0) {
+                return e;
+            }
             let parent = super::proc::parent_of(me);
             let mut tr = TRACEES.lock();
             if tr.get(&my_tid).is_some_and(|t| !t.exited) {
@@ -978,10 +982,9 @@ pub fn sys_ptrace(req: u64, pid: u64, addr: u64, data: u64) -> i64 {
             }
             let tid = super::ns::pid_from_caller(pid as i32 as i64 as u64);
             let Some(tgid) = super::proc::tgid_of(tid) else { return ESRCH };
-            if tgid == me {
-                return EPERM;
-            }
-            if let Err(e) = super::extra::may_access(tgid) {
+            // wave10 G8-1: one's own process, the ptrace access rule, seized options (lx-proc's
+            // verdict, or the rule here: `lx::trace`)
+            if let Err(e) = crate::lx::trace::check(101, &[req, pid, addr, data, 0, 0], 0) {
                 return e;
             }
             {
@@ -1155,6 +1158,18 @@ pub fn sys_ptrace(req: u64, pid: u64, addr: u64, data: u64) -> i64 {
             if data & !O_ALL != 0 {
                 return EINVAL;
             }
+            // wave10 G8-1 begin: suspending seccomp is decided (lx-proc's verdict, or the rule)
+            if data & crate::lx::ptrace_rules::O_SUSPEND_SECCOMP != 0 {
+                drop(tr);
+                if let Err(e) = crate::lx::trace::check(101, &[req, pid, addr, data, 0, 0], 0) {
+                    return e;
+                }
+                let mut tr = TRACEES.lock();
+                let Some(t) = tr.get_mut(&tid).filter(|t| t.tracer == me && !t.exited) else { return ESRCH };
+                t.options = data;
+                return 0;
+            }
+            // wave10 G8-1 end
             t.options = data;
             0
         }

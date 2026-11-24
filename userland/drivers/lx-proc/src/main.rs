@@ -30,6 +30,9 @@
 extern crate alloc;
 
 mod policy;
+// wave10 G8-1: the tracing calls' decisions (ptrace, perf_event_open, process_vm_*, kcmp,
+// pidfd_getfd)
+mod trace;
 
 /// The protocol's names (the kernel's `ipc/protocol.rs`).
 pub mod proto {
@@ -107,7 +110,14 @@ impl Mem for CallerMem<'_> {
 fn serve(c: &LxCall, page: *mut u8) -> Answer {
     let cx = Cx::from_call(c, page);
     let call = Call { nr: c.nr, args: c.args, tgid: c.tgid, caps: c.caps, ids: [c.uid, c.euid, c.suid, c.gid, c.egid, c.sgid] };
-    match policy::serve(&Sys { req: c.id }, &CallerMem(&cx), &call) {
+    // wave10 G8-1 begin
+    if trace::handles(c.nr) {
+        let trace::Answer::Kernel(key) = trace::serve(&Sys { req: c.id }, &CallerMem(&cx), &call);
+        return svcrt::redirect(page, 0, key, 0);
+    }
+    let out = policy::serve(&Sys { req: c.id }, &CallerMem(&cx), &call);
+    // wave10 G8-1 end
+    match out {
         Out::Ret(r) => (r, 0),
         // The kernel's own code answers (service 0)
         Out::Kernel => svcrt::redirect(page, 0, 0, 0),
