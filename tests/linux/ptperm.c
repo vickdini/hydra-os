@@ -178,6 +178,10 @@ static int perf_open(pid_t p, int cpu, int kernel) {
 }
 
 // /proc/<pid>/<file> read: 0 when some bytes came, else -errno (EOF: -1000)
+// lx-proc serves /proc (forwarded mode: Hydra's route query 0x6713 for prctl names it);
+// with `lx.proc=kernel` the kernel's copy answers, whose errors are only reported
+static int proc_forwarded;
+
 static int try_proc(pid_t p, const char *file) {
     char path[64], buf[256];
     snprintf(path, sizeof path, "/proc/%d/%s", p, file);
@@ -205,8 +209,13 @@ static void t_same_user(void) {
     CHECK(try_getfd(t.pid) == 0, "pidfd_getfd own uid: %d", try_getfd(t.pid));
     CHECK(try_perf(t.pid) == 0, "perf_event_open own uid: %d", try_perf(t.pid));
     CHECK(try_proc(t.pid, "maps") == 0, "/proc maps own uid: %d", try_proc(t.pid, "maps"));
-    // (environ: ENOENT where /proc does not serve it yet: before 7b-2)
-    CHECK(try_proc(t.pid, "environ") == 0 || try_proc(t.pid, "environ") == -1000 || try_proc(t.pid, "environ") == -ENOENT, "/proc environ own uid: %d", try_proc(t.pid, "environ"));
+    // environ of one's own other process: read, not empty (forwarded: lx-proc's procfs)
+    int env = try_proc(t.pid, "environ");
+    if (proc_forwarded) {
+        CHECK(env == 0, "/proc environ own uid: %d (want 0: bytes read)", env);
+    } else {
+        printf("     (kernel copy: /proc environ own uid: %d)\n", env);
+    }
     release(&t);
 }
 
@@ -343,7 +352,11 @@ static void t_userns_sandbox(void) {
         long n = syscall(SYS_process_vm_writev, parent, &l, 1, &r, 1, 0);
         int w = n < 0 ? -errno : 0;
         int m = try_proc(parent, "maps"), e = try_proc(parent, "environ");
-        _exit((a == -EPERM ? 0 : 1) | (w == -EPERM ? 0 : 2) | (m != 0 ? 0 : 4) | (e != 0 ? 0 : 8));
+        // (a reader in a user namespace of its own is answered by the kernel's copy of
+        // /proc in both modes)
+        printf("     (sandbox: parent's maps %d, environ %d)\n", m, e);
+        fflush(stdout);
+        _exit((a == -EPERM ? 0 : 1) | (w == -EPERM ? 0 : 2) | (m != 0 && m != -1000 ? 0 : 4) | (e != 0 && e != -1000 ? 0 : 8));
     }
     int st = 0;
     waitpid(p, &st, 0);
@@ -392,7 +405,11 @@ static void t_file_caps(void) {
             int r = try_attach(p);
             int v = try_vm(p);
             int m = try_proc(p, "maps"), e = try_proc(p, "environ");
-            _exit((r == -EPERM ? 0 : 1) | (v == -EPERM ? 0 : 2) | (m != 0 ? 0 : 4) | (e != 0 ? 0 : 8));
+            printf("     (capable process: maps %d, environ %d%s)\n", m, e, proc_forwarded ? "" : ", kernel copy");
+            fflush(stdout);
+            int refused_m = proc_forwarded ? m == -EACCES : (m != 0 && m != -1000);
+            int refused_e = proc_forwarded ? e == -EACCES : (e != 0 && e != -1000);
+            _exit((r == -EPERM ? 0 : 1) | (v == -EPERM ? 0 : 2) | (refused_m ? 0 : 4) | (refused_e ? 0 : 8));
         }
         int st = 0;
         waitpid(q, &st, 0);
@@ -692,6 +709,8 @@ int main(int argc, char **argv) {
         return 2;
     }
     alarm(240);
+    proc_forwarded = syscall(0x6713, 157, 0) == 5; // LX_ROUTE_NR(prctl) == LXS_PROC
+    printf("     (/proc and process calls: %s)\n", proc_forwarded ? "lx-proc" : "the kernel's copy");
     in_child("same user", t_same_user);
     in_child("another user", t_other_user);
     in_child("not dumpable", t_not_dumpable);
