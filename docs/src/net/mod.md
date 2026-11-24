@@ -79,6 +79,15 @@ of the new one even if the new server hands out the same numbers. New sockets wo
 - Frames: received in batches per interrupt; sent in batches (`MSG_NET_TRANSMIT_BATCH`)
   flushed before each reply and after each round of received frames.
 - Before/after numbers: see the Group 2 report (branch `mk-net`).
+- Wave 10 (Group N): every lookup of a segment's connection, every new handle and every
+  publish scans the connection table, which kept each closed `TIME_WAIT` connection until the
+  next timer round (50 ms: hundreds in a connect loop). Connections closed by their client
+  are now forgotten at the end of every round (`stack::forget_closed`), and `publish` marks
+  live slots with round numbers (`marks.rs`) instead of making and clearing a 4 KiB array per
+  run. lxbench's `tcp_connect` (loopback connect + accept + 2 closes), best medians of 3
+  rounds: forwarded (lx-net) 197 -> 114 us, `lx.net=kernel` 149 -> 131 us. The forwarded
+  loop gained most: lx-net's main thread closes the previous connections while the next
+  `socket()` waits for its notifications, and those closes queued behind slow rounds.
 
 ## Two clients: the kernel and linux-server (wave 5, step 3)
 

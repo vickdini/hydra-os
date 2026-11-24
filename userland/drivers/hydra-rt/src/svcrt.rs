@@ -607,7 +607,22 @@ pub mod notes {
     }
 
     fn take(seq: u64) {
-        let _g = TAKING.lock();
+        // wave10 GN: the holder may be waiting for another server (lx-net's main thread
+        // closing sockets in net-server): spin a little, then give the CPU away, so that
+        // server can run here meanwhile
+        let _g = loop {
+            if let Some(g) = TAKING.try_lock() {
+                break g;
+            }
+            let mut spins = 0;
+            while TAKING.is_locked() && spins < 64 {
+                core::hint::spin_loop();
+                spins += 1;
+            }
+            if TAKING.is_locked() {
+                crate::sys::yield_now();
+            }
+        };
         let h = HANDLER.load(Ordering::Acquire);
         let end = seq.min(head());
         core::sync::atomic::fence(Ordering::Acquire);

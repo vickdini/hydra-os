@@ -641,6 +641,10 @@ one lock and advances the tail. Every call carries the ring position at the time
 (`note_seq`), and a worker takes the ring up to there before serving the call: a child's
 first `keyctl` can never overtake its fork. A full ring (4096 entries) drops notifications
 and counts them (word 2 of the ring header).
+In the services built on `svcrt` (wave 10, Group N), a worker that finds another thread taking
+the ring spins briefly and then gives its CPU away: the taker may be waiting for another
+server (lx-net's main thread closing sockets in net-server), which can then run on this CPU
+instead of only on the other one.
 
 ## Requests made by the kernel
 
