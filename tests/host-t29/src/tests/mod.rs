@@ -15,3 +15,4 @@ mod proc;
 mod process;
 mod procmech;
 mod ptrace;
+mod trace; // wave10 G8-1
