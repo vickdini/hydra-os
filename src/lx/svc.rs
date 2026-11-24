@@ -78,7 +78,9 @@ const DEFAULT_ENDPOINTS: [(SvcId, u32); 11] = [
     (LXS_NET, crate::ipc::protocol::ENDPOINT_LX_NET),
     (LXS_IPC, crate::ipc::protocol::ENDPOINT_LX_IPC),
     // wave8 GX2 end
-    (LXS_PROC, ENDPOINT_LINUX_SERVER),
+    // wave10 G7b-1: the process service, lx-proc, its own process (`/proc` stays in
+    // linux-server until 7b-2: `lx::redirect_host`)
+    (LXS_PROC, crate::ipc::protocol::ENDPOINT_LX_PROC),
     (LXS_DISPLAY, ENDPOINT_DISPLAY_DEV),
     (LXS_INPUT, 0x2A),
     (LXS_SOUND, 0x2B),
@@ -111,6 +113,13 @@ pub fn init(words: &[u8]) -> bool {
             crate::kprintln!("[lx] {}: ignored (the file service has no switch back since wave 9)", core::str::from_utf8(w).unwrap_or("?"));
             continue;
         }
+        // wave10 G7b-1 begin: lx-proc's code is not built into linux-server: `lx.proc=linux`
+        // is ignored (`lx.proc=kernel` takes its calls and `/proc` back to the kernel)
+        if w == b"proc=linux" {
+            crate::kprintln!("[lx] proc=linux: ignored (lx-proc runs as its own process; lx.proc=kernel switches back)");
+            continue;
+        }
+        // wave10 G7b-1 end
         // wave9 G6b-4 begin: `lx.uring=kernel`: io_uring and aio requests stay in the kernel
         if super::uring::boot_word(w) {
             continue;

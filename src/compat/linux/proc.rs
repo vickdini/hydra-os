@@ -471,6 +471,8 @@ pub fn to_clock_ticks(ticks: u64) -> u64 {
 /// * `cred` - The thread's real and saved uid (a zombie's, for signal permission checks).
 pub fn thread_exited(pid: u64, tid: u64, run: u64, sys: u64, cred: (u32, u32)) {
     super::mount::forget_thread(tid);
+    // wave10 G7b-1: an approval lx-proc left for this thread goes with it
+    crate::lx::proc::clear_approval(tid);
     let mut procs = PROCS.lock();
     let (ppid, now_zombie) = match procs.get_mut(&pid) {
         Some(p) => {
@@ -505,6 +507,8 @@ pub fn thread_exited(pid: u64, tid: u64, run: u64, sys: u64, cred: (u32, u32)) {
     }
     // The Linux server forgets the process (its keyrings)
     crate::lx::note(crate::ipc::protocol::LX_NOTE_EXIT, pid, 0, 0);
+    // wave10 G7b-1: its prctl records go
+    crate::lx::proc::attrs_on_exit(pid);
     // wave7 G7-3 begin: the last live process of a mount namespace: vfs-server drops its table
     let mnt = procs.get(&pid).map_or(0, |p| p.ns.mnt);
     if mnt != 0 && !procs.values().any(|p| !p.zombie && p.ns.mnt == mnt) {

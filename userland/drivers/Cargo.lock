@@ -129,6 +129,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lx-proc"
+version = "0.1.0"
+dependencies = [
+ "hydra-rt",
+]
+
+[[package]]
 name = "lx-sec"
 version = "0.1.0"
 dependencies = [

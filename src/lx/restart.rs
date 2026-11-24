@@ -227,8 +227,10 @@ pub fn started_by_hand(svc: u8) {
 pub fn gone(svc: u8) -> Decision {
     let i = idx(svc);
     let now = now_ms();
+    let mut before = None;
     let d = state(|s| {
         let v = &mut s[i];
+        before = v.ladder.last_restart_ms();
         let d = if core::mem::take(&mut v.deliberate) { v.ladder.deliberate(now) } else { v.ladder.crash(now) };
         if d.restart {
             v.ladder.restarted(now);
@@ -253,6 +255,16 @@ pub fn gone(svc: u8) -> Decision {
     }
     RESTARTING[i].store(d.restart && d.class != RestartClass::EndLinux, Ordering::Release);
     DOWN[i].store(!d.restart, Ordering::Release);
+    // wave10 G7b-1: the ladder's clock beside the wall clock (the RTC), to tell a window
+    // counted wrongly from a clock that runs slow
+    crate::kprintln!(
+        "[lx] service {} ladder: now {} ms, window from {} ms ({} ms ago), rtc {} s",
+        svc,
+        now,
+        before.map_or(-1, |t| t as i64),
+        before.map_or(-1, |t| now.saturating_sub(t) as i64),
+        wall_s()
+    );
     crate::kprintln!(
         "[lx] service {} went away: handled as {}{}{}",
         svc,
@@ -263,6 +275,18 @@ pub fn gone(svc: u8) -> Decision {
     // Callers already waiting see the new phase
     ONLINE_WQ[i].wake_all();
     d
+}
+
+/// wave10 G7b-1: the wall clock (RTC) in seconds, for the ladder's log line (0 on the host).
+#[cfg(target_os = "uefi")]
+fn wall_s() -> u64 {
+    crate::arch::rtc::now().0
+}
+
+/// See the other `wall_s`.
+#[cfg(not(target_os = "uefi"))]
+fn wall_s() -> u64 {
+    0
 }
 
 /// Whether the supervisor should start a new instance of `svc` (the ladder did not give up).

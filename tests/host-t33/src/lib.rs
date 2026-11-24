@@ -297,6 +297,12 @@ pub mod pkg;
 /// *stub* The forwarding to the ring-3 Linux server.
 pub mod lx {
     pub fn note(_kind: u64, _a: u64, _b: u64, _c: u64) {}
+    /// *stub* wave10 G7b-1: lx-proc's approvals (none on the host).
+    pub mod proc {
+        pub fn take_approval(_tid: u64, _nr: u64) -> bool {
+            false
+        }
+    }
     // wave9 G6b-1 begin: *stub* the kernel's events for vfs-server's inotify/fanotify
     // (`lx::notifyfwd`). wave9 G9-C: the kernel's own instances are gone, so the tests'
     // switches (`INOTIFY_ON`, `FANOTIFY_ON`) now say what vfs-server wants, and the events

@@ -103,6 +103,18 @@ pub fn pid_of(fd: u64) -> Result<u64, i64> {
     })
 }
 
+// wave10 G7b-1 begin
+/// The process pidfd `fd` of descriptor table `fds` names (`None`: not a pidfd), for
+/// another thread's table (lx-proc's `LXP_NS_FD`).
+pub fn pid_in(fds: &crate::fs::FdTable, fd: u64) -> Option<u64> {
+    match fds.get(fd as usize) {
+        Some(crate::fs::FileDescriptor::PidFd(p)) => Some(p.pid),
+        Some(crate::fs::FileDescriptor::Device(d)) if d.as_server().is_some_and(|o| o.kind() == crate::ipc::protocol::LX_OBJ_KIND_PIDFD) => d.as_server().map(|o| o.tag()),
+        _ => None,
+    }
+}
+// wave10 G7b-1 end
+
 /// Linux `pidfd_open(2)` system call implementation.
 ///
 /// # Arguments

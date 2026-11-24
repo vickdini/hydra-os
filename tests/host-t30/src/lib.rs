@@ -61,6 +61,8 @@ pub mod host {
     /// tested in host-t29): the call context from the fake process table.
     pub mod lx_proc {
         pub use crate::compat::linux::proc::PROCS;
+        /// *stub* wave10 G7b-1: lx-proc's approval marks (none on the host).
+        pub fn clear_approval(_tid: u64) {}
         /// *mirror* of the kernel's call context.
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
         pub struct CallCtx {

@@ -267,6 +267,8 @@ pub mod fs {
     pub const MAX_FDS: usize = 1024;
 
     pub use crate::fake::fd::FileDescriptor;
+    /// *mirror* wave10 G7b-1: the descriptor table type (`pidfd::pid_in`).
+    pub use crate::fake::fd::Fds as FdTable;
 
     /// *stub*
     pub mod client {

@@ -98,6 +98,10 @@ pub mod proc;
 #[cfg(not(target_os = "uefi"))]
 pub use crate::host::lx_proc as proc;
 // wave9 G7a end
+// wave10 G7b-1 begin: lx-proc's way to the primitives (`SYS_LX_OBJ` op 75)
+#[cfg(target_os = "uefi")]
+pub mod procsvc;
+// wave10 G7b-1 end
 // wave9 G6b-4 begin: io_uring and aio requests routed to each descriptor's owner
 pub mod uring;
 // wave9 G6b-4 end
@@ -254,6 +258,60 @@ pub const MOVED_PRIV: &[(u64, u32, SvcId)] = &[(LX_NULL_NR, 0, LXS_LINUX), (LX_T
 /// vfs-server's private numbers: its walk test call (the caller's context; the root and
 /// working directory filled by [`vfs_ctx`] until Group 7-2's fill covers them).
 pub const MOVED_PRIV_VFS: &[(u64, u32, SvcId)] = &[(crate::ipc::protocol::LX_VFS_WALK_NR, T_FSCTX, crate::ipc::protocol::LXS_VFS)];
+// wave10 G7b-1 begin
+/// The process service's calls (lx-proc): setuid 105, setgid 106, setpgid 109, setsid 112,
+/// setreuid 113, setregid 114, setgroups 116, setresuid 117, setresgid 119, getpgid 121,
+/// setfsuid 122, setfsgid 123, getsid 124, prctl 157, setrlimit 160, prlimit64 302,
+/// unshare 272, setns 308, sethostname 170, setdomainname 171, acct 163, syslog 103. (The
+/// identity reads — getuid, getpid, getgroups, getpgrp, getrlimit, uname — stay with the
+/// kernel: no change of cost; a uname loop is also how programs measure system time, which
+/// a forwarded call spends in the service.)
+pub const MOVED_PROC: &[(u64, u32, SvcId)] = &[
+    (105, 0, crate::ipc::protocol::LXS_PROC),
+    (106, 0, crate::ipc::protocol::LXS_PROC),
+    (109, 0, crate::ipc::protocol::LXS_PROC),
+    (112, 0, crate::ipc::protocol::LXS_PROC),
+    (113, 0, crate::ipc::protocol::LXS_PROC),
+    (114, 0, crate::ipc::protocol::LXS_PROC),
+    (116, 0, crate::ipc::protocol::LXS_PROC),
+    (117, 0, crate::ipc::protocol::LXS_PROC),
+    (119, 0, crate::ipc::protocol::LXS_PROC),
+    (121, 0, crate::ipc::protocol::LXS_PROC),
+    (122, 0, crate::ipc::protocol::LXS_PROC),
+    (123, 0, crate::ipc::protocol::LXS_PROC),
+    (124, 0, crate::ipc::protocol::LXS_PROC),
+    (157, 0, crate::ipc::protocol::LXS_PROC),
+    (160, 0, crate::ipc::protocol::LXS_PROC),
+    (302, 0, crate::ipc::protocol::LXS_PROC),
+    (272, 0, crate::ipc::protocol::LXS_PROC),
+    (308, 0, crate::ipc::protocol::LXS_PROC),
+    (170, 0, crate::ipc::protocol::LXS_PROC),
+    (171, 0, crate::ipc::protocol::LXS_PROC),
+    (163, 0, crate::ipc::protocol::LXS_PROC),
+    (103, 0, crate::ipc::protocol::LXS_PROC),
+];
+
+/// A call lx-proc may approve (syslog, acct, unshare, setns) was answered without reaching
+/// the kernel's code (lx-proc refused it, or died after approving it): any mark it left for
+/// the calling thread goes.
+#[inline]
+fn proc_answered(nr: u64) {
+    if matches!(nr, 103 | 163 | 272 | 308) {
+        proc::clear_approval(crate::task::CURRENT_TID.load(Ordering::Relaxed));
+    }
+}
+
+/// The host that serves a redirect to service `s`: `/proc` (`LXS_PROC`'s file system)
+/// stays in linux-server until stage 2 (7b-2) moves it into lx-proc, while lx-proc already
+/// serves the process calls.
+fn redirect_host(s: SvcId) -> SvcId {
+    if s == crate::ipc::protocol::LXS_PROC {
+        svc::host_of(LXS_LINUX)
+    } else {
+        svc::host_of(s)
+    }
+}
+// wave10 G7b-1 end
 
 /// The caller's root and working directory for vfs-server (`LxCall::root`/`cwd`): their
 /// object numbers in the root's own tree (0: the pool root), `u64::MAX` when they lie in a
@@ -418,12 +476,18 @@ pub fn init() {
 /// `lx.<name>=kernel` stays in the kernel) or all to the in-kernel code.
 pub fn set_forwarding(on: bool) {
     let ent = |bits: u32, s: SvcId| if on && svc::mode(s) == svc::SvcMode::Forward { T_SERVER | bits | (s as u32) << T_SVC_SHIFT } else { 0 };
-    for &(nr, bits, s) in MOVED.iter().chain(MOVED_STEP2).chain(MOVED_STEP4) {
+    // (wave10 G7b-1: + the process service's)
+    for &(nr, bits, s) in MOVED.iter().chain(MOVED_STEP2).chain(MOVED_STEP4).chain(MOVED_PROC) {
         TABLE[nr as usize].store(ent(bits, s), Ordering::Release);
     }
     for &(nr, bits, s) in MOVED_PRIV.iter().chain(MOVED_PRIV_VFS) {
         // (wave7 G7-1: + vfs-server's)
         PRIV[(nr - PRIV_BASE) as usize].store(ent(bits, s), Ordering::Release);
+    }
+    // wave10 G7b-1: the walk test call's redirects need `/proc` forwarded too (as with
+    // `lx=kernel`, wave 9 9-C): `lx.proc=kernel` takes it away
+    if svc::mode(crate::ipc::protocol::LXS_PROC) == svc::SvcMode::Kernel {
+        PRIV[(crate::ipc::protocol::LX_VFS_WALK_NR - PRIV_BASE) as usize].store(0, Ordering::Release);
     }
     STEP4.store(on && svc::mode(LXS_IPC) == svc::SvcMode::Forward, Ordering::Release);
     // Socket routing (Group 12): the per-call bits only once some family moved, so that
@@ -542,6 +606,7 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
     if r == fileh::LX_TO_KERNEL {
         return None;
     }
+    proc_answered(nr);
     Some(r)
 }
 
@@ -1117,7 +1182,8 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
                 // service while that one is switched back, `lx.ipc=kernel`)
                 return fileh::LX_TO_KERNEL;
             }
-            let Some(nx) = svc::host(svc::host_of(s)).filter(|h| host_usable(h)) else { return ENOSYS };
+            // (wave10 G7b-1: `/proc` redirects to linux-server until 7b-2)
+            let Some(nx) = svc::host(redirect_host(s)).filter(|h| host_usable(h)) else { return ENOSYS };
             if nx.id != x.id {
                 // (an object slot means nothing to another host)
                 c.obj = LX_OBJ_NONE;
@@ -1909,6 +1975,7 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     if r == fileh::LX_TO_KERNEL {
         return None;
     }
+    proc_answered(nr);
     Some(Fast::Call(r))
 }
 

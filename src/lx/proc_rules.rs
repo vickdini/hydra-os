@@ -106,3 +106,18 @@ pub fn set_limit(res: usize, old: (u64, u64), new: (u64, u64), cap_resource: boo
     }
     Ok(())
 }
+
+// wave10 G7b-1 begin
+/// The key a `setns` approval is bound to (lx-proc and the kernel compute it alike): the
+/// target process, the kinds joined, and the target's namespace ids (user, pid,
+/// pid_for_children, net, mnt, ipc, uts, cgroup) as checked. The kernel runs the call
+/// without its own checks only when the descriptor still names exactly this.
+pub fn setns_key(target: u64, kinds: u64, ids: &[u64; 8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for v in [target, kinds].iter().chain(ids.iter()) {
+        h = (h ^ v).wrapping_mul(0x0000_0100_0000_01b3).rotate_left(17);
+    }
+    // (never 0: 0 is the key of calls bound to nothing)
+    h | 1
+}
+// wave10 G7b-1 end

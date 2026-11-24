@@ -474,7 +474,9 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
                 }
                 auxv.len() as i64
             }
-            PR_SET_NAME | PR_SET_PDEATHSIG | PR_SET_DUMPABLE | PR_SET_CHILD_SUBREAPER => 0,
+            // wave10 G7b-1: names, dumpable, parent-death signal and subreaper are kept (the
+            // same records lx-proc sets)
+            PR_SET_NAME | PR_GET_NAME | PR_SET_PDEATHSIG | 2 | PR_SET_DUMPABLE | PR_GET_DUMPABLE | PR_SET_CHILD_SUBREAPER | 37 => prctl_attr(a),
             // PR_GET_SECCOMP, PR_SET_SECCOMP, PR_SET_NO_NEW_PRIVS, PR_GET_NO_NEW_PRIVS
             21 | 22 | PR_SET_NO_NEW_PRIVS | PR_GET_NO_NEW_PRIVS => super::seccomp::prctl(a[0], a[1], a[2]).unwrap_or(EINVAL),
             8 => {
@@ -488,17 +490,63 @@ pub fn dispatch(num: u64, a: [u64; 6]) -> Option<i64> {
             7 => crate::task::with_current_task_mut(|t| t.caps.keep as i64).unwrap_or(0), // PR_GET_KEEPCAPS
             47 => 0, // PR_CAP_AMBIENT
             24 => 0,     // PR_CAPBSET_DROP
-            PR_GET_NAME => {
-                let mut name = [0u8; 16];
-                name[..9].copy_from_slice(b"linux_app");
-                copy_out(a[1], &name)
-            }
-            PR_GET_DUMPABLE | PR_CAPBSET_READ => 1,
+            PR_CAPBSET_READ => 1,
             _ => EINVAL,
         },
         _ => return None,
     })
 }
+
+// wave10 G7b-1 begin
+/// `prctl`'s names, dumpable flag, parent-death signal and subreaper on the kernel's
+/// records (`lx::proc`'s attributes, which lx-proc sets the same way): `PR_SET_NAME`,
+/// `PR_GET_NAME`, `PR_SET_PDEATHSIG`, `PR_GET_PDEATHSIG`, `PR_SET_DUMPABLE`,
+/// `PR_GET_DUMPABLE`, `PR_SET_CHILD_SUBREAPER`, `PR_GET_CHILD_SUBREAPER`.
+fn prctl_attr(a: [u64; 6]) -> i64 {
+    use crate::lx::proc as mech;
+    let (tid, pid) = super::proc::current_ids();
+    match a[0] {
+        PR_SET_NAME => {
+            // Up to 15 bytes and the NUL (a longer name is cut, as Linux does)
+            let mut comm = [0u8; 16];
+            for i in 0..15 {
+                match super::vfs::copy_in(a[1] + i as u64, 1) {
+                    Ok(b) if b[0] != 0 => comm[i] = b[0],
+                    Ok(_) => break,
+                    Err(e) => return e,
+                }
+            }
+            mech::thread_attrs_set(tid, pid, |t| t.comm = Some(comm));
+            0
+        }
+        PR_GET_NAME => {
+            let exe = crate::task::with_current_task_mut(|t| alloc::string::String::from(t.exe_path())).unwrap_or_default();
+            copy_out(a[1], &mech::comm_or_exe(tid, &exe))
+        }
+        PR_SET_PDEATHSIG => {
+            if a[1] > 64 {
+                return EINVAL;
+            }
+            mech::thread_attrs_set(tid, pid, |t| t.pdeathsig = a[1] as u32);
+            0
+        }
+        2 => copy_out(a[1], &(mech::thread_attrs(tid).pdeathsig as i32).to_le_bytes()),
+        PR_SET_DUMPABLE => {
+            if a[1] > 1 {
+                return EINVAL;
+            }
+            mech::proc_attrs_set(pid, |p| p.dumpable = a[1] as u8);
+            0
+        }
+        PR_GET_DUMPABLE => mech::proc_attrs(pid).dumpable as i64,
+        PR_SET_CHILD_SUBREAPER => {
+            mech::proc_attrs_set(pid, |p| p.subreaper = a[1] != 0);
+            0
+        }
+        _ => copy_out(a[1], &(mech::proc_attrs(pid).subreaper as i32).to_le_bytes()),
+    }
+}
+// wave10 G7b-1 end
 
 /// `reboot(2)`: powers the machine off, halts or restarts it (after committing the pool),
 /// as systemd and login managers do at the end of a shutdown. Needs `CAP_SYS_BOOT` and

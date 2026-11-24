@@ -588,6 +588,8 @@ fn commit(frame: &mut SyscallFrame, fpu: *mut FpuState, r: Ready) -> i64 {
     let (tid, tgid) = super::proc::current_ids();
     super::keys::on_exec(tid, tgid);
     crate::lx::note(crate::ipc::protocol::LX_NOTE_EXEC, tid, tgid, 0);
+    // wave10 G7b-1: the new program's name; dumpable again
+    crate::lx::proc::attrs_on_exec(tid, tgid);
     super::limits::on_exec(tgid);
     super::ptrace::on_exec(tgid, tid);
     super::perf::on_exec(tgid);

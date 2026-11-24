@@ -2620,6 +2620,111 @@ pub const LX_TTY_NOTMINE: i64 = -4111;
 pub const LX_OBJ_PROCID: u64 = 75;
 // wave9 G7a end
 
+// wave10 G7b-1 begin: lx-proc, the process service, and its primitives (op 75)
+/// lx-proc's endpoint and service id are [`ENDPOINT_LX_PROC`] and [`LXS_PROC`].
+///
+/// `SYS_LX_OBJ(LX_OBJ_PROCID, req, sub, io)`: lx-proc (the host of [`LXS_PROC`] only, for
+/// one of its own requests `req`, whose caller is "the caller" below) runs sub-op `sub`
+/// (`LXP_*`) of the kernel's process-identity primitives (`src/lx/proc.rs`) with the
+/// [`LxProcIo`] at `io` in its own memory, read before and written back after. Returns 0
+/// or a count, or a negative errno; `EAGAIN` from a compare-and-set sub-op means "changed
+/// meanwhile: decide again". The kernel decides nothing here: lx-proc's rules did.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LxProcIo {
+    /// Words in and out (per sub-op).
+    pub a: [u64; 16],
+    /// Bytes in and out (names).
+    pub b: [u8; 256],
+}
+
+impl LxProcIo {
+    /// All zero.
+    pub const EMPTY: LxProcIo = LxProcIo { a: [0; 16], b: [0; 256] };
+}
+
+/// `a[0]` thread (0: the caller's; with `a[1]` = 1 a process, its first live thread) →
+/// `a[0]` tid, `a[1]` tgid, `a[2..5]` uid/euid/suid,
+/// `a[5..8]` gid/egid/sgid, `a[8]` effective capabilities, `a[9]` permitted, `a[10]`
+/// `LXP_F_*`, `a[11]` dumpable, `a[12]` parent-death signal, `a[13]` live threads of its
+/// process, `a[14]` supplementary groups, `b[0..16]` `comm`.
+pub const LXP_TASK_GET: u64 = 1;
+/// `a[0]` thread (0: the caller's), `a[1..4]` uid/euid/suid, `a[4..7]` gid/egid/sgid: sets
+/// them (the capability rules of a uid change apply).
+pub const LXP_CREDS_SET: u64 = 2;
+/// `a[0]` process (0: the caller's), `a[1]` buffer of `u32` in lx-proc's memory, `a[2]` its
+/// capacity: the supplementary groups (their number; `EINVAL` if more than fit).
+pub const LXP_GROUPS_GET: u64 = 3;
+/// `a[0]` process (0: the caller's), `a[1]` buffer of `u32`, `a[2]` count: sets them.
+pub const LXP_GROUPS_SET: u64 = 4;
+/// `a[0]` process (0: the caller's) → `a[0]` pid, `a[1]` ppid, `a[2]` pgid, `a[3]` sid,
+/// `a[4]` zombie, `a[5]` 1 if a process other than it (zombies too) is in group `pid`.
+/// `ESRCH`: no such process.
+pub const LXP_PGRP_GET: u64 = 5;
+/// `a[0]` process, `a[1]` its pgid and `a[2]` its sid as lx-proc saw them, `a[3]` the new
+/// pgid, `a[4]` 1: it leads a new session, `a[5]` 1: only while no other process is in
+/// group `a[0]`. `EAGAIN`: changed meanwhile; `EPERM`: the group is used.
+pub const LXP_PGRP_SET: u64 = 6;
+/// `a[0]` process (0: the caller's), `a[1]` resource → `a[0]` soft, `a[1]` hard, `a[2]`
+/// the descriptor table's size (`fs.nr_open`).
+pub const LXP_LIMIT_GET: u64 = 7;
+/// `a[0]` process, `a[1]` resource, `a[2..4]` the old (soft, hard) lx-proc saw, `a[4..6]`
+/// the new ones. `EAGAIN`: changed meanwhile.
+pub const LXP_LIMIT_SET: u64 = 8;
+/// `a[0]` thread (0: the caller's), `a[1]` `LXP_ATTR_*`, `a[2]` value (`LXP_ATTR_CAPS`:
+/// `a[2]` effective, `a[3]` permitted; `LXP_ATTR_COMM`: the name in `b[0..16]`).
+pub const LXP_ATTR_SET: u64 = 9;
+/// `a[0]` process (0: the caller's) → `a[0..8]` its namespace ids (user, pid,
+/// pid_for_children, net, mnt, ipc, uts, cgroup), `a[8]` its user namespace's owner
+/// (0: the initial one), `a[9]` bit 0: that user namespace lies within the
+/// caller's, bit 1: it is the caller's; `a[10]` its PID namespace against the caller's: 0
+/// the same, 1 below it, 2 neither; `a[11]` live threads; `a[12]` 1: `setgroups` is denied
+/// in its user namespace.
+pub const LXP_NS_GET: u64 = 10;
+/// `a[0]` a descriptor of the caller (a pidfd or a `/proc/<pid>/ns/*` file), `a[1]` setns's
+/// `nstype` → `a[0]` the process it names, `a[1]` the `CLONE_NEW*` kinds to join.
+pub const LXP_NS_FD: u64 = 11;
+/// `a[0]` a process id as the caller names it (its PID namespace) → `a[0]` the system-wide
+/// id of its process. `ESRCH`: none (live).
+pub const LXP_PID_GET: u64 = 12;
+/// The caller's UTS namespace → `a[0]` its id, `b[0..65]` host name, `b[65..130]` domain
+/// name (NUL-padded).
+pub const LXP_UTS_GET: u64 = 14;
+/// `a[0]` 0: host name, 1: domain name; `a[1]` length, `b` the name: sets it in the
+/// caller's UTS namespace.
+pub const LXP_UTS_SET: u64 = 15;
+/// `a[0]` a system call number, `a[1]` the key of what lx-proc checked (0: nothing in
+/// particular; `setns`: `proc_rules::setns_key` of target, kinds and its namespace ids;
+/// `unshare`: the flags): lx-proc allowed the caller's call; it answers with a redirect to
+/// the kernel, whose code then skips its own permission checks once, and only if the call
+/// still means the same key. `EAGAIN`: the marks' table is full.
+pub const LXP_APPROVE: u64 = 16;
+/// `LXP_TASK_GET` flag: `PR_SET_KEEPCAPS`.
+pub const LXP_F_KEEPCAPS: u64 = 1;
+/// `LXP_TASK_GET` flag: the capabilities hold in a user namespace of its own only.
+pub const LXP_F_USERNS: u64 = 2;
+/// `LXP_TASK_GET` flag: `no_new_privs`.
+pub const LXP_F_NNP: u64 = 4;
+/// `LXP_TASK_GET` flag: `PR_SET_CHILD_SUBREAPER`.
+pub const LXP_F_SUBREAPER: u64 = 8;
+/// `LXP_TASK_GET` flag: a service process (Hydra's own: never another process's target).
+pub const LXP_F_SERVICE: u64 = 16;
+/// `LXP_ATTR_SET`: `comm` (`b[0..16]`).
+pub const LXP_ATTR_COMM: u64 = 1;
+/// `LXP_ATTR_SET`: dumpable (0, 1, 2).
+pub const LXP_ATTR_DUMPABLE: u64 = 2;
+/// `LXP_ATTR_SET`: keep capabilities across a uid change.
+pub const LXP_ATTR_KEEPCAPS: u64 = 3;
+/// `LXP_ATTR_SET`: `no_new_privs` (only ever set).
+pub const LXP_ATTR_NNP: u64 = 4;
+/// `LXP_ATTR_SET`: parent-death signal.
+pub const LXP_ATTR_PDEATHSIG: u64 = 5;
+/// `LXP_ATTR_SET`: child subreaper.
+pub const LXP_ATTR_SUBREAPER: u64 = 6;
+/// `LXP_ATTR_SET`: capability sets.
+pub const LXP_ATTR_CAPS: u64 = 7;
+// wave10 G7b-1 end
+
 // wave9 G6b-3 begin: Landlock and ABAC checks in the file service
 /// `SYS_LX_OBJ` op (the file service's host only): `LX_FH_LANDLOCK(req, buf, cap)` writes
 /// the Landlock domain of request `req`'s caller to `buf`: [`LxLlHead`], then per layer a

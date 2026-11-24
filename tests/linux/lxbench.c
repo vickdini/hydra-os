@@ -23,6 +23,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/utsname.h>
 #include <sys/uio.h>
 #include <sys/timerfd.h>
 #include <sys/eventfd.h>
@@ -63,6 +64,39 @@ static long probe_ep = 0x20;
 static double b_getpid(long n) {
     uint64_t t = now();
     for (long i = 0; i < n; i++) syscall(SYS_getpid);
+    return (double)(now() - t) / n;
+}
+/* wave10 G7b-1: the identity calls lx-proc serves, and getuid (it must not change) */
+static double b_getuid(long n) {
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) syscall(SYS_getuid);
+    return (double)(now() - t) / n;
+}
+static double b_setuid_self(long n) { /* setuid to its own id: the rule, then the setter */
+    uid_t u = getuid();
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) syscall(SYS_setuid, u);
+    return (double)(now() - t) / n;
+}
+static double b_prctl_get(long n) {
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) syscall(SYS_prctl, 3 /* PR_GET_DUMPABLE */, 0, 0, 0, 0);
+    return (double)(now() - t) / n;
+}
+static double b_prctl_name(long n) {
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) syscall(SYS_prctl, 15 /* PR_SET_NAME */, "lxbench", 0, 0, 0);
+    return (double)(now() - t) / n;
+}
+static double b_setpgid_self(long n) { /* into its own group (lxbench's own after the first) */
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) syscall(SYS_setpgid, 0, 0);
+    return (double)(now() - t) / n;
+}
+static double b_uname(long n) {
+    struct utsname u;
+    uint64_t t = now();
+    for (long i = 0; i < n; i++) syscall(SYS_uname, &u);
     return (double)(now() - t) / n;
 }
 static double b_getpgrp(long n) { /* not on the lock-free fast path: the normal locked path */
@@ -738,6 +772,12 @@ struct bench { const char *name; bench_fn fn; long n; int probe; };
 static struct bench benches[] = {
     {"getpid", b_getpid, 200000, 0},
     {"getpgrp", b_getpgrp, 200000, 0},
+    {"getuid", b_getuid, 200000, 0},
+    {"setuid_self", b_setuid_self, 100000, 0},
+    {"prctl_get", b_prctl_get, 100000, 0},
+    {"prctl_name", b_prctl_name, 100000, 0},
+    {"setpgid_self", b_setpgid_self, 100000, 0},
+    {"uname", b_uname, 100000, 0},
     {"clock_gettime", b_clock, 200000, 0},
     {"pread_4k_cached", b_read_cached, 50000, 0},
     {"pread_64k_cached", b_read_64k, 5000, 0},

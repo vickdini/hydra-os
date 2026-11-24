@@ -386,6 +386,226 @@ pub fn call_ctx(tgid: u64, wait: bool) -> Result<Option<CallCtx>, ()> {
     Ok(procs.get(&tgid).map(|p| CallCtx { pgid: p.pgid, sid: p.sid, mnt: p.ns.mnt, net: p.ns.net, pid: p.ns.pid, user: p.ns.user.is_some() }))
 }
 
+// wave10 G7b-1 begin: what lx-proc needs beyond 7a's primitives
+// ----------------------------------------------------------------------
+// Compare-and-set (lx-proc decides outside the table's lock)
+// ----------------------------------------------------------------------
+
+/// "Changed meanwhile: decide again" (`EAGAIN`).
+pub const CHANGED: i64 = -11;
+
+/// Process `pid`'s group and session, with whether a process other than it (zombies too)
+/// is in group `pid` (what `setsid`'s rule asks), under one hold of the table.
+pub fn task_pgrp_probe(pid: u64) -> Option<(Pgrp, bool)> {
+    let procs = PROCS.lock();
+    let p = procs.get(&pid)?;
+    let me = Pgrp { pid: p.pid, ppid: p.ppid, pgid: p.pgid, sid: p.sid, zombie: p.zombie };
+    let used = procs.values().any(|q| q.pgid == pid && q.pid != pid);
+    Some((me, used))
+}
+
+/// Sets process `pid`'s group to `pgid` (and a new session with `new_session`) only if its
+/// group and session are still `old` (`(pgid, sid)`), and, with `only_unused`, no other
+/// process is in group `pid`: 0, `ESRCH`, [`CHANGED`], or `EPERM` (the group is used).
+pub fn task_pgrp_cas(pid: u64, old: (u64, u64), pgid: u64, new_session: bool, only_unused: bool) -> i64 {
+    let mut procs = PROCS.lock();
+    match procs.get(&pid) {
+        None => return -3,
+        Some(p) if (p.pgid, p.sid) != old => return CHANGED,
+        Some(_) => {}
+    }
+    if only_unused && procs.values().any(|q| q.pgid == pid && q.pid != pid) {
+        return -1;
+    }
+    let Some(p) = procs.get_mut(&pid) else { return -3 };
+    p.pgid = pgid;
+    if new_session {
+        p.sid = pid;
+    }
+    0
+}
+
+/// Sets limit `res` of process `tgid` to `new` only if it is still `old`: 0, `EINVAL` (no
+/// such resource) or [`CHANGED`].
+pub fn task_limits_cas(tgid: u64, res: usize, old: (u64, u64), new: (u64, u64)) -> i64 {
+    match task_limits_update(tgid, res, new, |cur| if cur == old { Ok(()) } else { Err(CHANGED) }) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+// ----------------------------------------------------------------------
+// prctl's attributes (`comm`, dumpable, parent-death signal, subreaper)
+// ----------------------------------------------------------------------
+
+/// A thread's attributes set by `prctl` (absent: the defaults).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ThreadAttrs {
+    /// Its process.
+    pub tgid: u64,
+    /// `PR_SET_NAME` (`None`: the executable's name).
+    pub comm: Option<[u8; 16]>,
+    /// `PR_SET_PDEATHSIG` (0: none).
+    pub pdeathsig: u32,
+}
+
+/// A process's attributes set by `prctl`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcAttrs {
+    /// `PR_SET_DUMPABLE` (0, 1, 2; 1 by default).
+    pub dumpable: u8,
+    /// `PR_SET_CHILD_SUBREAPER`.
+    pub subreaper: bool,
+}
+
+impl Default for ProcAttrs {
+    fn default() -> Self {
+        ProcAttrs { dumpable: 1, subreaper: false }
+    }
+}
+
+/// By thread id.
+static TATTRS: spin::Mutex<alloc::collections::BTreeMap<u64, ThreadAttrs>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+/// By process id.
+static PATTRS: spin::Mutex<alloc::collections::BTreeMap<u64, ProcAttrs>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Thread `tid`'s attributes.
+pub fn thread_attrs(tid: u64) -> ThreadAttrs {
+    TATTRS.lock().get(&tid).copied().unwrap_or_default()
+}
+
+/// Process `tgid`'s attributes.
+pub fn proc_attrs(tgid: u64) -> ProcAttrs {
+    PATTRS.lock().get(&tgid).copied().unwrap_or_default()
+}
+
+/// The name `PR_SET_NAME` gave thread `tid` (`None`: none; `/proc` shows the executable's).
+pub fn comm_of(tid: u64) -> Option<[u8; 16]> {
+    TATTRS.lock().get(&tid).and_then(|a| a.comm)
+}
+
+/// Thread `tid`'s `comm`: its `PR_SET_NAME` name, else the file name of `exe` (at most 15
+/// bytes), NUL-padded.
+pub fn comm_or_exe(tid: u64, exe: &str) -> [u8; 16] {
+    if let Some(c) = comm_of(tid) {
+        return c;
+    }
+    let mut out = [0u8; 16];
+    let name = exe.rsplit('/').next().unwrap_or("").as_bytes();
+    let n = name.len().min(15);
+    out[..n].copy_from_slice(&name[..n]);
+    out
+}
+
+/// Changes thread `tid`'s (of process `tgid`) attributes with `f`.
+pub fn thread_attrs_set(tid: u64, tgid: u64, f: impl FnOnce(&mut ThreadAttrs)) {
+    let mut t = TATTRS.lock();
+    let a = t.entry(tid).or_insert(ThreadAttrs { tgid, ..Default::default() });
+    a.tgid = tgid;
+    f(a);
+}
+
+/// Changes process `tgid`'s attributes with `f`.
+pub fn proc_attrs_set(tgid: u64, f: impl FnOnce(&mut ProcAttrs)) {
+    f(PATTRS.lock().entry(tgid).or_default());
+}
+
+/// A new process `child` of thread `parent_tid` in process `parent`: it starts with the
+/// parent thread's name and the parent's dumpable flag (no parent-death signal, no
+/// subreaper: not inherited).
+pub fn attrs_on_fork(parent_tid: u64, parent: u64, child: u64) {
+    if let Some(comm) = comm_of(parent_tid) {
+        thread_attrs_set(child, child, |a| a.comm = Some(comm));
+    }
+    let d = proc_attrs(parent).dumpable;
+    if d != 1 {
+        proc_attrs_set(child, |a| a.dumpable = d);
+    }
+}
+
+/// Thread `tid` of `tgid` ran `execve`: its name becomes the new executable's (Linux sets
+/// `comm` at exec) and the process is dumpable again; the parent-death signal stays.
+pub fn attrs_on_exec(tid: u64, tgid: u64) {
+    if let Some(a) = TATTRS.lock().get_mut(&tid) {
+        a.comm = None;
+    }
+    if let Some(p) = PATTRS.lock().get_mut(&tgid) {
+        p.dumpable = 1;
+    }
+}
+
+/// Process `tgid` ended: its records go.
+pub fn attrs_on_exit(tgid: u64) {
+    TATTRS.lock().retain(|_, a| a.tgid != tgid);
+    PATTRS.lock().remove(&tgid);
+}
+
+// ----------------------------------------------------------------------
+// Calls lx-proc allowed, run by the kernel's code without its own check
+// ----------------------------------------------------------------------
+
+/// Approvals in flight at once (one per thread; a thread has at most one call in flight).
+pub const APPROVALS: usize = 64;
+
+/// `(thread, call number, key)` lx-proc approved ([`approve`]); taken by
+/// [`take_approval_mark`], dropped by [`clear_approval`].
+static APPROVED: spin::Mutex<[(u64, u64, u64); APPROVALS]> = spin::Mutex::new([(0, 0, 0); APPROVALS]);
+
+/// lx-proc allowed thread `tid`'s call `nr`, bound to `key` (what it checked: 0 for calls
+/// bound to nothing, [`rules::setns_key`] for `setns`, the flags for `unshare`); it answers
+/// with a redirect to the kernel. `false`: the table is full (no other thread's mark is
+/// ever replaced; lx-proc answers `EAGAIN`).
+pub fn approve(tid: u64, nr: u64, key: u64) -> bool {
+    if tid == 0 {
+        return false;
+    }
+    let mut a = APPROVED.lock();
+    match a.iter().position(|e| e.0 == tid).or_else(|| a.iter().position(|e| e.0 == 0)) {
+        Some(i) => {
+            a[i] = (tid, nr, key);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Takes thread `tid`'s mark (it goes in any case): the key lx-proc approved call `nr` with,
+/// `None` when it approved no such call. The kernel's code calls it first thing, then runs
+/// without its own checks only if the key matches what it is about to do.
+pub fn take_approval_mark(tid: u64, nr: u64) -> Option<u64> {
+    if tid == 0 {
+        return None;
+    }
+    let mut a = APPROVED.lock();
+    let mut got = None;
+    for e in a.iter_mut().filter(|e| e.0 == tid) {
+        if e.1 == nr {
+            got = Some(e.2);
+        }
+        *e = (0, 0, 0);
+    }
+    got
+}
+
+/// Whether lx-proc approved thread `tid`'s call `nr` (bound to nothing: key 0); the mark
+/// goes.
+pub fn take_approval(tid: u64, nr: u64) -> bool {
+    take_approval_mark(tid, nr) == Some(0)
+}
+
+/// Drops thread `tid`'s mark (its forwarded call returned without reaching the kernel's
+/// code, or the thread ended).
+pub fn clear_approval(tid: u64) {
+    if tid == 0 {
+        return;
+    }
+    let mut a = APPROVED.lock();
+    for e in a.iter_mut().filter(|e| e.0 == tid) {
+        *e = (0, 0, 0);
+    }
+}
+// wave10 G7b-1 end
+
 // ----------------------------------------------------------------------
 // Policy (moves to lx-proc in wave 10)
 // ----------------------------------------------------------------------

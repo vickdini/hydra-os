@@ -365,14 +365,19 @@ fn plan_new(ns: &Ns, flags: u64, unshare: bool) -> alloc::vec::Vec<NsChange> {
 /// # Returns
 /// 0 on success, or a negative errno.
 pub fn sys_unshare(flags: u64) -> i64 {
+    let (tid, pid) = super::proc::current_ids();
+    // wave10 G7b-1: lx-proc decided these very flags (it ran the permission check below,
+    // then answered with a redirect to the kernel): that check is skipped. The mark is
+    // taken first, so no early return leaves it behind.
+    let approved = mech::take_approval_mark(tid, 272) == Some(flags);
     const ALLOWED: u64 = CLONE_NEW_ALL | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_VM | CLONE_THREAD | CLONE_SYSVSEM;
     if flags & !ALLOWED != 0 {
         return EINVAL;
     }
-    let (_, pid) = super::proc::current_ids();
     let threads = super::proc::thread_ids_of(pid).len();
     // A new user namespace (and unsharing threads, signal handlers or memory) needs a
-    // single-threaded process
+    // single-threaded process (wave10 G7b-1: checked here also when approved: a thread
+    // may have been made since lx-proc looked)
     if threads > 1 && flags & (CLONE_NEWUSER | CLONE_THREAD | CLONE_SIGHAND | CLONE_VM) != 0 {
         return EINVAL;
     }
@@ -380,7 +385,7 @@ pub fn sys_unshare(flags: u64) -> i64 {
     if ns_flags == 0 {
         return 0;
     }
-    if ns_flags & !CLONE_NEWUSER != 0 && ns_flags & CLONE_NEWUSER == 0 && !has_ns_admin() {
+    if !approved && ns_flags & !CLONE_NEWUSER != 0 && ns_flags & CLONE_NEWUSER == 0 && !has_ns_admin() {
         return EPERM;
     }
     let user = if ns_flags & CLONE_NEWUSER != 0 {
@@ -662,6 +667,70 @@ fn user_ns_within(inner: &Option<Arc<UserNs>>, outer: &Option<Arc<UserNs>>) -> b
     }
 }
 
+// wave10 G7b-1 begin: what lx-proc's setns/unshare rules need (`LXP_NS_FD`, `LXP_NS_GET`)
+/// The process and the namespace kinds `setns(fd, nstype)` names in descriptor table `fds`:
+/// a pidfd's process (`nstype` the kinds), or a `/proc/<pid>/ns/*` file's.
+pub fn ns_fd_target(fds: &crate::fs::FdTable, fd: u64, nstype: u64) -> Result<(u64, u64), i64> {
+    if let Some(pid) = super::pidfd::pid_in(fds, fd) {
+        if nstype == 0 || nstype & !CLONE_NEW_ALL != 0 {
+            return Err(EINVAL);
+        }
+        return Ok((pid, nstype));
+    }
+    let path = match fds.get(fd as usize) {
+        Some(crate::fs::FileDescriptor::File { path, .. }) => path.clone(),
+        Some(_) => return Err(EINVAL),
+        None => return Err(EBADF),
+    };
+    let Some((pid, file)) = path.strip_prefix("/proc/").and_then(split) else { return Err(EINVAL) };
+    let Some(flag) = file.strip_prefix("ns/").and_then(flag_of) else { return Err(EINVAL) };
+    if nstype != 0 && nstype != flag {
+        return Err(EINVAL);
+    }
+    Ok((pid, flag))
+}
+
+/// What `setns`/`unshare`'s rules ask about process `target` against process `caller`
+/// (`LXP_NS_GET`'s words): its ids (user, pid, pid_for_children, net, mnt, ipc, uts,
+/// cgroup), its user namespace's owner (0: the initial one), bit 0 "its user namespace lies
+/// within the caller's" | bit 1 "it is the caller's", its PID namespace against the
+/// caller's (0 the same, 1 below, 2 neither), its live threads, `setgroups` denied.
+pub fn ns_facts(target: u64, caller: u64) -> Option<[u64; 13]> {
+    let theirs = ns_of(target)?;
+    let mine = ns_of(caller).unwrap_or_default();
+    let ids = mech::NsIds::of(&theirs);
+    let same = match (&theirs.user, &mine.user) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    };
+    let within = user_ns_within(&theirs.user, &mine.user);
+    let pid_rel = if theirs.pid == mine.pid {
+        0
+    } else if theirs.pid_inits.len() > mine.pid_inits.len() && theirs.pid_inits.starts_with(&mine.pid_inits) {
+        1
+    } else {
+        2
+    };
+    let deny = theirs.user.as_ref().is_some_and(|u| u.setgroups_deny.load(Ordering::Relaxed));
+    Some([
+        ids.user,
+        ids.pid,
+        ids.pid_for_children,
+        ids.net,
+        ids.mnt,
+        ids.ipc,
+        ids.uts,
+        ids.cgroup,
+        theirs.user.as_ref().map_or(0, |u| u.owner_uid as u64),
+        within as u64 | (same as u64) << 1,
+        pid_rel,
+        super::proc::thread_ids_of(target).len() as u64,
+        deny as u64,
+    ])
+}
+// wave10 G7b-1 end
+
 /// `setns(2)`: joins the namespaces of a `/proc/<pid>/ns/*` file or of a pidfd's process.
 ///
 /// # Arguments
@@ -672,30 +741,34 @@ fn user_ns_within(inner: &Option<Arc<UserNs>>, outer: &Option<Arc<UserNs>>) -> b
 /// # Returns
 /// 0 on success, or a negative errno.
 pub fn sys_setns(fd: u64, nstype: u64) -> i64 {
-    let (target, kinds) = if let Ok(pid) = super::pidfd::pid_of(fd) {
-        if nstype == 0 || nstype & !CLONE_NEW_ALL != 0 {
-            return EINVAL;
-        }
-        (pid, nstype)
-    } else {
-        let path = crate::task::with_current_fds_mut(|fds| match fds.get(fd as usize) {
-            Some(crate::fs::FileDescriptor::File { path, .. }) => Some(path.clone()),
-            _ => None,
-        });
-        let Some(path) = path else {
-            return if crate::task::with_current_fds_mut(|fds| fds.get(fd as usize).is_none()) { EBADF } else { EINVAL };
-        };
-        let Some((pid, file)) = path.strip_prefix("/proc/").and_then(split) else { return EINVAL };
-        let Some(flag) = file.strip_prefix("ns/").and_then(flag_of) else { return EINVAL };
-        if nstype != 0 && nstype != flag {
-            return EINVAL;
-        }
-        (pid, flag)
+    // wave10 G7b-1: lx-proc's approval, taken first (no early return leaves it behind)
+    let (tid, me) = super::proc::current_ids();
+    let mark = mech::take_approval_mark(tid, 308);
+    // wave10 G7b-1: the descriptor's target, shared with lx-proc's `LXP_NS_FD`
+    let (target, kinds) = match crate::task::with_current_fds_mut(|fds| ns_fd_target(fds, fd, nstype)) {
+        Ok(v) => v,
+        Err(e) => return e,
     };
     let Some(theirs) = ns_of(target) else { return ESRCH };
-    let (_, me) = super::proc::current_ids();
     let mine = current_ns();
-    if kinds & CLONE_NEWUSER != 0 {
+    // wave10 G7b-1: lx-proc decided the checks below up to the PID rule for exactly this
+    // target, these kinds and the target's namespaces as they were (the key): only then are
+    // they skipped. A descriptor changed meanwhile (another thread's dup2) names something
+    // else, and the kernel's own checks run.
+    let ids = mech::NsIds::of(&theirs);
+    let key = mech::rules::setns_key(target, kinds, &[ids.user, ids.pid, ids.pid_for_children, ids.net, ids.mnt, ids.ipc, ids.uts, ids.cgroup]);
+    let approved = mark == Some(key);
+    // (the single-thread rule of a user namespace change is checked again: a thread may
+    // have been made since lx-proc looked)
+    let user_differs = !match (&theirs.user, &mine.user) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    };
+    if approved && kinds & CLONE_NEWUSER != 0 && user_differs && super::proc::thread_ids_of(me).len() > 1 {
+        return EINVAL;
+    }
+    if kinds & CLONE_NEWUSER != 0 && !approved {
         let same = match (&theirs.user, &mine.user) {
             (None, None) => true,
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -718,7 +791,7 @@ pub fn sys_setns(fd: u64, nstype: u64) -> i64 {
             }
         }
     }
-    if kinds & !CLONE_NEWUSER != 0 && !has_ns_admin() && kinds & CLONE_NEWUSER == 0 {
+    if !approved && kinds & !CLONE_NEWUSER != 0 && !has_ns_admin() && kinds & CLONE_NEWUSER == 0 {
         return EPERM;
     }
     // A PID namespace is joined for children only, and only one at or below the caller's

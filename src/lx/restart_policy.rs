@@ -128,6 +128,12 @@ impl Ladder {
         Decision { class: self.configured, reset_kept: false, restart: true }
     }
 
+    /// wave10 G7b-1: when the window of the next crash counts from (`None`: never
+    /// restarted), for the log line of each decision.
+    pub fn last_restart_ms(&self) -> Option<u64> {
+        self.last_restart_ms
+    }
+
     /// The new instance started at `now_ms` (the window counts from here).
     pub fn restarted(&mut self, now_ms: u64) {
         self.last_restart_ms = Some(now_ms);
@@ -238,6 +244,17 @@ pub fn idempotent(nr: u64, args: &[u64; 6]) -> bool {
         // sched_getaffinity, prlimit64 without a new limit
         63 | 97 | 98 | 99 | 115 | 118 | 120 | 121 | 124 | 125 | 140 | 204 => true,
         302 => args[2] == 0,
+        // wave10 G7b-1 begin: lx-proc's changes that come out the same when made twice (it
+        // keeps nothing: the kernel's state is the truth): the setuid family and setgroups
+        // (absolute values: once made, they pass the unprivileged rule again), setpgid,
+        // setfsuid/setfsgid, setrlimit, sethostname/setdomainname, acct; prctl's sets and gets
+        // of names, dumpable, parent-death signal, keepcaps, no_new_privs, subreaper; syslog's
+        // reads that take nothing (3 READ_ALL, 9 SIZE_UNREAD, 10 SIZE_BUFFER, 0/1, 5 CLEAR).
+        // Not setsid (a leader the second time), unshare (new namespaces again), setns.
+        105 | 106 | 113 | 114 | 117 | 119 | 116 | 109 | 122 | 123 | 160 | 170 | 171 | 163 => true,
+        157 => matches!(args[0], 1 | 2 | 3 | 4 | 7 | 8 | 15 | 16 | 36 | 37 | 38 | 39),
+        103 => matches!(args[0], 0 | 1 | 3 | 5 | 9 | 10),
+        // wave10 G7b-1 end
         _ => false,
     }
 }

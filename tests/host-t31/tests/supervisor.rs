@@ -76,7 +76,7 @@ fn init_lists_every_service_once_and_wires_their_endpoints() {
     let names: Vec<&str> = supervisor::get_service_snapshots().iter().map(|s| s.name).collect();
     assert_eq!(
         names,
-        ["ahci_driver", "ata_driver", "usb_driver", "zfs_server", "net_driver", "net_server", "linux_server", "lx_sec", "lx_net", "lx_ipc", "vfs_server", "display_server", "svc_test", "input_server", "tty_server", "sound_driver", "sound_server"]
+        ["ahci_driver", "ata_driver", "usb_driver", "zfs_server", "net_driver", "net_server", "linux_server", "lx_sec", "lx_proc", "lx_net", "lx_ipc", "vfs_server", "display_server", "svc_test", "input_server", "tty_server", "sound_driver", "sound_server"]
     );
     // wave8 GX2: lx-net is net-server's client, both services have their hooks
     let log0 = fake::SVC_LOG.lock().unwrap().clone();
