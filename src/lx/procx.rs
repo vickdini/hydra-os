@@ -98,7 +98,9 @@ mod glue {
             if pid > u32::MAX as u64 || is_service(pid) != Some(false) || !visible(pid, c.init, x.pid) {
                 return ESRCH;
             }
-            if guarded(what) {
+            // (`exe` and `root` stay readable by everyone, as the kernel's copy had them:
+            // KWin reads a Wayland client's `exe` to decide which protocols it may bind)
+            if guarded(what) && !(what == LX_PX_LINK && x.arg != 1) {
                 if let Err(e) = readable(c, pid) {
                     return e;
                 }

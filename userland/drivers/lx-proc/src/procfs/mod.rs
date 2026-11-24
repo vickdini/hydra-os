@@ -156,6 +156,7 @@ pub fn redirected(cx: &Cx) -> Answer {
     }
 }
 
+
 /// The `stat` family: a served file is a read-only regular file; `/proc/self` a link
 /// (`lstat`; followed it is a directory: the kernel's).
 fn stat(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
@@ -222,6 +223,9 @@ fn stat(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
 fn size_of(f: File) -> u64 {
     match f {
         File::Static(t) => t.len() as u64,
+        // (wave11 GP: the files added in wave 11 say 0, as Linux's `/proc`)
+        File::Filesystems | File::Swaps | File::Locks | File::BootId | File::Uuid | File::Asound(_) | File::FdInfo { .. } => 0,
+        File::Pid { file: PidFile::Auxv | PidFile::Cgroup | PidFile::Mountinfo | PidFile::Mounts | PidFile::UidMap | PidFile::GidMap | PidFile::Setgroups | PidFile::OomScoreAdj | PidFile::OomScore, .. } => 0,
         _ => GEN_SIZE,
     }
 }
@@ -798,7 +802,9 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], target: Target) -> Option<i64> {
     d.gid = gid;
     d.ino = path::ino_of(obj, tail);
     d.dev = LX_PSEUDO_DEV_PROC;
-    d.size = size_of(file);
+    // (wave11 GP: an open file's `fstat` says the length of its text: D-Bus reads
+    // `/proc/self/fdinfo/N` up to `st_size` and takes an early end as an error)
+    d.size = text.len() as u64;
     let n = shown.len().min(LX_OBJ_NAME_MAX);
     d.name[..n].copy_from_slice(&shown.as_bytes()[..n]);
     d.name_len = n as u32;

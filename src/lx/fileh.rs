@@ -985,6 +985,7 @@ fn proc_dirfd_nr(nr: u64) -> bool {
 
 /// Whether call `nr`'s directory descriptor `fd` (in table `t`) is a `/proc` directory
 /// lx-proc listed (a kernel-held directory snapshot).
+#[cfg(target_os = "uefi")]
 fn at_proc_dir(nr: u64, t: &crate::fs::FdTable, fd: u64) -> bool {
     proc_dirfd_nr(nr)
         && (fd as i32) >= 0
@@ -996,6 +997,17 @@ fn at_proc_dir(nr: u64, t: &crate::fs::FdTable, fd: u64) -> bool {
 /// [`LX_PROC_AT_DIRFD`](crate::ipc::protocol::LX_PROC_AT_DIRFD): lx-proc reads the
 /// descriptor's path). `None`: not such a call (an absolute or empty path, another
 /// descriptor); `Some(None)`: the kernel answers.
+#[cfg(not(target_os = "uefi"))]
+fn at_proc_dir(_nr: u64, _t: &crate::fs::FdTable, _fd: u64) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "uefi"))]
+fn proc_dirfd_call(_nr: u64, _args: &[u64; 6]) -> Option<Option<i64>> {
+    None
+}
+
+#[cfg(target_os = "uefi")]
 fn proc_dirfd_call(nr: u64, args: &[u64; 6]) -> Option<Option<i64>> {
     use crate::ipc::protocol::{LXS_PROC, LX_PROC_AT_DIRFD, LX_VFS_PSEUDO_PROC};
     if !proc_dirfd_nr(nr) || !crate::task::with_current_fds_mut(|t| at_proc_dir(nr, t, args[0])) {

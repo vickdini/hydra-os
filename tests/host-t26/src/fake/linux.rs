@@ -121,6 +121,10 @@ pub mod chardev {
         fn as_server(&self) -> Option<&crate::lx::obj::ServerObject> {
             None
         }
+        // wave11 GP: `/proc` snapshots (none on the host)
+        fn getdents64(&self, _count: usize) -> Option<Result<Vec<u8>, i64>> {
+            None
+        }
     }
 
     thread_local! {
@@ -371,6 +375,10 @@ pub mod ns {
     pub fn ns_link(rest: &str) -> Option<String> {
         let kind = rest.rsplit('/').next()?;
         Some(alloc::format!("{}:[4026531840]", kind))
+    }
+    // wave11 GP
+    pub fn ns_ino_of(_pid: u64, _kind: &str) -> Option<u64> {
+        Some(4026531840)
     }
     pub fn read_file(_rest: &str) -> String {
         String::from("         0          0 4294967295\n")

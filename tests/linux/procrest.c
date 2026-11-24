@@ -107,6 +107,12 @@ static void checks(void) {
     snprintf(p, sizeof p, "/proc/self/fdinfo/%d", f);
     CHECK(slurp(p, buf, sizeof buf) > 0, "read fdinfo");
     CHECK(strstr(buf, "pos:") && strstr(buf, "flags:") && strstr(buf, "mnt_id:"), "fdinfo fields: %s", buf);
+    { /* fstat's size of an open /proc file is its text's length (D-Bus reads up to it) */
+        int q = open(p, O_RDONLY);
+        struct stat qs;
+        CHECK(q >= 0 && fstat(q, &qs) == 0 && qs.st_size == (long)strlen(buf), "fdinfo st_size %ld vs %zu", (long)qs.st_size, strlen(buf));
+        if (q >= 0) close(q);
+    }
     close(f);
     CHECK(slurp("/proc/self/fdinfo/987", buf, sizeof buf) == -ENOENT, "fdinfo of a closed fd");
     CHECK(readlink("/proc/self/fd/987", l, sizeof l) < 0 && errno == ENOENT, "readlink closed fd");
