@@ -36,6 +36,12 @@ macro_rules! println {
 }
 
 pub mod arch {
+    /// *stub* (wave10 GV2: devices.rs writes the cpu ranges)
+    pub mod smp {
+        pub fn online() -> usize {
+            2
+        }
+    }
     /// *stub*
     pub mod pit {
         pub use crate::fake::{frequency_hz, now_ns, ticks};
