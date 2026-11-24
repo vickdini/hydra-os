@@ -104,6 +104,8 @@ pub mod proc;
 pub mod ptrace_rules;
 #[path = "../../../src/lx/trace.rs"]
 pub mod trace;
+/// *stub* (marks set, marks taken) of `crate::lx` (the forwarding is not here).
+pub static TRACE_MARKS: (core::sync::atomic::AtomicU64, core::sync::atomic::AtomicU64) = (core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0));
 // wave9 G6b-1 begin: *stub* the kernel's events for vfs-server's inotify/fanotify
 // (`lx::notifyfwd`): vfs-server wants none here
 pub mod notifyfwd {
