@@ -473,8 +473,8 @@ fn kernel_only(c: &LxCall) -> bool {
     // (wave7 G7-7: mounts of a namespace's table are the service's too now; in the initial
     // namespace a root or working directory on a mount is a FUSE one)
     // (wave8 GF: the initial namespace's mounts are fixed apart from FUSE, which is the
-    // kernel's: its mount calls stay here)
-    let mounts = c.mnt_ns == 0 && (c.root_mnt != 0 || c.cwd_mnt != 0 || is_mount_call(c.nr)) && !is_notify_call(c.nr); // (wave9 G6b-1)
+    // kernel's: its mount calls stay here; wave10 GV2: vfs-server decides them, FUSE too)
+    let mounts = c.mnt_ns == 0 && (c.root_mnt != 0 || c.cwd_mnt != 0) && !is_notify_call(c.nr); // (wave9 G6b-1)
     if hit == 0 && !mounts {
         return false;
     }
@@ -1412,6 +1412,52 @@ fn tmem(sub: u64, a: u64, b: u64) -> i64 {
 }
 // wave9 GM end
 
+// wave10 GV2 begin: the initial namespace's FUSE mounts, decided by vfs-server
+/// [`crate::ipc::protocol::LX_FH_NS0FUSE`] sub-op `sub` with argument `a`; `own`: whether a
+/// request is the calling service's.
+fn ns0fuse(sub: u64, a: u64, own: &dyn Fn(u64) -> bool) -> i64 {
+    use crate::ipc::protocol::{LxNs0Fuse, LX_NS0FUSE_ADD, LX_NS0FUSE_NAME_MAX, LX_NS0FUSE_REMOVE};
+    match sub {
+        LX_NS0FUSE_ADD => {
+            let Ok(raw) = crate::compat::linux::vfs::copy_in(a, core::mem::size_of::<LxNs0Fuse>()) else { return EFAULT };
+            // SAFETY: `raw` holds exactly one `LxNs0Fuse` (plain integers and bytes)
+            let m: LxNs0Fuse = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const LxNs0Fuse) };
+            if !own(m.req) {
+                return ESRCH;
+            }
+            let text = |b: &[u8], n: u32, max: usize| String::from_utf8_lossy(&b[..(n as usize).min(max)]).into_owned();
+            let p = &m.path[..(m.path_len as usize).min(LX_FH_PATH_MAX)];
+            let path = match m.path_kind {
+                LX_FHP_ABS => join_path("/", p),
+                LX_FHP_CWD => match client_fds(m.req) {
+                    Ok(fds) => join_path(&fds.lock().cwd_path, p),
+                    Err(e) => return e,
+                },
+                _ => return EINVAL,
+            };
+            crate::compat::linux::fuse::ns0_record(
+                m.mountpoint,
+                m.root,
+                path,
+                text(&m.fstype, m.fstype_len, LX_NS0FUSE_NAME_MAX),
+                text(&m.source, m.source_len, LX_NS0FUSE_NAME_MAX),
+                m.flags,
+                (m.uid, m.gid, m.other != 0),
+            );
+            0
+        }
+        LX_NS0FUSE_REMOVE => {
+            if crate::compat::linux::fuse::ns0_forget(a) {
+                0
+            } else {
+                ENOENT
+            }
+        }
+        _ => EINVAL,
+    }
+}
+// wave10 GV2 end
+
 /// `SYS_LX_OBJ` operations 32.. of service host `h` (called by `obj::obj_ctl`).
 pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
     // Only the file service's host
@@ -1438,6 +1484,7 @@ pub fn ctl(h: SvcId, op: u64, a: u64, b: u64, c: u64) -> i64 {
         crate::ipc::protocol::LX_FH_TMPFSID => tmpfsid(a),
         // wave8 GF end
         crate::ipc::protocol::LX_FH_TMEM => tmem(a, b, c), // wave9 GM
+        crate::ipc::protocol::LX_FH_NS0FUSE => ns0fuse(a, b, &own), // wave10 GV2
         LX_FH_INSTALL | LX_FH_CHDIR | LX_FH_CHROOT => {
             if !own(a) {
                 return ESRCH;

@@ -28,6 +28,7 @@ use hydra_rt::svcrt::{Answer, Cx};
 use hydra_rt::sys;
 
 use crate::calls::{self, ctxt};
+use crate::walk::Backend; // wave10 GV2
 use crate::mtab::CAP_SYS_CHROOT;
 use crate::perm::MAY_EXEC;
 use crate::proto::{LxFhDesc, LX_FH_CHROOT, LX_FH_CLAIM};
@@ -49,6 +50,8 @@ const ENOENT: i64 = -2;
 
 const EPERM: i64 = -1;
 const ENOTDIR: i64 = -20;
+const EINVAL: i64 = -22; // wave10 GV2
+const EBADF: i64 = -9; // wave10 GV2
 const EACCES: i64 = -13;
 
 /// The calls served here: chroot (wave7 G7-7: claimed again; see the module notes on
@@ -107,9 +110,9 @@ fn changes(cx: &Cx) -> Result<i64, i64> {
     if c.ll_dom != 0 {
         return Err(EPERM);
     }
-    // (the initial namespace: fixed layout and FUSE, the kernel's — it keeps those calls)
+    // (the initial namespace: fixed layout; wave10 GV2: its FUSE mounts are decided here)
     if c.mnt_ns == 0 {
-        return Err(calls::KERNEL);
+        return ns0(cx);
     }
     let _turn = TURN.lock();
     for attempt in 0..6 {
@@ -138,6 +141,149 @@ fn changes(cx: &Cx) -> Result<i64, i64> {
     TO_KERNEL.fetch_add(1, Ordering::Relaxed);
     Err(calls::KERNEL)
 }
+
+// wave10 GV2 begin: the initial namespace (fusermount3's FUSE mounts)
+/// `MS_REMOUNT`, `MS_BIND`, `MS_MOVE`.
+const MS_REMOUNT_BIND_MOVE: u64 = 32 | 4096 | 8192;
+/// `UMOUNT_NOFOLLOW`.
+const UMOUNT_NOFOLLOW: u64 = 8;
+
+/// `mount`, `umount2`, `pivot_root` in the initial namespace: its layout is fixed (`EPERM`,
+/// the kernel's rule) but for FUSE mounts, which fusermount3 makes and removes there
+/// (vfs-server is the FUSE client: it mounts the connection; the kernel's list is the
+/// write-through copy, `LX_FH_NS0FUSE`).
+fn ns0(cx: &Cx) -> Result<i64, i64> {
+    let c = &cx.c;
+    let admin = c.fs_flags & LX_FS_MNTADMIN != 0;
+    match cx.nr {
+        165 => ns0_mount(cx, admin),
+        166 => ns0_umount(cx, admin),
+        _ => Err(EPERM),
+    }
+}
+
+/// The `fd=`, `user_id=`, `group_id=`, `allow_other` of FUSE mount data (`rootmode=` must be
+/// there too), as the kernel's `fuse::options`.
+pub fn fuse_options(data: &str) -> Result<(i32, u32, u32, bool), i64> {
+    let (mut fd, mut rootmode, mut uid, mut gid, mut other) = (None, None, None, None, false);
+    for o in data.split(',') {
+        let (k, v) = o.split_once('=').unwrap_or((o, ""));
+        match k {
+            "fd" => fd = v.parse::<i32>().ok(),
+            "rootmode" => rootmode = u32::from_str_radix(v, 8).ok(),
+            "user_id" => uid = v.parse::<u32>().ok(),
+            "group_id" => gid = v.parse::<u32>().ok(),
+            "allow_other" => other = true,
+            _ => {}
+        }
+    }
+    match (fd, rootmode, uid, gid) {
+        (Some(f), Some(_), Some(u), Some(g)) => Ok((f, u, g, other)),
+        _ => Err(EINVAL),
+    }
+}
+
+/// `mount(source, target, fstype, flags, data)` in the initial namespace.
+fn ns0_mount(cx: &Cx, admin: bool) -> Result<i64, i64> {
+    use crate::proto::{LxNs0Fuse, LX_FHP_ABS, LX_FHP_CWD, LX_FH_NS0FUSE, LX_FH_PATH_MAX, LX_NS0FUSE_ADD, LX_NS0FUSE_NAME_MAX, LX_OBJ_FD, LX_OBJ_KIND_FUSE};
+    let c = &cx.c;
+    let a = cx.args;
+    let fstype = if a[2] != 0 { cx.user_cstr(a[2])? } else { alloc::vec::Vec::new() };
+    let fuse = fstype == b"fuse" || fstype.starts_with(b"fuse.");
+    if !fuse || a[3] & MS_REMOUNT_BIND_MOVE != 0 || !admin {
+        return Err(EPERM);
+    }
+    let path = calls::ctxt::path(cx, a[1], false)?;
+    let k = ctxt::call(c)?;
+    let start = k.start(c, &path)?;
+    let (n, attr, track) = match crate::walk::walk_track(&k.w, &k.who, start, &path, 0)? {
+        (crate::walk::Walked::Found { node, attr }, t) => (node, attr, t),
+        (crate::walk::Walked::Redirect(_), _) => return Err(calls::KERNEL),
+    };
+    if !attr.is_dir() {
+        return Err(ENOTDIR);
+    }
+    // (on a FUSE directory or another mount: the kernel's)
+    if n.mnt != 0 {
+        return Err(calls::KERNEL);
+    }
+    if a[4] == 0 {
+        return Err(EINVAL);
+    }
+    let data = cx.user_cstr(a[4])?;
+    let (fd, uid, gid, other) = fuse_options(core::str::from_utf8(&data).map_err(|_| EINVAL)?)?;
+    let source = if a[0] != 0 { cx.user_cstr(a[0]).unwrap_or_else(|_| fstype.clone()) } else { fstype.clone() };
+    // The caller's /dev/fuse: one of this service's objects
+    let v = sys::lx_obj(LX_OBJ_FD, c.id, fd as i64 as u64, 0).map_err(|_| EBADF)?;
+    if (v >> 32) as u32 & 0x3FFF_FFFF != LX_OBJ_KIND_FUSE {
+        return Err(EINVAL);
+    }
+    let who = crate::fuse::wire::Who { uid: c.euid, gid: c.egid, pid: c.tgid as u32 };
+    let conn = crate::fuse::mount_conn(v as u32, (uid, gid, other), who)?;
+    let root = crate::fuse::wire::ino(conn, 1);
+    let text = track.text();
+    let mut m = LxNs0Fuse {
+        req: c.id,
+        mountpoint: n.ino,
+        root,
+        flags: a[3],
+        uid,
+        gid,
+        other: other as u32,
+        path_kind: if track.abs { LX_FHP_ABS } else { LX_FHP_CWD },
+        path_len: text.len().min(LX_FH_PATH_MAX) as u32,
+        fstype_len: fstype.len().min(LX_NS0FUSE_NAME_MAX) as u32,
+        source_len: source.len().min(LX_NS0FUSE_NAME_MAX) as u32,
+        pad: 0,
+        path: [0; LX_FH_PATH_MAX],
+        fstype: [0; LX_NS0FUSE_NAME_MAX],
+        source: [0; LX_NS0FUSE_NAME_MAX],
+    };
+    m.path[..m.path_len as usize].copy_from_slice(&text[..m.path_len as usize]);
+    m.fstype[..m.fstype_len as usize].copy_from_slice(&fstype[..m.fstype_len as usize]);
+    m.source[..m.source_len as usize].copy_from_slice(&source[..m.source_len as usize]);
+    if let Err(e) = sys::lx_obj(LX_FH_NS0FUSE, LX_NS0FUSE_ADD, &m as *const LxNs0Fuse as u64, 0) {
+        crate::fuse::abort_conn(conn);
+        return Err(e);
+    }
+    hydra_rt::println!("[vfs-server] FUSE connection {} mounted on {} (initial namespace)", conn, core::str::from_utf8(&text).unwrap_or("?"));
+    Ok(0)
+}
+
+/// `umount2(target, flags)` in the initial namespace: only a FUSE mount (fusermount3 -u).
+fn ns0_umount(cx: &Cx, admin: bool) -> Result<i64, i64> {
+    use crate::proto::{LX_FH_NS0FUSE, LX_MNT_FUSE, LX_NS0FUSE_REMOVE};
+    let c = &cx.c;
+    let a = cx.args;
+    if !admin {
+        return Err(EPERM);
+    }
+    if a[1] & !(1 | 2 | 4 | UMOUNT_NOFOLLOW) != 0 {
+        return Err(EINVAL);
+    }
+    let path = calls::ctxt::path(cx, a[0], false)?;
+    let k = ctxt::call(c)?;
+    let start = k.start(c, &path)?;
+    // The mount point as the pool has it (not crossed into the mount)
+    let p = match crate::walk::walk_parent(&k.w, &k.who, start, &path)? {
+        crate::walk::ParentWalked::Found(p) => p,
+        crate::walk::ParentWalked::Redirect(_) => return Err(calls::KERNEL),
+    };
+    let Some(child) = p.child else { return Err(ENOENT) };
+    let rec = k.w.view.recs.iter().rev().find(|r| r.kind == LX_MNT_FUSE && r.mountpoint == child.ino && r.parent == child.mnt as u32);
+    // (a symbolic link to follow, or not a FUSE mount point: the kernel's rule for a fixed
+    // layout is EPERM)
+    let Some(rec) = rec else {
+        return Err(if a[1] & UMOUNT_NOFOLLOW == 0 && k.w.getattr(child).is_ok_and(|at| at.mode & 0o170000 == 0o120000) { calls::KERNEL } else { EPERM });
+    };
+    let root = rec.root;
+    let Some((conn, _)) = crate::fuse::wire::split(root) else { return Err(calls::KERNEL) };
+    sys::lx_obj(LX_FH_NS0FUSE, LX_NS0FUSE_REMOVE, root, 0)?;
+    crate::fuse::abort_conn(conn);
+    hydra_rt::println!("[vfs-server] FUSE connection {} unmounted (initial namespace)", conn);
+    Ok(0)
+}
+// wave10 GV2 end
 
 /// What a lost compare and set answers inside [`changes`] (never to the caller).
 const EAGAIN_PUT: i64 = i64::MIN + 1;

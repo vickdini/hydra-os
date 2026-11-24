@@ -3038,4 +3038,52 @@ pub const LX_REDIR_SHM: SvcId = 0xFD;
 pub const LX_REDIR_DEV: SvcId = 0xFC;
 /// [`LX_REDIR_DEV`]: the device is a block device.
 pub const LX_REDIR_DEV_BLOCK: u64 = 1 << 40;
+/// `SYS_LX_OBJ` operation (file service): `(sub-op, a, b)`: the initial mount namespace's
+/// FUSE mounts, which vfs-server decides (`mount(2)`/`umount2` by fusermount3); the kernel's
+/// list (`compat::linux::fuse::NS0`, what `/proc/mounts` shows) is the write-through copy.
+pub const LX_FH_NS0FUSE: u64 = 81;
+/// [`LX_FH_NS0FUSE`] sub-op: `(*LxNs0Fuse, 0)`: record the mount described.
+pub const LX_NS0FUSE_ADD: u64 = 1;
+/// [`LX_FH_NS0FUSE`] sub-op: `(root, 0)`: the mount whose root is `root` is gone (vfs-server
+/// ended its connection already); 0, or `-ENOENT` when there is none.
+pub const LX_NS0FUSE_REMOVE: u64 = 2;
+/// Longest file system type and source of an [`LxNs0Fuse`].
+pub const LX_NS0FUSE_NAME_MAX: usize = 128;
+
+/// A FUSE mount of the initial namespace for [`LX_NS0FUSE_ADD`].
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LxNs0Fuse {
+    /// The request (`mount(2)`) the mount is made for: its caller's working directory is
+    /// where a relative path starts.
+    pub req: u64,
+    /// The directory mounted on (a pool object).
+    pub mountpoint: u64,
+    /// The connection's root.
+    pub root: u64,
+    /// `mount(2)`'s flags (`MS_RDONLY`, `MS_NOSUID`, `MS_NODEV`, `MS_NOEXEC` are shown).
+    pub flags: u64,
+    /// `user_id=`, `group_id=` of the mount data.
+    pub uid: u32,
+    /// See [`LxNs0Fuse::uid`].
+    pub gid: u32,
+    /// `allow_other`.
+    pub other: u32,
+    /// How the path is made ([`LX_FHP_ABS`] or [`LX_FHP_CWD`], as for [`LxFhDesc`]).
+    pub path_kind: u32,
+    /// Bytes of `path`, `fstype`, `source`.
+    pub path_len: u32,
+    /// See [`LxNs0Fuse::path_len`].
+    pub fstype_len: u32,
+    /// See [`LxNs0Fuse::path_len`].
+    pub source_len: u32,
+    /// (Padding.)
+    pub pad: u32,
+    /// The mount point's path (the walk's: links resolved).
+    pub path: [u8; LX_FH_PATH_MAX],
+    /// `fuse` or `fuse.<name>`.
+    pub fstype: [u8; LX_NS0FUSE_NAME_MAX],
+    /// `mount(2)`'s source (the daemon's name).
+    pub source: [u8; LX_NS0FUSE_NAME_MAX],
+}
 // wave10 GV2 end

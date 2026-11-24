@@ -257,20 +257,39 @@ pub fn create(cx: &Cx, k: &Call, path: &[u8], flags: u32, mode: u32) -> Result<M
     if path.last() == Some(&b'/') {
         return Err(EISDIR);
     }
-    let start = k.start(c, path)?;
-    let p = match walk::walk_parent(&k.w, &k.who, start, path)? {
-        ParentWalked::Found(p) => p,
-        ParentWalked::Redirect(_) => return Err(KERNEL),
-    };
-    // The name exists, though the walk found nothing: a dangling symbolic link to make the
-    // target of (the kernel's), or another caller was faster
-    if let Some(ch) = p.child {
+    let mut start = k.start(c, path)?;
+    // wave10 GV2: a dangling symbolic link is followed to the name its target makes (as the
+    // kernel's `creation_target`, 40 links at most)
+    let mut target: Vec<u8>;
+    let mut at: &[u8] = path;
+    let mut links = 0;
+    let p = loop {
+        let p = match walk::walk_parent(&k.w, &k.who, start, at)? {
+            ParentWalked::Found(p) => p,
+            ParentWalked::Redirect(_) => return Err(KERNEL),
+        };
+        // The name exists, though the walk found nothing: a dangling symbolic link to make
+        // the target of, or another caller was faster
+        let Some(ch) = p.child else { break p };
         let a = k.w.getattr(ch)?;
         if a.mode & rules::S_IFMT == rules::S_IFLNK && flags & (rules::O_NOFOLLOW | rules::O_EXCL) == 0 {
-            return Err(KERNEL);
+            links += 1;
+            if links > walk::SYMLOOP_MAX {
+                return Err(-40); // ELOOP
+            }
+            target = k.w.readlink(ch)?;
+            if target.is_empty() {
+                return Err(rules::ENOENT);
+            }
+            if target.last() == Some(&b'/') {
+                return Err(EISDIR);
+            }
+            start = if target[0] == b'/' { walk::Start::Root } else { walk::Start::At(p.dir) };
+            at = &target;
+            continue;
         }
         return if flags & rules::O_EXCL != 0 { Err(EEXIST) } else { Ok(Made::Exists) };
-    }
+    };
     if p.name == b"." || p.name == b".." {
         return Err(EISDIR);
     }

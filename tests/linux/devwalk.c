@@ -281,6 +281,44 @@ static void odd_opens(void) {
     CHECK(open(p, O_CREAT | O_DIRECTORY | O_RDONLY, 0755) < 0 && errno == EINVAL, "O_CREAT|O_DIRECTORY");
 }
 
+// O_CREAT through a dangling symbolic link makes its target (absolute and relative links,
+// a chain of two); O_EXCL refuses the link itself
+static void dangling(void) {
+    char l[256], t[256], s[256];
+    struct stat st;
+    snprintf(t, sizeof t, "%s/made-abs", D);
+    unlink(t);
+    snprintf(l, sizeof l, "%s/dangle-abs", D);
+    unlink(l);
+    CHECK(symlink(t, l) == 0, "symlink abs");
+    int fd = open(l, O_CREAT | O_WRONLY, 0640);
+    CHECK(fd >= 0 && write(fd, "x", 1) == 1, "create through an absolute dangling link");
+    if (fd >= 0) close(fd);
+    CHECK(lstat(t, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 1, "the target was made");
+    CHECK(lstat(l, &st) == 0 && S_ISLNK(st.st_mode), "the link stays a link");
+    snprintf(s, sizeof s, "%s/sub", D);
+    mkdir(s, 0755);
+    snprintf(t, sizeof t, "%s/sub/made-rel", D);
+    unlink(t);
+    snprintf(l, sizeof l, "%s/dangle-rel", D);
+    unlink(l);
+    CHECK(symlink("sub/made-rel", l) == 0, "symlink rel");
+    snprintf(s, sizeof s, "%s/dangle-chain", D);
+    unlink(s);
+    CHECK(symlink("dangle-rel", s) == 0, "symlink chain");
+    fd = open(s, O_CREAT | O_RDWR, 0600);
+    CHECK(fd >= 0, "create through a chain of two links");
+    if (fd >= 0) close(fd);
+    CHECK(stat(t, &st) == 0 && S_ISREG(st.st_mode), "the relative target was made");
+    unlink(t);
+    CHECK(open(l, O_CREAT | O_EXCL | O_WRONLY, 0600) < 0 && errno == EEXIST, "O_EXCL on a dangling link");
+    CHECK(open(l, O_CREAT | O_NOFOLLOW | O_WRONLY, 0600) < 0 && errno == ELOOP, "O_NOFOLLOW on a dangling link");
+    snprintf(l, sizeof l, "%s/dangle-missing", D);
+    unlink(l);
+    CHECK(symlink("nodir/x", l) == 0, "symlink missing dir");
+    CHECK(open(l, O_CREAT | O_WRONLY, 0600) < 0 && errno == ENOENT, "a link into a missing directory");
+}
+
 static void bench(int n) {
     double t0 = now();
     for (int i = 0; i < n; i++) close(open("/dev/null", O_WRONLY));
@@ -317,6 +355,7 @@ int main(int argc, char **argv) {
     cwd_checks();
     if (geteuid() == 0) nobody_cwd();
     odd_opens();
+    dangling();
     if (fails) {
         printf("DEVWALK FAIL %d\n", fails);
         return 1;
