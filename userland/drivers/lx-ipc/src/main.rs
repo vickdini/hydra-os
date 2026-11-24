@@ -107,6 +107,7 @@ fn main(args: &[&str]) {
         }
         svcrt::notes::drain_all();
         ipcsvc::main_work(sys::uptime_ticks());
+        sysv::shm_sweep(sys::uptime_ticks()); // wave10 G8-2
         obj::flush();
     }
 }

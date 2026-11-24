@@ -1169,6 +1169,40 @@ pub fn on_shm_note(id: u64, _pid: u64, _c: u64) {
     }
 }
 
+/// When [`shm_sweep`] last looked (ticks).
+#[allow(dead_code)] // (linux-server does not sweep)
+static SWEPT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The main thread, now and then (about once a second): removed segments with nothing
+/// attached go, in case the kernel's note of their last detach was lost (a full ring).
+#[allow(dead_code)]
+pub fn shm_sweep(now: u64) {
+    if now.saturating_sub(SWEPT.load(core::sync::atomic::Ordering::Relaxed)) < 100 {
+        return;
+    }
+    SWEPT.store(now, core::sync::atomic::Ordering::Relaxed);
+    let mut guard = IPC.lock();
+    let ipc = &mut *guard;
+    let removed: Vec<i32> = ipc.shm.iter().filter(|(_, (_, s))| s.perm.mode & SHM_DEST != 0).map(|(id, _)| *id).collect();
+    if removed.is_empty() {
+        return;
+    }
+    let mut k: Vec<LxShmStat> = removed.iter().map(|&id| LxShmStat { id: id as i64, ..LxShmStat::default() }).collect();
+    if sys::lx_obj(LX_OBJ_SHM, LX_SHM_STAT, k.as_mut_ptr() as u64, k.len() as u64).is_err() {
+        return;
+    }
+    let mut gone = false;
+    for s in &k {
+        if s.nattch == 0 {
+            shm_destroy(ipc, s.id as i32);
+            gone = true;
+        }
+    }
+    if gone {
+        persist(ipc);
+    }
+}
+
 /// lx-ipc starts without segments (a first start, or the restart ladder dropped the kept
 /// state): the kernel's attachments of the old ones stop counting, and kept objects of
 /// segments nobody knows any more go.
@@ -1465,6 +1499,8 @@ pub fn restore(id: u64, rec: &[u8]) -> bool {
                 sys::lx_mem(LX_MEM_UNKEEP, lx_shm_key(id), 0, 0, 0);
             }
             ipc.shm.remove(&id);
+            // (the kernel forgets what it knew of it: its id may come back one day)
+            let _ = sys::lx_obj(LX_OBJ_SHM, LX_SHM_FORGET, id as u32 as u64, 0);
         }
     }
     shm_unkeep_strays(&ipc.shm);

@@ -715,6 +715,7 @@ pub mod lx {
         }
         pub fn on_fork(_parent: u64, _child: u64) {}
         pub fn forget(_pid: u64) {}
+        pub fn after_unmap(_start: u64, _end: u64) {}
     }
     // wave10 G8-2 end
     // wave9 G7a begin: *stub* the process-identity primitives (`src/lx/proc.rs`, tested in

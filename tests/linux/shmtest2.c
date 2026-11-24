@@ -244,6 +244,26 @@ static int checks(const char *self) {
     int z = shmget(IPC_PRIVATE, 4096, 0600);
     CHECK(shmctl(z, IPC_RMID, 0) == 0 && shmctl(z, IPC_STAT, &ds) == -1 && errno == EINVAL, "IPC_RMID with no attachment: gone at once");
 
+    // ---- munmap / MAP_FIXED over an attachment drop it (as Linux's shm_close; the
+    // in-kernel copy never did)
+    if (forwarded) {
+        int u = shmget(IPC_PRIVATE, 3 * 4096, 0600);
+        char *ua = shmat(u, 0, 0);
+        char *ub = shmat(u, 0, 0);
+        CHECK(nattch(u) == 2, "two attachments for the unmap checks");
+        CHECK(munmap(ua + 4096, 4096) == 0 && nattch(u) == 2, "munmap of a part: still attached");
+        CHECK(munmap(ua, 3 * 4096) == 0 && nattch(u) == 1, "munmap of the rest: one attachment less");
+        CHECK(shmdt(ua) == -1 && errno == EINVAL, "shmdt where it was unmapped: EINVAL");
+        void *f = mmap(ub, 3 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        CHECK(f == ub && nattch(u) == 0, "MAP_FIXED over the other: none left");
+        CHECK(shmdt(ub) == -1 && errno == EINVAL && *(volatile char *)ub == 0, "shmdt does not unmap the new mapping there");
+        munmap(ub, 3 * 4096);
+        char *uc = shmat(u, 0, 0);
+        CHECK(uc != (void *)-1 && shmctl(u, IPC_RMID, 0) == 0 && munmap(uc, 3 * 4096) == 0, "removed while attached, then unmapped");
+        msleep(50);
+        CHECK(shmctl(u, IPC_STAT, &ds) == -1 && errno == EINVAL, "a removed segment goes when its last mapping is unmapped");
+    }
+
     // ---- limits
     struct shminfo si;
     CHECK(shmctl(0, IPC_INFO, (struct shmid_ds *)&si) >= 0 && si.shmmax == (1UL << 40) && si.shmmni == 4096, "IPC_INFO: shmmax 1 TiB, shmmni 4096");

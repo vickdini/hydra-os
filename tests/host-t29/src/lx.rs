@@ -5,6 +5,11 @@ use crate::arch::syscall::SyscallFrame;
 
 /// *stub* A notification for the Linux server (recorded).
 // wave8 GX2 begin: *stub* the desktop set (`src/lx/desktop.rs`)
+// wave10 G8-2 begin: *stub* System V shared memory's attachments (`src/lx/shm.rs`)
+pub mod shm {
+    pub fn after_unmap(_start: u64, _end: u64) {}
+}
+// wave10 G8-2 end
 pub mod desktop {
     pub fn inherit(_parent: u64, _child: u64) {}
     pub fn mark(_pid: u64) {}

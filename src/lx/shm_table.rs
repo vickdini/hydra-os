@@ -30,6 +30,9 @@ pub struct Att {
     pub len: u64,
     /// The generation it was made in.
     pub gen: u64,
+    /// Which memory object it maps (its address: shmdt and unmaps compare the mapping's
+    /// object with it).
+    pub obj: usize,
 }
 
 /// What the kernel knows of one segment.
@@ -127,13 +130,15 @@ impl Table {
     /// `pid` at `now`. A mapping that replaced another attachment at the same address
     /// (`SHM_REMAP`) drops that one: its note is returned. (If lx-ipc started afresh
     /// meanwhile, `gen` is old and the attachment never counts.)
-    pub fn attached(&mut self, pid: u64, addr: u64, id: i32, len: u64, gen: u64, now: i64) -> Option<Note> {
+    pub fn attached(&mut self, pid: u64, addr: u64, id: i32, len: u64, obj: usize, gen: u64, now: i64) -> Option<Note> {
         if gen == self.gen {
-            let e = self.info.entry(id).or_default();
-            e.atime = now;
-            e.lpid = pid as u32;
+            // (counted by `pre_attach`; never made again here for a segment let go since)
+            if let Some(e) = self.info.get_mut(&id) {
+                e.atime = now;
+                e.lpid = pid as u32;
+            }
         }
-        let old = self.att.insert((pid, addr), Att { id, len, gen });
+        let old = self.att.insert((pid, addr), Att { id, len, gen, obj });
         self.made += 1;
         old.and_then(|o| self.drop_att(pid, o, now))
     }
@@ -145,6 +150,17 @@ impl Table {
             return None;
         }
         self.dec(a.id, pid, now, true)
+    }
+
+    /// The attachment of process `pid` at `addr`.
+    pub fn find(&self, pid: u64, addr: u64) -> Option<Att> {
+        self.att.get(&(pid, addr)).copied()
+    }
+
+    /// The attachments of process `pid` whose range meets `[start, end)`: `(address,
+    /// attachment)`.
+    pub fn overlapping(&self, pid: u64, start: u64, end: u64) -> Vec<(u64, Att)> {
+        self.att.range((pid, 0)..(pid, end)).filter(|(k, a)| k.1.saturating_add(a.len) > start).map(|(k, a)| (k.1, *a)).collect()
     }
 
     /// `shmdt(addr)` of process `pid` at `now`: the attachment there (to unmap) and its note.

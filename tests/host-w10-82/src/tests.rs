@@ -12,7 +12,7 @@ use alloc::string::String;
 /// One successful `shmat` of `id` at `addr` by `pid` at time `now`.
 fn attach(t: &mut Table, pid: u64, addr: u64, id: i32, now: i64) -> Option<Note> {
     let g = t.pre_attach(id);
-    t.attached(pid, addr, id, 8192, g, now)
+    t.attached(pid, addr, id, 8192, 0xAB, g, now)
 }
 
 #[test]
@@ -128,7 +128,7 @@ fn a_fresh_service_makes_the_old_attachments_count_for_nothing() {
     assert_eq!(t.info(5).dtime, 0);
     // the attach in flight from before: its undo does nothing; if it completes it never counts
     assert_eq!(t.undo(5, 12, g_old), None);
-    assert_eq!(t.attached(12, 0x7000, 5, 4096, g_old, 4), None);
+    assert_eq!(t.attached(12, 0x7000, 5, 4096, 0xAB, g_old, 4), None);
     assert_eq!(t.nattch(5), 1);
     assert_eq!(t.forget(12, 4), alloc::vec![]);
     t.fork(11, 30, 5);
@@ -151,6 +151,30 @@ fn a_stale_entry_of_a_reused_pid_is_replaced_at_fork() {
     attach(&mut t, 20, 0x1000, 6, 1); // left behind (as if 20's exit was missed)
     t.fork(10, 20, 2);
     assert_eq!((t.nattch(5), t.nattch(6)), (2, 0));
+}
+
+#[test]
+fn find_and_overlapping_attachments() {
+    let mut t = Table::new();
+    attach(&mut t, 10, 0x10000, 5, 1); // 0x10000..0x12000
+    attach(&mut t, 10, 0x20000, 6, 1); // 0x20000..0x22000
+    attach(&mut t, 11, 0x10000, 5, 1);
+    assert_eq!(t.find(10, 0x20000).map(|a| (a.id, a.obj)), Some((6, 0xAB)));
+    assert_eq!(t.find(10, 0x21000), None);
+    let ov = |s: u64, e: u64| t.overlapping(10, s, e).iter().map(|(a, _)| *a).collect::<alloc::vec::Vec<_>>();
+    assert_eq!(ov(0x11000, 0x11001), [0x10000]);
+    assert_eq!(ov(0x12000, 0x20000), alloc::vec::Vec::<u64>::new(), "between the two: none");
+    assert_eq!(ov(0, u64::MAX), [0x10000, 0x20000], "only process 10's");
+    assert_eq!(ov(0x21fff, 0x30000), [0x20000]);
+}
+
+#[test]
+fn an_attach_counted_before_a_forget_does_not_bring_the_segment_back() {
+    let mut t = Table::new();
+    let g = t.pre_attach(9);
+    t.forget_id(9); // lx-ipc let the segment go meanwhile (a fresh start of its ids)
+    assert_eq!(t.attached(10, 0x1000, 9, 4096, 0xAB, g, 5), None);
+    assert_eq!(t.info(9), Info::default(), "no stale facts made by the attach");
 }
 
 #[test]
