@@ -20,6 +20,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/xattr.h>
+#include <linux/capability.h>
 #include <sys/ptrace.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -308,6 +310,97 @@ static int suidwait(void) {
     return 0;
 }
 
+// Review 10-81 finding 1: a sandbox in a child user namespace (same kuid) may not attach to
+// or write into its parent; the parent's process is in another user namespace
+static void t_userns_sandbox(void) {
+    become(1000);
+    prctl(PR_SET_DUMPABLE, 1);
+    pid_t parent = getpid();
+    pid_t p = fork();
+    if (p == 0) {
+        if (unshare(CLONE_NEWUSER) != 0) {
+            printf("     (unshare(CLONE_NEWUSER): %s; case skipped)\n", strerror(errno));
+            _exit(0);
+        }
+        int a = try_attach(parent);
+        uint64_t v = magic;
+        struct iovec l = {&v, 8}, r = {(void *)&magic, 8};
+        long n = syscall(SYS_process_vm_writev, parent, &l, 1, &r, 1, 0);
+        int w = n < 0 ? -errno : 0;
+        _exit((a == -EPERM ? 0 : 1) | (w == -EPERM ? 0 : 2));
+    }
+    int st = 0;
+    waitpid(p, &st, 0);
+    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "sandbox in a child user namespace reached its parent (attach bit 1, process_vm_writev bit 2: status %#x)", st);
+}
+
+// Review 10-81 finding 1: a same-uid process holding file capabilities (dumpable again) is
+// not attachable by one without them
+static void t_file_caps(void) {
+    const char *capf = "/tmp/ptperm_cap";
+    char cmd[512];
+    snprintf(cmd, sizeof cmd, "cp %s %s && chown 0:0 %s && chmod 755 %s", self_path, capf, capf, capf);
+    CHECK(system(cmd) == 0, "set up %s", capf);
+    // security.capability v2: effective, permitted CAP_NET_RAW (13)
+    uint32_t xc[5] = {0x02000001, 1u << 13, 0, 0, 0};
+    if (setxattr(capf, "security.capability", xc, sizeof xc, 0) != 0) {
+        printf("     (setxattr security.capability: %s; case skipped)\n", strerror(errno));
+        unlink(capf);
+        return;
+    }
+    int ready[2], hold[2];
+    if (pipe(ready) || pipe(hold)) exit(4);
+    pid_t p = fork();
+    if (p == 0) {
+        become(1000);
+        dup2(ready[1], 10);
+        dup2(hold[0], 11);
+        close(ready[0]);
+        close(ready[1]);
+        close(hold[0]);
+        close(hold[1]);
+        execl(capf, capf, "capwait", NULL);
+        _exit(7);
+    }
+    close(ready[1]);
+    close(hold[0]);
+    int prm = -1;
+    if (read(ready[0], &prm, sizeof prm) != sizeof prm) prm = -2;
+    if (prm == 0) {
+        printf("     (file capabilities not granted here; case skipped)\n");
+    } else {
+        CHECK(prm > 0, "capability program: %d", prm);
+        pid_t q = fork();
+        if (q == 0) {
+            become(1000);
+            int r = try_attach(p);
+            int v = try_vm(p);
+            _exit((r == -EPERM ? 0 : 1) | (v == -EPERM ? 0 : 2));
+        }
+        int st = 0;
+        waitpid(q, &st, 0);
+        CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "a capability-less user reached its capable process (attach bit 1, process_vm_readv bit 2: status %#x)", st);
+    }
+    close(hold[1]);
+    kill(p, SIGKILL);
+    waitpid(p, NULL, 0);
+    unlink(capf);
+}
+
+static int capwait(void) {
+    struct __user_cap_header_struct h = {_LINUX_CAPABILITY_VERSION_3, 0};
+    struct __user_cap_data_struct d[2];
+    memset(d, 0, sizeof d);
+    int prm = syscall(SYS_capget, &h, d) == 0 ? (int)d[0].permitted : -3;
+    // dumpable again, as a program may make itself
+    prctl(PR_SET_DUMPABLE, 1);
+    if (write(10, &prm, sizeof prm) != sizeof prm) return 1;
+    char c;
+    while (read(11, &c, 1) > 0) {
+    }
+    return 0;
+}
+
 static void t_perf_paranoid(void) {
     become(1000);
     CHECK(perf_open(0, -1, 0) == 0, "perf self, user only: %d", perf_open(0, -1, 0));
@@ -568,6 +661,7 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     self_path = argv[0][0] == '/' ? argv[0] : realpath(argv[0], NULL);
     if (argc > 1 && !strcmp(argv[1], "suidwait")) return suidwait();
+    if (argc > 1 && !strcmp(argv[1], "capwait")) return capwait();
     if (argc > 1 && !strcmp(argv[1], "crash")) {
         // (for gdb -batch -ex run -ex bt)
         volatile int *p = (int *)(uintptr_t)(argc - 2);
@@ -588,6 +682,8 @@ int main(int argc, char **argv) {
     in_child("setuid to the same ids, seteuid", t_setuid_same);
     in_child("root", t_root);
     in_child("set-user-ID exec", t_setuid_exec);
+    in_child("sandbox in a child user namespace", t_userns_sandbox);
+    in_child("file capabilities", t_file_caps);
     in_child("perf paranoid (user)", t_perf_paranoid);
     in_child("perf (root)", t_perf_root);
     in_child("suspend seccomp (user)", t_suspend_user);

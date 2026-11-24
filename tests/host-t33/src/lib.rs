@@ -307,14 +307,14 @@ pub mod lx {
         use super::ptrace_rules::*;
         pub fn check(nr: u64, a: &[u64; 6], extra: u32) -> Result<(), i64> {
             let (caps, in_userns) = crate::task::with_current_task_mut(|t| (t.caps.effective, t.caps.in_userns)).unwrap_or((0, false));
-            let who = Who { uid: [1000; 3], gid: [1000; 3], caps, in_userns, seccomp: false };
+            let who = Who { uid: [1000; 3], gid: [1000; 3], caps, perm: caps, in_userns, seccomp: false, suspended: false };
             let mut f = Facts { nr, who, cpu: a[2] as i32, ..Facts::default() };
             let class = match a[1] as i32 {
                 0 => PERF_PID_SELF,
                 -1 => PERF_PID_CPU,
                 p if p > 0 => {
                     if let Some(g) = crate::compat::linux::proc::tgid_of(p as u64) {
-                        let base = Target { tgid: g, tid: g, uid: [1000; 3], gid: [1000; 3], same: false, service: false, within: true, dumpable: 1 };
+                        let base = Target { tgid: g, tid: g, uid: [1000; 3], gid: [1000; 3], same: false, service: false, within: true, same_ns: true, owned: false, tracer_cap: false, dumpable: 1, perm: 0 };
                         f.t[0] = match crate::compat::linux::extra::may_access(g) {
                             Ok(()) => Some(base),
                             Err(-3) => None,

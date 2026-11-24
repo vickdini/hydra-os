@@ -24,14 +24,14 @@ pub mod trace {
             (u, g, t.caps.effective, t.tgid)
         })
         .ok_or(ESRCH)?;
-        let who = Who { uid, gid, caps, in_userns: false, seccomp: false };
+        let who = Who { uid, gid, caps, perm: caps, in_userns: false, seccomp: false, suspended: false };
         let pid = match nr {
             NR_PIDFD_GETFD => crate::compat::linux::pidfd::pid_of(a[0])?,
             _ => a[0],
         };
         let t = crate::task::SCHEDULER.lock().with_process(pid, |t| {
             let (u, g) = ids(t);
-            Target { tgid: t.tgid, tid: t.tgid, uid: u, gid: g, same: t.tgid == me, service: t.service.is_some(), within: true, dumpable: 1 }
+            Target { tgid: t.tgid, tid: t.tgid, uid: u, gid: g, same: t.tgid == me, service: t.service.is_some(), within: true, same_ns: true, owned: false, tracer_cap: false, dumpable: 1, perm: t.caps.effective }
         });
         decide(&Facts { nr, who, t: [t, None], ..Facts::default() })
     }

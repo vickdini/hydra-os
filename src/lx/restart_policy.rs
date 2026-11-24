@@ -273,7 +273,10 @@ pub fn idempotent(nr: u64, args: &[u64; 6]) -> bool {
         // wave10 G7b-1 end
         // wave10 G8-1: the tracing calls: lx-proc only decides them (the kernel acts after its
         // redirect), so a cut decision is simply made again
-        101 | 298 | 310 | 311 | 312 | 438 => true,
+        // (ptrace: only the requests lx-proc decides, as `ptrace_rules::ptrace_routed`: TRACEME,
+        // ATTACH, SEIZE, SETOPTIONS with O_SUSPEND_SECCOMP)
+        101 => matches!(args[0], 0 | 16 | 0x4206) || (args[0] == 0x4200 && args[3] & (1 << 21) != 0),
+        298 | 310 | 311 | 312 | 438 => true,
         _ => false,
     }
 }

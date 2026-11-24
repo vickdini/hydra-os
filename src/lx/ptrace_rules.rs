@@ -120,13 +120,25 @@ pub struct Who {
     pub uid: [u32; 3],
     /// Real, effective, saved group id.
     pub gid: [u32; 3],
-    /// Effective capabilities (also those holding only in its own user namespace).
+    /// Effective capabilities (also those holding only in its own user namespace). The facts
+    /// words carry only the ones the decisions read: `CAP_SYS_PTRACE`, `CAP_SYS_ADMIN`,
+    /// `CAP_PERFMON` ([`DECIDING_CAPS`]).
     pub caps: u64,
+    /// Permitted capabilities (Linux's commoncap test compares them with the target's).
+    pub perm: u64,
     /// It is in a user namespace of its own (its capabilities hold only there and below).
     pub in_userns: bool,
     /// It runs under seccomp (strict or filter).
     pub seccomp: bool,
+    /// It is itself traced with `PTRACE_O_SUSPEND_SECCOMP` (Linux's `PT_SUSPEND_SECCOMP`).
+    pub suspended: bool,
 }
+
+/// The effective capabilities the decisions read (the facts words carry only these).
+pub const DECIDING_CAPS: u64 = 1 << CAP_SYS_PTRACE | 1 << CAP_SYS_ADMIN | 1 << CAP_PERFMON;
+
+/// Every capability (`CAP_LAST_CAP` 40).
+pub const ALL_CAPS: u64 = (1 << 41) - 1;
 
 impl Who {
     /// Whether it holds `cap` system-wide (Linux's `capable`: in the first user namespace).
@@ -153,20 +165,35 @@ pub struct Target {
     /// Its user namespace is the caller's or lies below it (the caller's capabilities count
     /// there).
     pub within: bool,
+    /// Its user namespace is the caller's own (Linux's commoncap test compares capability
+    /// sets only then).
+    pub same_ns: bool,
+    /// Its user namespace lies below the caller's and was made by the caller's effective
+    /// user (or one between them was): the caller holds every capability there (Linux's
+    /// `ns_capable` owner rule).
+    pub owned: bool,
+    /// `TRACEME`'s target (the parent): it holds `CAP_SYS_PTRACE` over the caller (Linux's
+    /// `cap_ptrace_traceme`).
+    pub tracer_cap: bool,
     /// `PR_SET_DUMPABLE` (0, 1, 2); only 1 lets processes of the same ids in.
     pub dumpable: u8,
+    /// Permitted capabilities.
+    pub perm: u64,
 }
 
 /// Whether the caller holds `cap` over target `t` (Linux's `ns_capable(t's user ns)`): in
 /// its effective set, and `t`'s user namespace at or below the caller's.
 pub fn cap_over(who: &Who, t: &Target, cap: u32) -> bool {
-    who.caps & (1 << cap) != 0 && t.within
+    t.owned || (who.caps & (1 << cap) != 0 && t.within)
 }
 
 /// Linux's `__ptrace_may_access(t, mode)`: its own process always; a service's process
 /// never; with the ids of `mode` (`MODE_FSCREDS`: effective, else real) equal to the
 /// target's real, effective and saved user ids **and** group ids, or `CAP_SYS_PTRACE` over
-/// it; and then a target that is not dumpable only with `CAP_SYS_PTRACE` over it.
+/// it; then a target that is not dumpable only with `CAP_SYS_PTRACE` over it; then the
+/// commoncap test (`cap_ptrace_access_check`): the target in the caller's own user
+/// namespace with its permitted capabilities a subset of the caller's (effective ones with
+/// `MODE_FSCREDS`, else permitted), or `CAP_SYS_PTRACE` over it.
 pub fn may_access(mode: u32, who: &Who, t: &Target) -> Result<(), i64> {
     if t.same {
         return Ok(());
@@ -183,7 +210,22 @@ pub fn may_access(mode: u32, who: &Who, t: &Target) -> Result<(), i64> {
     if t.dumpable != 1 && !cap {
         return Err(EPERM);
     }
+    let mine = if mode & MODE_FSCREDS != 0 { who.caps } else { who.perm };
+    if !(t.same_ns && t.perm & !mine == 0) && !cap {
+        return Err(EPERM);
+    }
     Ok(())
+}
+
+/// Linux's `cap_ptrace_traceme`: the parent (`t`) in the caller's own user namespace with
+/// the caller's permitted capabilities a subset of the parent's, or the parent holding
+/// `CAP_SYS_PTRACE` over the caller.
+pub fn may_traceme(who: &Who, t: &Target) -> Result<(), i64> {
+    if (t.same_ns && who.perm & !t.perm == 0) || t.tracer_cap {
+        Ok(())
+    } else {
+        Err(EPERM)
+    }
 }
 
 /// Linux's `commit_creds` rule for the dumpable flag: a credential change from `old` to `new`
@@ -215,8 +257,16 @@ const T_PRESENT: u64 = 1;
 const T_SAME: u64 = 2;
 const T_SERVICE: u64 = 4;
 const T_WITHIN: u64 = 8;
+const T_SAME_NS: u64 = 16;
+const T_OWNED: u64 = 32;
+const T_TRACER_CAP: u64 = 64;
 const W_USERNS: u64 = 1;
 const W_SECCOMP: u64 = 2;
+const W_SUSPENDED: u64 = 4;
+/// `w[5]` bits 8..: the deciding effective capabilities, in this order.
+const W_CAP_PTRACE: u64 = 1 << 8;
+const W_CAP_ADMIN: u64 = 1 << 9;
+const W_CAP_PERFMON: u64 = 1 << 10;
 
 fn pack(lo: u32, hi: u32) -> u64 {
     lo as u64 | (hi as u64) << 32
@@ -232,9 +282,10 @@ fn hi(w: u64) -> u32 {
 
 impl Facts {
     /// The 16 words of `LXP_TRACE_FACTS`: `[0]` call | kind << 16 | extra << 32; `[1..4]` the
-    /// caller's ids (uid, euid | suid, gid | egid, sgid packed by twos); `[4]` its effective
-    /// capabilities; `[5]` its flags | cpu << 32; `[6..11]` and `[11..16]` the targets (tgid
-    /// | tid << 32, ids by twos, flags | dumpable << 8).
+    /// caller's ids (uid, euid | suid, gid | egid, sgid packed by twos); `[4]` its permitted
+    /// capabilities; `[5]` its flags and deciding effective capabilities | cpu << 32;
+    /// `[6..11]` and `[11..16]` the targets (tgid | tid << 32, ids by twos, flags | dumpable
+    /// << 8 | permitted capabilities << 16).
     pub fn encode(&self) -> [u64; 16] {
         let mut w = [0u64; 16];
         w[0] = (self.nr & 0xffff) | (self.kind as u64) << 16 | (self.extra as u64) << 32;
@@ -242,8 +293,15 @@ impl Facts {
         w[1] = pack(u[0], u[1]);
         w[2] = pack(u[2], g[0]);
         w[3] = pack(g[1], g[2]);
-        w[4] = self.who.caps;
-        w[5] = (self.who.in_userns as u64 * W_USERNS) | (self.who.seccomp as u64 * W_SECCOMP) | (self.cpu as u32 as u64) << 32;
+        w[4] = self.who.perm & ALL_CAPS;
+        let c = self.who.caps;
+        w[5] = (self.who.in_userns as u64 * W_USERNS)
+            | (self.who.seccomp as u64 * W_SECCOMP)
+            | (self.who.suspended as u64 * W_SUSPENDED)
+            | ((c >> CAP_SYS_PTRACE & 1) * W_CAP_PTRACE)
+            | ((c >> CAP_SYS_ADMIN & 1) * W_CAP_ADMIN)
+            | ((c >> CAP_PERFMON & 1) * W_CAP_PERFMON)
+            | (self.cpu as u32 as u64) << 32;
         for (i, t) in self.t.iter().enumerate() {
             let b = 6 + 5 * i;
             if let Some(t) = t {
@@ -251,7 +309,15 @@ impl Facts {
                 w[b + 1] = pack(t.uid[0], t.uid[1]);
                 w[b + 2] = pack(t.uid[2], t.gid[0]);
                 w[b + 3] = pack(t.gid[1], t.gid[2]);
-                w[b + 4] = T_PRESENT | (t.same as u64 * T_SAME) | (t.service as u64 * T_SERVICE) | (t.within as u64 * T_WITHIN) | (t.dumpable as u64) << 8;
+                w[b + 4] = T_PRESENT
+                    | (t.same as u64 * T_SAME)
+                    | (t.service as u64 * T_SERVICE)
+                    | (t.within as u64 * T_WITHIN)
+                    | (t.same_ns as u64 * T_SAME_NS)
+                    | (t.owned as u64 * T_OWNED)
+                    | (t.tracer_cap as u64 * T_TRACER_CAP)
+                    | (t.dumpable as u64) << 8
+                    | (t.perm & ALL_CAPS) << 16;
             }
         }
         w
@@ -272,7 +338,11 @@ impl Facts {
                     same: f & T_SAME != 0,
                     service: f & T_SERVICE != 0,
                     within: f & T_WITHIN != 0,
+                    same_ns: f & T_SAME_NS != 0,
+                    owned: f & T_OWNED != 0,
+                    tracer_cap: f & T_TRACER_CAP != 0,
                     dumpable: (f >> 8) as u8,
+                    perm: f >> 16,
                 });
             }
         }
@@ -284,9 +354,13 @@ impl Facts {
             who: Who {
                 uid: [lo(w[1]), hi(w[1]), lo(w[2])],
                 gid: [hi(w[2]), lo(w[3]), hi(w[3])],
-                caps: w[4],
+                caps: (w[5] & W_CAP_PTRACE != 0) as u64 * (1 << CAP_SYS_PTRACE)
+                    | (w[5] & W_CAP_ADMIN != 0) as u64 * (1 << CAP_SYS_ADMIN)
+                    | (w[5] & W_CAP_PERFMON != 0) as u64 * (1 << CAP_PERFMON),
+                perm: w[4],
                 in_userns: w[5] & W_USERNS != 0,
                 seccomp: w[5] & W_SECCOMP != 0,
+                suspended: w[5] & W_SUSPENDED != 0,
             },
             t,
         }
@@ -294,9 +368,9 @@ impl Facts {
 }
 
 /// `PTRACE_O_SUSPEND_SECCOMP` (Linux's `check_ptrace_options`): `CAP_SYS_ADMIN` system-wide,
-/// and the tracer itself not under seccomp.
+/// and the tracer itself neither under seccomp nor suspending it (traced so).
 fn suspend_ok(who: &Who, options: u32) -> Result<(), i64> {
-    if options as u64 & O_SUSPEND_SECCOMP != 0 && (!who.capable(CAP_SYS_ADMIN) || who.seccomp) {
+    if options as u64 & O_SUSPEND_SECCOMP != 0 && (!who.capable(CAP_SYS_ADMIN) || who.seccomp || who.suspended) {
         return Err(EPERM);
     }
     Ok(())
@@ -320,8 +394,12 @@ pub fn decide(f: &Facts) -> Result<(), i64> {
                 }
                 Ok(())
             }
-            // Linux checks nothing for TRACEME but Yama's scope 3 (Hydra has no Yama)
-            K_TRACEME => Ok(()),
+            // Linux's cap_ptrace_traceme (no Yama): the parent's capabilities against the
+            // caller's (no parent: nothing to check, the kernel's code refuses)
+            K_TRACEME => match f.t[0] {
+                Some(t) => may_traceme(who, &t),
+                None => Ok(()),
+            },
             K_SETOPTIONS => suspend_ok(who, f.extra),
             _ => Err(EINVAL),
         },

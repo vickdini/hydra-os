@@ -63,7 +63,7 @@ pub fn may_see(same: bool, target_service: bool, caller: (u32, u32), caller_caps
     // wave10 G8-1 begin
     use super::ptrace_rules::{may_access, Target, Who, MODE_FSCREDS, MODE_READ};
     let (u, g) = caller;
-    let who = Who { uid: [u; 3], gid: [g; 3], caps: caller_caps, in_userns: false, seccomp: false };
+    let who = Who { uid: [u; 3], gid: [g; 3], caps: caller_caps, perm: caller_caps, in_userns: false, seccomp: false, suspended: false };
     let t = Target {
         tgid: 0,
         tid: 0,
@@ -72,7 +72,13 @@ pub fn may_see(same: bool, target_service: bool, caller: (u32, u32), caller_caps
         same,
         service: target_service,
         within: true,
+        // (the target's capabilities and user namespace are not among this rule's inputs
+        // here: the commoncap part holds as for a capability-less target in the caller's)
+        same_ns: true,
+        owned: false,
+        tracer_cap: false,
         dumpable: 1,
+        perm: 0,
     };
     may_access(MODE_READ | MODE_FSCREDS, &who, &t).is_ok()
     // wave10 G8-1 end

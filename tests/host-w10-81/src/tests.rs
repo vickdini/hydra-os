@@ -2,11 +2,11 @@ use super::*;
 use rules::*;
 
 fn who(uid: u32, gid: u32, caps: u64) -> Who {
-    Who { uid: [uid; 3], gid: [gid; 3], caps, in_userns: false, seccomp: false }
+    Who { uid: [uid; 3], gid: [gid; 3], caps, perm: caps, in_userns: false, seccomp: false, suspended: false }
 }
 
 fn tgt(uid: u32, gid: u32) -> Target {
-    Target { tgid: 50, tid: 51, uid: [uid; 3], gid: [gid; 3], same: false, service: false, within: true, dumpable: 1 }
+    Target { tgid: 50, tid: 51, uid: [uid; 3], gid: [gid; 3], same: false, service: false, within: true, same_ns: true, owned: false, tracer_cap: false, dumpable: 1, perm: 0 }
 }
 
 const PTRACE: u64 = 1 << CAP_SYS_PTRACE;
@@ -84,7 +84,7 @@ fn cap_only_within_its_user_namespace() {
 
 #[test]
 fn fscreds_compare_effective_realcreds_real() {
-    let w = Who { uid: [1000, 1001, 1001], gid: [1000, 1001, 1001], caps: 0, in_userns: false, seccomp: false };
+    let w = Who { uid: [1000, 1001, 1001], gid: [1000, 1001, 1001], caps: 0, perm: 0, in_userns: false, seccomp: false, suspended: false };
     assert_eq!(may_access(MODE_READ | MODE_FSCREDS, &w, &tgt(1001, 1001)), Ok(()));
     assert_eq!(may_access(MODE_READ | MODE_REALCREDS, &w, &tgt(1001, 1001)), Err(EPERM));
     assert_eq!(may_access(MODE_READ | MODE_REALCREDS, &w, &tgt(1000, 1000)), Ok(()));
@@ -228,9 +228,9 @@ fn dumpable_after_credential_changes() {
 // ---- facts words and keys ----
 
 fn sample() -> Facts {
-    let w = Who { uid: [1, 2, 3], gid: [4, 5, 6], caps: 0xdead_beef_0000_0001, in_userns: true, seccomp: true };
-    let a = Target { tgid: 77, tid: 78, uid: [10, 11, 12], gid: [13, 14, 15], same: false, service: true, within: true, dumpable: 2 };
-    let b = Target { tgid: 0xffff_fff0, tid: 9, uid: [u32::MAX; 3], gid: [0; 3], same: true, service: false, within: false, dumpable: 0 };
+    let w = Who { uid: [1, 2, 3], gid: [4, 5, 6], caps: DECIDING_CAPS, perm: ALL_CAPS ^ 5, in_userns: true, seccomp: true, suspended: true };
+    let a = Target { tgid: 77, tid: 78, uid: [10, 11, 12], gid: [13, 14, 15], same: false, service: true, within: true, same_ns: false, owned: true, tracer_cap: false, dumpable: 2, perm: ALL_CAPS };
+    let b = Target { tgid: 0xffff_fff0, tid: 9, uid: [u32::MAX; 3], gid: [0; 3], same: true, service: false, within: false, same_ns: true, owned: false, tracer_cap: true, dumpable: 0, perm: 1 << 40 };
     Facts { nr: NR_KCMP, kind: 3, extra: 0x8000_0001, cpu: -1, who: w, t: [Some(a), Some(b)] }
 }
 
@@ -352,4 +352,83 @@ fn carried_facts_need_no_round_trip() {
     let f = perf(who(1000, 1000, 0), true, PERF_PID_SELF, -1, None);
     let key = key_of(trace::serve(&k, &no_mem(), &call(298, [0x2000, 0, 0, 0, 0, 0]), Some(f.encode())));
     assert_eq!(verdict_of(key, &f.encode()), Some(EACCES));
+}
+
+// ---- the commoncap test (review 10-81, finding 1) ----
+
+#[test]
+fn commoncap_other_user_namespace_needs_cap() {
+    // a sandbox in a child user namespace (same kuid) attaching its parent: refused
+    let mut sandbox = who(1000, 1000, 0);
+    sandbox.in_userns = true;
+    let parent = Target { same_ns: false, within: false, ..tgt(1000, 1000) };
+    assert_eq!(may_access(AT, &sandbox, &parent), Err(EPERM));
+    let f = Facts { nr: NR_PROCESS_VM_WRITEV, who: sandbox, t: [Some(parent), None], ..Facts::default() };
+    assert_eq!(decide(&f), Err(EPERM));
+    // even with CAP_SYS_PTRACE in its own namespace (it does not count above it)
+    sandbox.caps = PTRACE;
+    assert_eq!(may_access(AT, &sandbox, &parent), Err(EPERM));
+    // the parent attaching its sandbox: the namespace is the parent user's own (owner rule)
+    let child = Target { same_ns: false, within: true, owned: true, ..tgt(1000, 1000) };
+    assert_eq!(may_access(AT, &who(1000, 1000, 0), &child), Ok(()));
+    // a child namespace someone else made: refused without the capability, allowed with it
+    let foreign = Target { same_ns: false, within: true, owned: false, ..tgt(1000, 1000) };
+    assert_eq!(may_access(AT, &who(1000, 1000, 0), &foreign), Err(EPERM));
+    assert_eq!(may_access(AT, &who(1000, 1000, PTRACE), &foreign), Ok(()));
+    // the owner rule also stands in for CAP_SYS_PTRACE over a not-dumpable target
+    assert_eq!(may_access(AT, &who(1000, 1000, 0), &Target { dumpable: 0, ..child }), Ok(()));
+}
+
+#[test]
+fn commoncap_more_capabilities_need_cap() {
+    let capless = who(1000, 1000, 0);
+    // a same-uid process holding (file or ambient) capabilities, dumpable again
+    let capped = Target { perm: 1 << 13, ..tgt(1000, 1000) };
+    assert_eq!(may_access(AT, &capless, &capped), Err(EPERM));
+    for nr in [NR_PROCESS_VM_READV, NR_PIDFD_GETFD] {
+        assert_eq!(decide(&Facts { nr, who: capless, t: [Some(capped), None], ..Facts::default() }), Err(EPERM));
+    }
+    assert_eq!(decide(&ptrace_facts(K_ATTACH, capless, Some(capped), 0)), Err(EPERM));
+    // the same capabilities (a subset) suffice; CAP_SYS_PTRACE always
+    let mut same = capless;
+    same.perm = 1 << 13 | 1 << 12;
+    assert_eq!(may_access(AT, &same, &capped), Ok(()));
+    assert_eq!(may_access(AT, &who(1000, 1000, PTRACE), &capped), Ok(()));
+    // MODE_FSCREDS compares the caller's effective set
+    let mut eff = capless;
+    eff.perm = 1 << 13;
+    assert_eq!(may_access(MODE_READ | MODE_FSCREDS, &eff, &capped), Err(EPERM));
+    eff.caps = 1 << 13;
+    assert_eq!(may_access(MODE_READ | MODE_FSCREDS, &eff, &capped), Ok(()));
+}
+
+#[test]
+fn traceme_checks_the_parent() {
+    let mut child = who(1000, 1000, 0);
+    let parent = tgt(1000, 1000);
+    assert_eq!(decide(&ptrace_facts(K_TRACEME, child, Some(parent), 0)), Ok(()));
+    // the child holds capabilities the parent lacks
+    child.perm = 1 << 13;
+    assert_eq!(decide(&ptrace_facts(K_TRACEME, child, Some(parent), 0)), Err(EPERM));
+    // unless the parent holds CAP_SYS_PTRACE over it
+    assert_eq!(decide(&ptrace_facts(K_TRACEME, child, Some(Target { tracer_cap: true, ..parent }), 0)), Ok(()));
+    // a parent in another user namespace
+    assert_eq!(decide(&ptrace_facts(K_TRACEME, who(1000, 1000, 0), Some(Target { same_ns: false, ..parent }), 0)), Err(EPERM));
+    assert_eq!(decide(&ptrace_facts(K_TRACEME, who(1000, 1000, 0), None, 0)), Ok(()));
+}
+
+#[test]
+fn suspend_refused_to_a_suspending_tracer() {
+    let mut root = who(0, 0, ADMIN);
+    root.suspended = true;
+    assert_eq!(decide(&ptrace_facts(K_SETOPTIONS, root, None, O_SUSPEND_SECCOMP as u32)), Err(EPERM));
+}
+
+#[test]
+fn facts_carry_only_the_deciding_effective_caps() {
+    let w = Who { caps: u64::MAX, perm: ALL_CAPS, ..who(0, 0, 0) };
+    let f = Facts { nr: NR_KCMP, who: w, ..Facts::default() };
+    let back = Facts::decode(&f.encode());
+    assert_eq!(back.who.caps, DECIDING_CAPS);
+    assert_eq!(back.who.perm, ALL_CAPS);
 }

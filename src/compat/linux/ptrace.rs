@@ -958,6 +958,15 @@ impl super::chardev::CharDevice for ProcMem {
     }
 }
 
+// wave10 G8-1 begin
+/// Whether thread `tid` is traced with `PTRACE_O_SUSPEND_SECCOMP` (Linux's
+/// `PT_SUSPEND_SECCOMP`: such a tracee may not set the option for a tracee of its own).
+pub fn suspends_seccomp(tid: u64) -> bool {
+    ANY.load(Ordering::Relaxed) && TRACEES.lock().get(&tid).is_some_and(|t| !t.exited && t.options & O_SUSPEND_SECCOMP_BIT != 0)
+}
+const O_SUSPEND_SECCOMP_BIT: u64 = 1 << 21;
+// wave10 G8-1 end
+
 /// `ptrace(request, pid, addr, data)`.
 pub fn sys_ptrace(req: u64, pid: u64, addr: u64, data: u64) -> i64 {
     let (my_tid, me) = super::proc::current_ids();

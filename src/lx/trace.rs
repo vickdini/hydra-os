@@ -52,9 +52,22 @@ pub fn summary() -> alloc::string::String {
 
 /// Thread `tid` as the caller of a decision, and its process.
 fn who_of(tid: u64) -> Option<(Who, u64)> {
-    crate::task::SCHEDULER.lock().with_task_mut(TaskId(tid), |t| {
-        (Who { uid: [t.uid, t.euid, t.suid], gid: [t.gid, t.egid, t.sgid], caps: t.caps.effective, in_userns: t.caps.in_userns, seccomp: t.seccomp.mode != 0 }, t.tgid)
-    })
+    let (mut who, tgid) = crate::task::SCHEDULER.lock().with_task_mut(TaskId(tid), |t| {
+        (
+            Who {
+                uid: [t.uid, t.euid, t.suid],
+                gid: [t.gid, t.egid, t.sgid],
+                caps: t.caps.effective,
+                perm: t.caps.permitted,
+                in_userns: t.caps.in_userns,
+                seccomp: t.seccomp.mode != 0,
+                suspended: false,
+            },
+            t.tgid,
+        )
+    })?;
+    who.suspended = crate::compat::linux::ptrace::suspends_seccomp(tid);
+    Some((who, tgid))
 }
 
 /// The process table, waited for (`wait`) or only if free at once (the lock-free path:
@@ -87,9 +100,16 @@ impl From<()> for Miss {
 }
 
 /// A target: thread `id` (`process`: process `id`, its first live thread), as caller
-/// process `me` sees it (`Ok(None)`: no such live task).
-fn target(id: u64, process: bool, me: u64, wait: bool) -> Result<Option<Target>, ()> {
-    let get = |t: &crate::task::Task| (t.state != crate::task::TaskState::Dead).then(|| (t.id.0, t.tgid, [t.uid, t.euid, t.suid], [t.gid, t.egid, t.sgid], t.service.is_some()));
+/// process `me` (effective user `euid`) sees it (`Ok(None)`: no such live task).
+/// `traceme`: it is `TRACEME`'s parent: whether it holds `CAP_SYS_PTRACE` over `me`.
+fn target(id: u64, process: bool, me: u64, euid: u32, wait: bool) -> Result<Option<Target>, ()> {
+    target_ex(id, process, me, euid, wait, false)
+}
+
+fn target_ex(id: u64, process: bool, me: u64, euid: u32, wait: bool, traceme: bool) -> Result<Option<Target>, ()> {
+    let get = |t: &crate::task::Task| {
+        (t.state != crate::task::TaskState::Dead).then(|| (t.id.0, t.tgid, [t.uid, t.euid, t.suid], [t.gid, t.egid, t.sgid], t.service.is_some(), t.caps.permitted, t.caps.effective))
+    };
     let got = {
         let mut s = crate::task::SCHEDULER.lock();
         if process {
@@ -98,10 +118,18 @@ fn target(id: u64, process: bool, me: u64, wait: bool) -> Result<Option<Target>,
             s.with_task_mut(TaskId(id), |t| get(t)).flatten()
         }
     };
-    let Some((tid, tgid, uid, gid, service)) = got else { return Ok(None) };
+    let Some((tid, tgid, uid, gid, service, perm, eff)) = got else { return Ok(None) };
     let same = tgid == me;
-    let within = same || procs(wait, |p| crate::compat::linux::ns::user_within_in(p, tgid, me))?;
-    Ok(Some(Target { tgid, tid, uid, gid, same, service, within, dumpable: mech::proc_attrs(tgid).dumpable }))
+    let (within, same_ns, owned) = if same {
+        (true, true, false)
+    } else {
+        procs(wait, |p| crate::compat::linux::ns::user_rel_in(p, tgid, me, euid))?.unwrap_or((false, false, false))
+    };
+    // TRACEME: the parent's hold over the caller (the relation the other way round)
+    let tracer_cap = traceme
+        && procs(wait, |p| crate::compat::linux::ns::user_rel_in(p, me, tgid, uid[1]))?
+            .is_some_and(|(w, _, o)| o || (w && eff & (1 << rules::CAP_SYS_PTRACE) != 0));
+    Ok(Some(Target { tgid, tid, uid, gid, same, service, within, same_ns, owned, tracer_cap, dumpable: mech::proc_attrs(tgid).dumpable, perm }))
 }
 
 /// The live task thread `tid` belongs to (`kcmp` names threads).
@@ -157,14 +185,14 @@ fn gather_in(nr: u64, a: &[u64; 6], client: u64, extra: u32, wait: bool) -> Resu
             match f.kind {
                 rules::K_ATTACH | rules::K_SEIZE => {
                     let tid = mech::pid_from_view(a[1] as i32 as i64 as u64, init);
-                    f.t[0] = Some(target(tid, false, me, wait)?.ok_or(ESRCH)?);
+                    f.t[0] = Some(target(tid, false, me, who.uid[1], wait)?.ok_or(ESRCH)?);
                     if f.kind == rules::K_SEIZE {
                         f.extra = a[3] as u32;
                     }
                 }
                 rules::K_TRACEME => {
                     let parent = procs(wait, |p| p.get(&me).map_or(0, |p| p.ppid))?;
-                    f.t[0] = target(parent, true, me, wait)?;
+                    f.t[0] = target_ex(parent, true, me, who.uid[1], wait, true)?;
                 }
                 rules::K_SETOPTIONS => f.extra = a[3] as u32,
                 _ => return Err(Miss::Err(EINVAL)),
@@ -178,7 +206,7 @@ fn gather_in(nr: u64, a: &[u64; 6], client: u64, extra: u32, wait: bool) -> Resu
                 p if p > 0 => {
                     let sys = mech::pid_from_view(p as u64, init);
                     f.t[0] = match procs(wait, |p| crate::compat::linux::proc::tgid_in(p, sys))? {
-                        Some(g) => target(g, true, me, wait)?,
+                        Some(g) => target(g, true, me, who.uid[1], wait)?,
                         None => None,
                     };
                     rules::PERF_PID_OTHER
@@ -189,7 +217,7 @@ fn gather_in(nr: u64, a: &[u64; 6], client: u64, extra: u32, wait: bool) -> Resu
         }
         rules::NR_PROCESS_VM_READV | rules::NR_PROCESS_VM_WRITEV => {
             let pid = vm_target(a[0], me, init, wait)?;
-            f.t[0] = Some(target(pid, true, me, wait)?.ok_or(ESRCH)?);
+            f.t[0] = Some(target(pid, true, me, who.uid[1], wait)?.ok_or(ESRCH)?);
         }
         rules::NR_KCMP => {
             for i in 0..2 {
@@ -198,7 +226,7 @@ fn gather_in(nr: u64, a: &[u64; 6], client: u64, extra: u32, wait: bool) -> Resu
                     return Err(Miss::Err(ESRCH));
                 }
                 let tid = mech::pid_from_view(p as u64, init);
-                f.t[i] = Some(target(tid, false, me, wait)?.ok_or(ESRCH)?);
+                f.t[i] = Some(target(tid, false, me, who.uid[1], wait)?.ok_or(ESRCH)?);
             }
         }
         rules::NR_PIDFD_GETFD => {
@@ -211,7 +239,7 @@ fn gather_in(nr: u64, a: &[u64; 6], client: u64, extra: u32, wait: bool) -> Resu
                     None => return Err(Miss::Err(EINVAL)),
                 }
             };
-            f.t[0] = Some(target(pid, true, me, wait)?.ok_or(ESRCH)?);
+            f.t[0] = Some(target(pid, true, me, who.uid[1], wait)?.ok_or(ESRCH)?);
         }
         _ => return Err(Miss::Err(rules::ENOSYS)),
     }
@@ -289,6 +317,6 @@ pub fn check(nr: u64, a: &[u64; 6], extra: u32) -> Result<(), i64> {
 pub fn may_access_mode(tgid: u64, mode: u32) -> Result<(), i64> {
     let tid = crate::compat::linux::proc::current_ids().0;
     let (who, me) = who_of(tid).ok_or(ESRCH)?;
-    let t = target(tgid, true, me, true).ok().flatten().ok_or(ESRCH)?;
+    let t = target(tgid, true, me, who.uid[1], true).ok().flatten().ok_or(ESRCH)?;
     rules::may_access(mode, &who, &t)
 }
