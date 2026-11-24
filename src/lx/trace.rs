@@ -106,7 +106,6 @@ pub fn gather(nr: u64, a: &[u64; 6], client: u64, extra: u32) -> Result<Facts, i
             match f.kind {
                 rules::K_ATTACH | rules::K_SEIZE => {
                     let tid = mech::pid_from_view(a[1] as i32 as i64 as u64, init);
-                    crate::compat::linux::proc::tgid_of(tid).ok_or(ESRCH)?;
                     f.t[0] = Some(target(tid, false, me).ok_or(ESRCH)?);
                     if f.kind == rules::K_SEIZE {
                         f.extra = a[3] as u32;
@@ -142,7 +141,6 @@ pub fn gather(nr: u64, a: &[u64; 6], client: u64, extra: u32) -> Result<Facts, i
                     return Err(ESRCH);
                 }
                 let tid = mech::pid_from_view(p as u64, init);
-                thread_tgid(tid).ok_or(ESRCH)?;
                 f.t[i] = Some(target(tid, false, me).ok_or(ESRCH)?);
             }
         }
