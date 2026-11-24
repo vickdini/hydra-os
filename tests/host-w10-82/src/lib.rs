@@ -5,7 +5,7 @@
 //!   `fork`, exit/`execve`, failed attaches, a fresh lx-ipc (generations), the notes;
 //! - lx-ipc's System V text and structures (`lx-ipc/src/sysvtext.rs`): `/proc/sysvipc/*`
 //!   lines, `shmid64_ds`, `shminfo`, `shm_info`, the limits, the info call's chunks;
-//! - linux-server's pseudo paths (`pseudo/path.rs`): `/proc/sysvipc/{shm,sem,msg}`.
+//! - lx-proc's /proc paths (`procfs/path.rs`, moved from linux-server by 7b-2): `/proc/sysvipc/{shm,sem,msg}`.
 //!
 //! The tests are in `tests.rs`.
 
@@ -33,7 +33,7 @@ pub mod sysvtext;
 
 /// linux-server's pseudo file system paths.
 pub mod pseudo {
-    #[path = "../../../../userland/drivers/linux-server/src/pseudo/path.rs"]
+    #[path = "../../../../userland/drivers/lx-proc/src/procfs/path.rs"]
     pub mod path;
 }
 

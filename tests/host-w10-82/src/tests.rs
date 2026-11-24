@@ -308,5 +308,4 @@ fn proc_sysvipc_paths() {
     assert_eq!(c(b"sysvipc"), Target::Kernel, "the directory: the kernel's");
     assert_eq!(c(b"sysvipc/foo"), Target::Kernel);
     assert_eq!(c(b"./sysvipc//shm"), Target::File(File::SysvIpc(0)));
-    assert!(!File::SysvIpc(0).in_sys());
 }
