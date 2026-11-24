@@ -907,6 +907,14 @@ pub const DEV_BLOCK: u32 = 1;
 /// A character device.
 pub const DEV_CHAR: u32 = 2;
 
+// wave10 GV1 begin
+/// Whether any device program is attached (vfs-server's `mknod` of a device node then
+/// leaves it to [`device_check`] here: `LX_FS_DEVCG`).
+pub fn any_device_programs() -> bool {
+    ANY_DEVICE.load(Ordering::Relaxed) || SERVER_ANY_DEVICE.load(Ordering::Relaxed)
+}
+// wave10 GV1 end
+
 /// Whether the calling process's cgroup programs allow `access` to device `kind`
 /// `major:minor` (`EPERM` if one refuses).
 pub fn device_check(kind: u32, major: u32, minor: u32, access: u32) -> Result<(), i64> {

@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w10_v1"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group V1's host unit tests (wave 10): vfs-server's change calls (POSIX ACL changes, the times, xattr and open decisions)"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

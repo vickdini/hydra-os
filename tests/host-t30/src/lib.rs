@@ -544,6 +544,10 @@ pub mod fs {
         pub fn forget_attr_of(ino: u64) {
             crate::fake::rec(|r| r.fs_forgot.push((ino, 3)));
         }
+        /// *stub* wave10 GV1: recorded as fs_forgot (ino, 7).
+        pub fn tmem_unlinked(ino: u64) {
+            crate::fake::rec(|r| r.fs_forgot.push((ino, 7)));
+        }
     }
 
     /// *stub* The descriptor variants the code under test matches on.
@@ -961,6 +965,10 @@ pub mod compat {
         }
 
         pub mod bpf {
+            /// *stub* wave10 GV1: device programs attached when switch 64 is set.
+            pub fn any_device_programs() -> bool {
+                crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 64 != 0
+            }
             pub fn set_server_device_programs(raw: &[u8]) -> i64 {
                 crate::fake::rec(|r| {
                     r.bpf_programs.push(raw.to_vec());
@@ -989,6 +997,10 @@ pub mod compat {
             pub fn apps_active() -> bool {
                 false
             }
+            /// *stub* wave10 GV1: label caches forgotten (recorded as fs_forgot (0, 64)).
+            pub fn labels_changed() {
+                crate::fake::rec(|r| r.fs_forgot.push((0, 64)));
+            }
             /// *stub* the caller has a subject unless switch 32 is set
             pub fn applies_to_current() -> bool {
                 crate::fake::FS_FLAGS.load(core::sync::atomic::Ordering::Acquire) & 32 == 0
@@ -1014,6 +1026,10 @@ pub mod compat {
                 pub parent: u32,
                 pub mountpoint: u64,
                 pub root: u64,
+            }
+            /// *stub* wave10 GV1: mount 7 of namespace 5 is tmpfs 3.
+            pub fn tmpfs_of(ns: u64, mnt: usize) -> Option<u32> {
+                (ns == 5 && mnt == 7).then_some(3)
             }
             pub fn vfs_gen(ns: u64) -> Option<u64> {
                 let t = crate::fake::MNT_TABLES.lock();
@@ -1092,6 +1108,10 @@ pub mod compat {
             }
             pub fn cache_forget(ino: u64) {
                 crate::fake::rec(|r| r.fs_truncated.push((ino, u64::MAX)));
+            }
+            /// *stub* wave10 GV1: no program runs from inode 4242 only.
+            pub fn text_busy(ino: u64) -> bool {
+                ino == 4242
             }
             pub fn cache_truncated(ino: u64, size: u64) {
                 crate::fake::rec(|r| r.fs_truncated.push((ino, size)));

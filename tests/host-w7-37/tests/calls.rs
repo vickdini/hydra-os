@@ -141,9 +141,15 @@ fn which_opens_are_served_here() {
     assert!(servable(O_CREAT | O_RDONLY));
     // reading with O_TRUNC truncates nothing (Linux leaves it to the file system)
     assert!(servable(O_RDONLY | O_TRUNC));
-    assert!(!servable(O_WRONLY | O_TRUNC));
-    assert!(!servable(O_PATH));
-    assert!(!servable(O_TMPFILE_MASK | O_DIRECTORY | O_RDWR_FLAG));
+    // wave10 GV1: truncating, O_PATH and O_TMPFILE opens are served too
+    assert!(servable(O_WRONLY | O_TRUNC));
+    assert!(servable(O_PATH));
+    assert!(servable(O_TMPFILE_MASK | O_DIRECTORY | O_RDWR_FLAG));
+    // (O_TMPFILE needs O_DIRECTORY, takes no O_CREAT or O_PATH; O_CREAT | O_DIRECTORY is
+    // the kernel's)
+    assert!(!servable(O_TMPFILE_MASK | O_RDWR_FLAG));
+    assert!(!servable(O_TMPFILE_MASK | O_DIRECTORY | O_CREAT | O_RDWR_FLAG));
+    assert!(!servable(O_CREAT | O_DIRECTORY));
 }
 
 const O_RDWR_FLAG: u32 = 2;

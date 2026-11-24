@@ -395,6 +395,17 @@ pub fn last_is_tmpfs() -> bool {
     id != 0 && id == current_ns_id() && table(id).and_then(|t| t.lock().get(mnt).map(|m| matches!(m.kind, Kind::Tree { tmpfs: Some(_) }))).unwrap_or(false)
 }
 
+// wave10 GV1 begin
+/// The tmpfs id of mount `mnt` of namespace `ns`, if it is a tmpfs (vfs-server made a file
+/// there: `LX_TMEM_MNT`, `LX_TMEM_CREATED`).
+pub fn tmpfs_of(ns: u64, mnt: usize) -> Option<u32> {
+    if ns == 0 {
+        return None;
+    }
+    table(ns).and_then(|t| t.lock().get(mnt).and_then(|m| if let Kind::Tree { tmpfs: Some(n) } = m.kind { Some(n) } else { None }))
+}
+// wave10 GV1 end
+
 // wave9 GM begin
 /// The tmpfs id of the mount the calling thread's last lookup ended in, if a tmpfs (where a
 /// file the kernel makes keeps its data in memory: `fs::tmem`).

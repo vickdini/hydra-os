@@ -129,3 +129,27 @@ pub fn statfs(total: u64, free: u64, objs: u64, fsid: [u32; 2]) -> [u8; STATFS_S
     put64(&mut b, 72, 4096);
     b
 }
+
+// wave10 GV1 begin
+/// `f_type` of a tmpfs (`TMPFS_MAGIC`).
+pub const TMPFS_MAGIC: i64 = 0x0102_1994;
+
+/// `struct statfs` of a tmpfs mount (the kernel's): with `usage` = `(limit, used, files)` of
+/// a tmpfs whose files keep data in memory, blocks = its `size=`; without, the type only.
+pub fn statfs_tmpfs(usage: Option<(u64, u64, u64)>) -> [u8; STATFS_SIZE] {
+    let mut b = [0u8; STATFS_SIZE];
+    let vals: [i64; 7] = match usage {
+        Some((limit, used, files)) => {
+            let (total, free) = (limit / 4096, limit.saturating_sub(used) / 4096);
+            [TMPFS_MAGIC, 4096, total as i64, free as i64, free as i64, (files + 1_000_000) as i64, 1_000_000]
+        }
+        None => [TMPFS_MAGIC, 4096, 0, 0, 0, 0, 0],
+    };
+    for (i, v) in vals.iter().enumerate() {
+        b[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+    }
+    put64(&mut b, 64, 255);
+    put64(&mut b, 72, 4096);
+    b
+}
+// wave10 GV1 end

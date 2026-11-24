@@ -66,6 +66,23 @@ fn truncate_frees_and_zeroes() {
 }
 
 #[test]
+fn shrinking_unmaps_the_cut_pages_everywhere() {
+    // wave10 GV1: a truncation to a smaller size asks every address space to unmap the
+    // file's pages past the end; growing does not
+    let _g = serial();
+    let f = file(1012, 9012);
+    assert_eq!(f.inode(), Some(1012));
+    hydra_hosttests_w9_m::compat::linux::mm::UNMAPS.lock().unwrap().clear();
+    f.truncate(3 * 4096).unwrap();
+    f.truncate(4096).unwrap(); // (no pages: nothing to unmap — review 11)
+    f.write(Some(0), &[1u8; 3 * 4096]).unwrap();
+    f.truncate(4096 + 10).unwrap();
+    let u = hydra_hosttests_w9_m::compat::linux::mm::UNMAPS.lock().unwrap().clone();
+    assert_eq!(u, vec![(1012, 4096 + 10)]);
+    tmem::forget(1012);
+}
+
+#[test]
 fn frames_go_back() {
     let _g = serial();
     let before = fake::live();

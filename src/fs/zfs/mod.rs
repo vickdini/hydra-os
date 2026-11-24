@@ -197,6 +197,18 @@ fn forget_attr(ino: u64) {
 pub fn forget_attr_of(ino: u64) {
     forget_attr(ino);
 }
+
+// wave10 GV1 begin
+/// In-memory tmpfs file `ino` lost a name through vfs-server (`LX_TMEM_UNLINKED`): it goes
+/// when it has none left and is not open.
+pub fn tmem_unlinked(ino: u64) {
+    forget_attr_of(ino);
+    let _ = with_server(|s| {
+        s.tmem_unlinked(ino);
+        Ok(())
+    });
+}
+// wave10 GV1 end
 // wave7 G7-2 end
 
 /// Forgets every object's attributes (a change whose objects are not all known here: a

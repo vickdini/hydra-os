@@ -38,12 +38,149 @@ pub const MAY_EXEC: u32 = 1;
 pub const MAY_WRITE: u32 = 2;
 pub const MAY_READ: u32 = 4;
 
-/// Whether an open with `flags` can be served here at all: it changes nothing (no
-/// truncation; creation is decided after the walk) and needs nothing only the kernel has.
+/// Whether an open with `flags` can be served here at all (wave10 GV1: creating,
+/// truncating, `O_PATH` and `O_TMPFILE` opens are; `O_CREAT` with `O_DIRECTORY` and no
+/// `O_TMPFILE` — Linux's `EINVAL` on new kernels, a file made then `ENOTDIR` on the kernel's
+/// — stays the kernel's, as do the flag mixes `open` rejects).
 pub fn servable(flags: u32) -> bool {
-    let acc = flags & O_ACCMODE;
-    flags & (O_PATH | O_TMPFILE_MASK) == 0 && !(flags & O_TRUNC != 0 && acc != O_RDONLY)
+    if flags & O_TMPFILE_MASK != 0 {
+        // O_TMPFILE needs O_DIRECTORY with it, no O_CREAT, no O_PATH
+        return flags & O_DIRECTORY != 0 && flags & (O_CREAT | O_PATH) == 0;
+    }
+    !(flags & O_CREAT != 0 && flags & O_DIRECTORY != 0)
 }
+
+// wave10 GV1 begin
+/// `EINVAL`.
+pub const EINVAL: i64 = -22;
+/// `UTIME_NOW`.
+pub const UTIME_NOW: i64 = (1 << 30) - 1;
+/// `UTIME_OMIT`.
+pub const UTIME_OMIT: i64 = (1 << 30) - 2;
+
+/// The new `(atime, mtime)` of a times call `nr` (`utime` 132: `struct utimbuf` of two
+/// seconds; `utimes` 235 / `futimesat` 261: two `timeval`s; `utimensat` 280: two
+/// `timespec`s with `UTIME_NOW`/`UTIME_OMIT`) from its argument's bytes (`None`: a NULL
+/// pointer, both "now"); `now` the wall clock. `EINVAL` for microseconds or nanoseconds out
+/// of range.
+pub fn utimes(nr: u64, raw: Option<&[u8]>, now: (i64, u32)) -> Result<(Option<(i64, u32)>, Option<(i64, u32)>), i64> {
+    let Some(b) = raw else { return Ok((Some(now), Some(now))) };
+    let w = |o: usize| i64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    match nr {
+        132 => Ok((Some((w(0), 0)), Some((w(8), 0)))),
+        235 | 261 => {
+            let tv = |o: usize| {
+                let us = w(o + 8);
+                if !(0..1_000_000).contains(&us) {
+                    return Err(EINVAL);
+                }
+                Ok(Some((w(o), (us * 1000) as u32)))
+            };
+            Ok((tv(0)?, tv(16)?))
+        }
+        _ => {
+            let ts = |o: usize| match w(o + 8) {
+                UTIME_NOW => Ok(Some(now)),
+                UTIME_OMIT => Ok(None),
+                ns if (0..1_000_000_000).contains(&ns) => Ok(Some((w(o), ns as u32))),
+                _ => Err(EINVAL),
+            };
+            Ok((ts(0)?, ts(16)?))
+        }
+    }
+}
+
+/// Whether a times call sets an explicit time (only the owner may), not just "now" (anyone
+/// who may write the file may).
+pub fn times_explicit(nr: u64, raw: Option<&[u8]>) -> bool {
+    let Some(b) = raw else { return false };
+    if nr != 280 {
+        return true;
+    }
+    let ns = |o: usize| i64::from_le_bytes(b[o + 8..o + 16].try_into().unwrap());
+    [ns(0), ns(16)].iter().any(|&n| n != UTIME_NOW && n != UTIME_OMIT)
+}
+
+/// The namespace of an extended attribute name (the kernel's `xattr_op` rules).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum XattrNs {
+    /// `user.*`: regular files and directories, by read or write permission.
+    User,
+    /// `trusted.*`: `CAP_SYS_ADMIN`.
+    Trusted,
+    /// `security.*`: anyone reads; `security.capability` needs `CAP_SETFCAP` to change,
+    /// others `CAP_SYS_ADMIN`.
+    Security,
+    /// `system.posix_acl_access` (`false`) or `system.posix_acl_default` (`true`).
+    Acl(bool),
+    /// Another `system.*` name: not supported.
+    System,
+}
+
+/// `ERANGE`.
+pub const ERANGE: i64 = -34;
+/// `EOPNOTSUPP`.
+pub const EOPNOTSUPP: i64 = -95;
+
+/// The namespace of xattr `name`: `ERANGE` for an empty or too long name, `EOPNOTSUPP`
+/// without a known prefix, `EINVAL` for the prefix alone.
+pub fn xattr_ns(name: &[u8]) -> Result<XattrNs, i64> {
+    if name.is_empty() || name.len() > 255 {
+        return Err(ERANGE);
+    }
+    let (ns, len) = if name.starts_with(b"user.") {
+        (XattrNs::User, 5)
+    } else if name.starts_with(b"trusted.") {
+        (XattrNs::Trusted, 8)
+    } else if name.starts_with(b"security.") {
+        (XattrNs::Security, 9)
+    } else if name.starts_with(b"system.") {
+        let k = match name {
+            b"system.posix_acl_access" => XattrNs::Acl(false),
+            b"system.posix_acl_default" => XattrNs::Acl(true),
+            _ => XattrNs::System,
+        };
+        (k, 7)
+    } else {
+        return Err(EOPNOTSUPP);
+    };
+    if name.len() == len {
+        return Err(EINVAL);
+    }
+    Ok(ns)
+}
+
+/// Whether a `security.capability` value is a valid `struct vfs_cap_data` (revision 2, 20
+/// bytes, or 3, 24 bytes with a root id; no flag bits but the effective one).
+pub fn fcaps_valid(data: &[u8]) -> bool {
+    let magic = data.get(..4).map_or(0, |m| u32::from_le_bytes(m.try_into().unwrap()));
+    let ok = (data.len() == 20 && magic & 0xff00_0000 == 0x0200_0000) || (data.len() == 24 && magic & 0xff00_0000 == 0x0300_0000);
+    ok && magic & 0x00ff_fffe == 0
+}
+
+/// A listed xattr name list (NUL-terminated names) as a caller sees it: `trusted.*` only
+/// with `CAP_SYS_ADMIN`.
+pub fn xattr_list_shown(names: &[u8], admin: bool) -> alloc::vec::Vec<u8> {
+    let mut shown = alloc::vec::Vec::new();
+    for n in names.split(|&b| b == 0).filter(|n| !n.is_empty()) {
+        // (wave10 GV1: vfs-server's own mark of an unnamed O_TMPFILE object is never shown)
+        if (admin || !n.starts_with(b"trusted.")) && n != b"trusted.hydra.tmpfile" {
+            shown.extend_from_slice(n);
+            shown.push(0);
+        }
+    }
+    shown
+}
+
+/// What an xattr read of `len` bytes answers for a buffer of `size`: the length to report
+/// with `size` 0, `ERANGE` when it does not fit, else the length copied.
+pub fn xattr_fits(len: usize, size: u64) -> Result<usize, i64> {
+    if size != 0 && (size as usize) < len {
+        return Err(ERANGE);
+    }
+    Ok(len)
+}
+// wave10 GV1 end
 
 /// What an open of an object of mode `mode` with `flags` does: `Ok(want)` the access to
 /// check (`MAY_*`), `Err(e)` its error ([`KERNEL`] for devices, FIFOs, sockets). In the

@@ -22,6 +22,10 @@
 //! `change` (attributes and names), `rules` (decisions, host-tested).
 
 pub mod enc;
+// wave10 GV1: ACL changes (pure), mknod/link and open's making half, the xattr calls
+pub mod acl;
+mod make;
+mod xattr;
 mod change;
 // (crate-visible: 7-3's mount calls use the same caller context)
 pub(crate) mod ctxt;
@@ -43,7 +47,8 @@ pub use ctxt::KERNEL;
 /// faccessat, faccessat2, readlink, readlinkat, statfs, open, openat;
 /// chmod, fchmodat, fchmod, chown, lchown, fchownat, fchown, truncate, ftruncate,
 /// utimensat; mkdir, mkdirat, symlink, symlinkat, unlink, rmdir, unlinkat, rename,
-/// renameat, renameat2.
+/// renameat, renameat2; (wave10 GV1) creat, mknod, mknodat, link, linkat, the twelve xattr
+/// calls, utime, utimes, futimesat, fchmodat2, fstatfs.
 pub const CLAIMED: &[u64] = &[
     // read-only. getdents64/getdents (217, 78) are served by `dir.rs` but not claimed: with
     // them a warm `find /usr` took 0.87-0.93 s against the kernel's 0.46-0.52 s; without,
@@ -51,6 +56,9 @@ pub const CLAIMED: &[u64] = &[
     4, 6, 262, 332, 21, 269, 439, 89, 267, 137, 2, 257,
     90, 268, 91, 92, 94, 260, 93, 76, 77, 280, // attributes
     83, 258, 88, 266, 87, 84, 263, 82, 264, 316, // names
+    // wave10 GV1: creat, mknod, mknodat, link, linkat, the xattr calls, utime, utimes,
+    // futimesat, fchmodat2, fstatfs
+    85, 133, 259, 86, 265, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 132, 235, 261, 452, 138,
 ];
 
 /// Calls served here but claimed only on request (`calls=...`): getdents64, getdents.
@@ -123,8 +131,14 @@ pub fn serve(cx: &Cx) -> Option<Answer> {
         89 | 267 => stat::readlink(cx),
         137 => stat::statfs(cx),
         217 | 78 => dir::getdents(cx),
-        2 | 257 => return Some(open::serve(cx)), // (wave7 G7-5: FIFOs redirect to LXS_IPC)
-        90 | 268 | 91 | 92 | 94 | 260 | 93 | 76 | 77 | 280 => change::attrs(cx),
+        2 | 257 | 85 => return Some(open::serve(cx)), // (wave7 G7-5: FIFOs redirect to LXS_IPC)
+        90 | 268 | 91 | 92 | 94 | 260 | 93 | 76 | 77 | 280 | 132 | 235 | 261 | 452 => change::attrs(cx),
+        // wave10 GV1 begin
+        133 | 259 => make::mknod(cx),
+        86 | 265 => make::link(cx),
+        188..=199 => xattr::serve(cx),
+        138 => stat::fstatfs(cx),
+        // wave10 GV1 end
         83 | 258 => change::mkdir(cx),
         88 | 266 => change::symlink(cx),
         87 | 84 | 263 => change::unlink(cx),

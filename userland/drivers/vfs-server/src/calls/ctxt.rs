@@ -20,6 +20,8 @@ pub use super::rules::{ENOENT, KERNEL};
 pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 /// `AT_EMPTY_PATH`.
 pub const AT_EMPTY_PATH: u64 = 0x1000;
+/// `EROFS` (wave10 GV1).
+pub const EROFS: i64 = -30;
 
 /// The back end of the objects themselves (the caches in front of zfs-server): pool
 /// objects only (`POOL_ONLY`: no node reaches vfs-server's own tmpfs through the calls;
@@ -154,10 +156,10 @@ pub fn mount_flags(c: &LxCall, n: Node) -> Result<u32, i64> {
     Ok(w.view.flags(n.mnt))
 }
 
-/// [`KERNEL`] when `n` lies in a read-only mount (the kernel answers `EROFS`).
+/// `EROFS` when `n` lies in a read-only mount (wave10 GV1: answered here; was the kernel's).
 pub fn writable(c: &LxCall, n: Node) -> Result<(), i64> {
     if mount_flags(c, n)? & kmounts::MS_RDONLY != 0 {
-        return Err(KERNEL);
+        return Err(EROFS);
     }
     Ok(())
 }
@@ -243,7 +245,7 @@ pub fn call(c: &LxCall) -> Result<Call, i64> {
 
 impl Call {
     /// As [`start`], in this call's table.
-    fn start(&self, c: &LxCall, path: &[u8]) -> Result<Start, i64> {
+    pub fn start(&self, c: &LxCall, path: &[u8]) -> Result<Start, i64> {
         if path.first() == Some(&b'/') {
             return Ok(Start::Root);
         }
@@ -275,7 +277,7 @@ impl Call {
     /// As [`writable`], in this call's table.
     pub fn writable(&self, n: Node) -> Result<(), i64> {
         if self.mount_flags(n)? & kmounts::MS_RDONLY != 0 {
-            return Err(KERNEL);
+            return Err(EROFS);
         }
         Ok(())
     }

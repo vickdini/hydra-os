@@ -96,7 +96,7 @@ pub enum Shape {
 }
 
 /// The file-service calls and their shapes (x86-64 Linux numbers).
-pub fn shape(nr: u64) -> Option<Shape> {
+pub const fn shape(nr: u64) -> Option<Shape> {
     Some(match nr {
         // open, creat, stat, lstat, access, readlink, mkdir, mknod, unlink, rmdir, rename,
         // link, symlink, chmod, chown, lchown, utime, utimes, truncate, the xattrs by path,
@@ -280,6 +280,10 @@ pub(super) fn fs_flags_global(c: &mut LxCall) -> u32 {
         Some(g) => c.mnt_gen = g,
         None => f |= LX_FS_MOUNTS,
     }
+    // wave10 GV1: device nodes made under device programs are the kernel's
+    if matches!(c.nr, 133 | 259) && l::bpf::any_device_programs() {
+        f |= crate::ipc::protocol::LX_FS_DEVCG;
+    }
     f
 }
 
@@ -345,7 +349,8 @@ pub(super) fn fill(c: &mut LxCall, t: &FdTable, sh: Shape, wait: bool) -> Result
     if let Some(fd) = first {
         let (i, h) = at_of(t, fd, wait)?;
         // (a call on an O_PATH descriptor is the kernel's: it decides what such a one may do)
-        if sh == Shape::Handle && (!matches!(i.kind, LX_AT_FILE | LX_AT_DIR) || i.flags & 0o10000000 != 0) {
+        // (wave10 GV1: but fstatfs is allowed on one, as on Linux)
+        if sh == Shape::Handle && (!matches!(i.kind, LX_AT_FILE | LX_AT_DIR) || (i.flags & 0o10000000 != 0 && c.nr != 138)) {
             return Ok(None);
         }
         c.at_kind = i.kind;
@@ -405,7 +410,10 @@ pub fn kernel_mask(nr: u64) -> u32 {
 /// rename, the mount calls); the others it does not serve (mknod, link, the xattr calls,
 /// utime(s)) stay with the kernel.
 pub fn policy_mask(nr: u64) -> u32 {
-    let served = matches!(nr, 2 | 257 | 21 | 269 | 439 | 90 | 268 | 91 | 92 | 94 | 260 | 93 | 76 | 77 | 280 | 83 | 258 | 88 | 266 | 87 | 84 | 263 | 82 | 264 | 316 | 155 | 165 | 166);
+    let served = matches!(nr, 2 | 257 | 21 | 269 | 439 | 90 | 268 | 91 | 92 | 94 | 260 | 93 | 76 | 77 | 280 | 83 | 258 | 88 | 266 | 87 | 84 | 263 | 82 | 264 | 316 | 155 | 165 | 166)
+        // wave10 GV1: creat, mknod(at), link(at), the xattr calls, utime(s), futimesat,
+        // fchmodat2 are served too
+        || matches!(nr, 85 | 133 | 259 | 86 | 265 | 188..=199 | 132 | 235 | 261 | 452);
     if served {
         !(LX_FS_LANDLOCK | LX_FS_ABAC)
     } else {
@@ -413,20 +421,10 @@ pub fn policy_mask(nr: u64) -> u32 {
     }
 }
 
-/// A creating open (`O_CREAT`) of a caller under Landlock or ABAC: vfs-server would send it
-/// back (the kernel makes files), so it stays here without the round trip, as before.
-fn policy_create(c: &LxCall) -> u32 {
-    const O_CREAT: u64 = 0o100;
-    let flags = match c.nr {
-        2 => c.args[1],
-        257 => c.args[2],
-        _ => return 0,
-    };
-    if flags & O_CREAT != 0 {
-        LX_FS_LANDLOCK | LX_FS_ABAC
-    } else {
-        0
-    }
+/// A creating open (`O_CREAT`) of a caller under Landlock or ABAC stayed here (vfs-server
+/// sent it back): wave10 GV1: vfs-server makes files now, so nothing stays.
+fn policy_create(_c: &LxCall) -> u32 {
+    0
 }
 
 /// [`crate::ipc::protocol::LX_FH_LANDLOCK`]: the domain of request `req`'s caller to `buf`.
@@ -499,8 +497,41 @@ pub static TO_KERNEL_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static KEPT: AtomicU64 = AtomicU64::new(0);
 
 // wave9 G9-C begin: which calls the kernel's file code still answers, by number
-/// Per call number below 512: (sent back by vfs-server, kept without asking) since boot.
-static KERNEL_BY_NR: [[AtomicU32; 2]; 512] = [const { [const { AtomicU32::new(0) }; 2] }; 512];
+/// Per call number below 512: (sent back by vfs-server, kept without asking, wave10 GV1:
+/// unclaimed) since boot.
+static KERNEL_BY_NR: [[AtomicU32; 3]; 512] = [const { [const { AtomicU32::new(0) }; 3] }; 512];
+
+// wave10 GV1 begin: file calls vfs-server did not claim (the kernel answers them without
+// asking: before vfs-server is up, or a number it does not serve)
+/// The file-service numbers ([`shape`]) whose answer is the kernel's path and name code: not
+/// the data calls on a handle (`fsync`, `fdatasync`, `sync_file_range`, `fallocate`) nor
+/// `getdents64`/`getdents` (left to the kernel's handle code on purpose: 7-2's numbers).
+const fn path_bits() -> [u64; 8] {
+    let mut b = [0u64; 8];
+    let mut nr = 0;
+    while nr < 512 {
+        if shape(nr as u64).is_some() && !matches!(nr, 74 | 75 | 277 | 285 | 217 | 78) {
+            b[nr / 64] |= 1 << (nr % 64);
+        }
+        nr += 1;
+    }
+    b
+}
+static PATH_BITS: [u64; 8] = path_bits();
+
+/// Whether call `nr` is a path or name call of the file service ([`path_bits`]).
+pub fn is_path_call(nr: u64) -> bool {
+    nr < 512 && PATH_BITS[nr as usize / 64] >> (nr % 64) & 1 != 0
+}
+
+/// Counts call `nr` if it is a file-service path call the kernel answers unclaimed.
+#[inline]
+pub fn count_unclaimed(nr: u64) {
+    if is_path_call(nr) {
+        KERNEL_BY_NR[nr as usize][2].fetch_add(1, Ordering::Relaxed);
+    }
+}
+// wave10 GV1 end
 
 /// Counts call `nr` answered by the kernel's own file code (`sent`: vfs-server sent it back).
 fn count_kernel(nr: u64, sent: bool) {
@@ -511,14 +542,15 @@ fn count_kernel(nr: u64, sent: bool) {
 
 /// The calls the kernel's file code answered, most first: `nr:sent/kept` (at most `n`).
 pub fn kernel_by_nr(n: usize) -> String {
-    let mut v: Vec<(u32, u32, usize)> = (0..512)
-        .map(|i| (KERNEL_BY_NR[i][0].load(Ordering::Relaxed), KERNEL_BY_NR[i][1].load(Ordering::Relaxed), i))
-        .filter(|&(a, b, _)| a + b != 0)
+    // (wave10 GV1: and the unclaimed calls)
+    let mut v: Vec<(u32, u32, u32, usize)> = (0..512)
+        .map(|i| (KERNEL_BY_NR[i][0].load(Ordering::Relaxed), KERNEL_BY_NR[i][1].load(Ordering::Relaxed), KERNEL_BY_NR[i][2].load(Ordering::Relaxed), i))
+        .filter(|&(a, b, c, _)| a + b + c != 0)
         .collect();
-    v.sort_unstable_by(|x, y| (y.0 + y.1).cmp(&(x.0 + x.1)));
-    let mut s = String::from("vfs to kernel by call (nr:sent/kept):");
-    for (a, b, i) in v.into_iter().take(n) {
-        s += &alloc::format!(" {}:{}/{}", i, a, b);
+    v.sort_unstable_by(|x, y| (y.0 + y.1 + y.2).cmp(&(x.0 + x.1 + x.2)));
+    let mut s = String::from("vfs to kernel by call (nr:sent/kept/unclaimed):");
+    for (a, b, c, i) in v.into_iter().take(n) {
+        s += &alloc::format!(" {}:{}/{}/{}", i, a, b, c);
     }
     s
 }
@@ -626,7 +658,11 @@ pub(super) fn forward(frame: &SyscallFrame) -> Option<i64> {
         Ok(Some(h)) => h,
         _ => {
             KEPT.fetch_add(1, Ordering::Relaxed);
-            count_kernel(nr, false);
+            // wave10 GV1: a call on a descriptor that is no pool file (a memfd, a socket, a
+            // device) is not the file code's: not counted by number
+            if sh != Shape::Handle || crate::task::with_current_fds_mut(|t| matches!(t.get(c.args[0] as i32 as usize), Some(FileDescriptor::Vnode(_)))) {
+                count_kernel(nr, false);
+            }
             return None;
         }
     };
@@ -1213,6 +1249,10 @@ fn changed(ino: u64, what: u64, arg: u64) -> i64 {
     if what & LX_FHC_GONE != 0 {
         crate::compat::linux::mm::cache_forget(ino);
     }
+    // wave10 GV1: an access-control label attribute changed
+    if what & crate::ipc::protocol::LX_FHC_LABELS != 0 {
+        crate::compat::linux::abac::labels_changed();
+    }
     if what & LX_FHC_NAMES != 0 {
         crate::fs::zfs::forget_names();
     }
@@ -1228,10 +1268,57 @@ fn changed(ino: u64, what: u64, arg: u64) -> i64 {
 /// [`LX_FH_TMEM`](crate::ipc::protocol::LX_FH_TMEM): sub-op `sub` of the in-memory tmpfs
 /// files (`fs::tmem::ctl`); answers go to the caller's buffer `b`.
 fn tmem(sub: u64, a: u64, b: u64) -> i64 {
-    crate::fs::tmem::ctl(sub, a, b, &|v: &[u8]| match crate::compat::linux::vfs::copy_out(b, v) {
-        Ok(()) => 0,
-        Err(e) => e,
-    })
+    // wave10 GV1 begin: the changes vfs-server makes to in-memory files
+    use crate::ipc::protocol::{LX_TMEM_CREATED, LX_TMEM_MAY_MOVE, LX_TMEM_MNT, LX_TMEM_TIMES, LX_TMEM_TRUNC, LX_TMEM_UNLINKED};
+    use crate::fs::tmem as t;
+    const ENOENT: i64 = -2;
+    let on = t::ENABLED.load(Ordering::Relaxed);
+    match sub {
+        LX_TMEM_MNT => {
+            let Some(id) = crate::compat::linux::mount::tmpfs_of(a >> 32, (a & 0xFFFF_FFFF) as usize).filter(|_| on) else { return ENOENT };
+            return crate::compat::linux::vfs::copy_out(b, &(id as u64).to_le_bytes()).map_or_else(|e| e, |()| 0);
+        }
+        LX_TMEM_CREATED => {
+            let raw = match crate::compat::linux::vfs::copy_in(b, 16) {
+                Ok(r) => r,
+                Err(_) => return EFAULT,
+            };
+            let w = |o: usize| u64::from_le_bytes(raw[o..o + 8].try_into().unwrap_or([0; 8]));
+            let (dir, nm) = (w(0), w(8));
+            t::created(dir, a, crate::compat::linux::mount::tmpfs_of(nm >> 32, (nm & 0xFFFF_FFFF) as usize));
+            crate::fs::zfs::forget_attr_of(a);
+            return 0;
+        }
+        LX_TMEM_TRUNC => {
+            let Some(f) = t::get(a) else { return ENOENT };
+            let r = f.truncate(b).map_or_else(|e| e, |()| 0);
+            crate::compat::linux::mm::cache_truncated(a, b);
+            return r;
+        }
+        LX_TMEM_TIMES => {
+            if let Some(f) = t::get(a) {
+                f.times_set();
+            }
+            return 0;
+        }
+        LX_TMEM_UNLINKED => {
+            crate::fs::zfs::tmem_unlinked(a);
+            0
+        }
+        crate::ipc::protocol::LX_TMEM_TEXT_BUSY => crate::compat::linux::mm::text_busy(a) as i64,
+        LX_TMEM_MAY_MOVE => {
+            if t::may_move(a, b) {
+                0
+            } else {
+                -18 // EXDEV
+            }
+        }
+        // wave10 GV1 end
+        _ => crate::fs::tmem::ctl(sub, a, b, &|v: &[u8]| match crate::compat::linux::vfs::copy_out(b, v) {
+            Ok(()) => 0,
+            Err(e) => e,
+        }),
+    }
 }
 // wave9 GM end
 
