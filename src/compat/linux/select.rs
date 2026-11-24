@@ -103,7 +103,6 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, timeout_ns: Option<u64>) -> i
     });
     loop {
         waits.register();
-        super::tty::pump();
         let mut out_r = alloc::vec![0u64; words];
         let mut out_w = alloc::vec![0u64; words];
         let out_e = alloc::vec![0u64; words];

@@ -21,7 +21,6 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;
-use uefi::proto::console::text::{Key, ScanCode};
 
 // c_iflag
 const ICRNL: u32 = 0o400;
@@ -281,183 +280,6 @@ pub fn write_kernel(data: &[u8]) -> usize {
     data.len()
 }
 
-/// Converts an input Key into ANSI terminal escape bytes.
-///
-/// # Arguments
-///
-/// * `key` - Hardware keyboard input key.
-///
-/// # Returns
-///
-/// Byte vector representing ANSI key sequence.
-fn key_bytes(key: Key) -> Vec<u8> {
-    match key {
-        Key::Printable(c) => {
-            let c = char::from(c);
-            match c {
-                '\u{8}' => alloc::vec![0x7f], // Backspace sends DEL, as on a Linux console
-                _ => {
-                    let mut buf = [0u8; 4];
-                    c.encode_utf8(&mut buf).as_bytes().to_vec()
-                }
-            }
-        }
-        Key::Special(ScanCode(code)) => match code {
-            1 => b"\x1b[A".to_vec(),
-            2 => b"\x1b[B".to_vec(),
-            3 => b"\x1b[C".to_vec(),
-            4 => b"\x1b[D".to_vec(),
-            5 => b"\x1b[H".to_vec(),
-            6 => b"\x1b[F".to_vec(),
-            8 => b"\x1b[3~".to_vec(),
-            9 => b"\x1b[5~".to_vec(),
-            10 => b"\x1b[6~".to_vec(),
-            0x17 => alloc::vec![0x1b], // Escape
-            _ => Vec::new(),
-        },
-    }
-}
-
-/// Feeds input bytes through the line discipline: echo goes to `echo`, and `ISIG`
-/// characters add the signal to raise (in the foreground group) to `signals`.
-///
-/// # Arguments
-///
-/// * `t` - Active Tty state.
-/// * `bytes` - Incoming raw input bytes.
-/// * `echo` - Output buffer for echoed characters.
-/// * `signals` - Output buffer for generated signals.
-pub(crate) fn feed_input(t: &mut Tty, bytes: &[u8], echo: &mut Vec<u8>, signals: &mut Vec<u32>) {
-    for &b in bytes {
-        if let Some(sig) = input_byte(t, b, echo) {
-            signals.push(sig);
-        }
-    }
-}
-
-/// Feeds one input byte through the line discipline. Returns a signal to raise, if any.
-///
-/// # Arguments
-///
-/// * `t` - Active Tty state.
-/// * `b` - Input byte.
-/// * `echo` - Output buffer for echo characters.
-///
-/// # Returns
-///
-/// `Some(signal)` if input byte generated a signal (e.g. `SIGINT`), or `None`.
-fn input_byte(t: &mut Tty, mut b: u8, echo: &mut Vec<u8>) -> Option<u32> {
-    let tm = t.termios;
-    if tm.iflag & ICRNL != 0 && b == b'\r' {
-        b = b'\n';
-    }
-    if tm.lflag & ISIG != 0 {
-        let sig = if b == tm.cc[VINTR] {
-            Some(super::proc::SIGINT)
-        } else if b == tm.cc[VQUIT] {
-            Some(super::proc::SIGQUIT)
-        } else if b == tm.cc[VSUSP] {
-            Some(super::proc::SIGTSTP)
-        } else {
-            None
-        };
-        if let Some(sig) = sig {
-            t.line.clear();
-            if tm.lflag & ECHO != 0 {
-                echo.extend_from_slice(&[b'^', b + 0x40, b'\r', b'\n']);
-            }
-            return Some(sig);
-        }
-    }
-    if tm.lflag & ICANON != 0 {
-        if b == tm.cc[VERASE] || b == 0x08 {
-            if t.line.pop().is_some() && tm.lflag & ECHO != 0 {
-                echo.extend_from_slice(b"\x08 \x08");
-            }
-        } else if b == tm.cc[VKILL] {
-            for _ in 0..t.line.len() {
-                if tm.lflag & ECHO != 0 {
-                    echo.extend_from_slice(b"\x08 \x08");
-                }
-            }
-            t.line.clear();
-        } else if b == tm.cc[VWERASE] {
-            while matches!(t.line.last(), Some(b' ')) {
-                t.line.pop();
-                echo.extend_from_slice(b"\x08 \x08");
-            }
-            while matches!(t.line.last(), Some(c) if *c != b' ') {
-                t.line.pop();
-                echo.extend_from_slice(b"\x08 \x08");
-            }
-        } else if b == tm.cc[VEOF] {
-            let line = core::mem::take(&mut t.line);
-            t.ready.extend(line.into_iter().map(Some));
-            t.ready.push_back(None);
-        } else if b == b'\n' {
-            t.line.push(b);
-            let line = core::mem::take(&mut t.line);
-            t.ready.extend(line.into_iter().map(Some));
-            if tm.lflag & ECHO != 0 {
-                echo.extend_from_slice(b"\r\n");
-            }
-        } else {
-            t.line.push(b);
-            if tm.lflag & ECHO != 0 {
-                if b < 0x20 && tm.lflag & ECHOCTL != 0 {
-                    echo.extend_from_slice(&[b'^', b + 0x40]);
-                } else {
-                    echo.push(b);
-                }
-            }
-        }
-    } else {
-        t.ready.push_back(Some(b));
-        if tm.lflag & ECHO != 0 {
-            echo.push(b);
-        }
-    }
-    None
-}
-
-/// Moves pending keystrokes into the terminal. Safe to call whenever no kernel lock is
-/// held (read paths and returns to user mode).
-pub fn pump() {
-    // (wave8 GT: forwarded, tty-server takes the keys; the console is never attached here)
-    let mut keys = Vec::new();
-    {
-        let t = match TTY.try_lock() {
-            Some(t) => t,
-            None => return,
-        };
-        if t.session == 0 {
-            return;
-        }
-    }
-    while let Some(k) = crate::console::read_key() {
-        keys.push(k);
-    }
-    if keys.is_empty() {
-        return;
-    }
-    let mut echo = Vec::new();
-    let mut signals = Vec::new();
-    let fg = {
-        let mut t = TTY.lock();
-        for k in keys {
-            feed_input(&mut t, &key_bytes(k), &mut echo, &mut signals);
-        }
-        t.fg_pgrp
-    };
-    if !echo.is_empty() {
-        out_raw(&echo);
-    }
-    for sig in signals {
-        super::proc::post_group(fg, sig);
-    }
-    // Another task may be waiting for the input this pump just processed
-    INPUT_WQ.wake_all();
-}
 
 /// True if input is buffered for `read` (does not pull new keystrokes; see [`pump`]).
 ///
@@ -598,9 +420,7 @@ pub fn ioctl_kernel(request: u64, arg: u64) -> i64 {
     if let Some(r) = vt_ioctl(request, arg) {
         return r;
     }
-    if request == 0x541B {
-        pump(); // FIONREAD counts keystrokes not yet pumped
-    }
+
     let default_size = || {
         let (cols, rows) = crate::video::console::dimensions();
         (rows as u16, cols as u16)

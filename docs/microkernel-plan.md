@@ -5,7 +5,7 @@ This plan turns the six recommendations in [microkernel-comparison.md](microkern
 - It was rewritten 2026-11-18 to cover every wave: what waves 1–3 delivered, what wave 4 is doing, and the planned waves after it.
 - Moving the Linux layer is planned step by step in [linux-server-design.md](linux-server-design.md). This document maps those steps onto waves.
 
-## Where things stand (2026-11-18)
+## Where things stand (2026-11-24, after wave 10)
 
 | Wave | Groups | Status | Kernel `src/` lines after |
 |---|---|---|---:|
@@ -17,11 +17,14 @@ This plan turns the six recommendations in [microkernel-comparison.md](microkern
 | 5 | Steps 3–4 (network, Unix sockets, pipes), personality hook, open bugs, designs for display/VFS/services | Merged, pushed, deployed 2026-11-19 (5440095) | |
 | 6 | Foundation for separate services: routing, direct calls, restarts, cheaper copies, memory objects, first split (lx-sec), open bugs | Merged, pushed, deployed 2026-11-20 | |
 | 7 | The file service: vfs-server, path calls, mounts and namespaces, tmpfs, `/proc` in linux-server, execve front half, restarts that keep state; the two-load hang | Done 2026-11-21 (see "Wave 7") | 108,108 (the kernel copies stay as the switch back until wave 8) |
-| 8–10 | Device services, splitting the rest ([linux-services-design.md](linux-services-design.md) section 9); wave 8 starts with the carry-over from wave 7 | Planned | |
+| 8 | Device services (display, input, sound, terminals), lx-net and lx-ipc split out, zfs-server durability, mount calls into vfs-server | Done, deployed 2026-11-22 | 112,746 (copies kept as switch-backs) |
+| 9 | The rest of the file service (FUSE, inotify/fanotify, Landlock/ACL/ABAC, io_uring/aio routing, tmpfs in memory objects), the process mechanism; the kernel's file-code copy deleted (9-C) | Done, deployed 2026-11-23 | 113,823 |
+| 10 | lx-proc (process calls, `/proc`, ptrace/perf policy), the change calls and `/dev` into vfs-server, SysV shm into lx-ipc, `tcp_connect`; then 10-C deleted every remaining in-kernel copy and switch-back word | Done 2026-11-24 (10-C: see "Wave 10") | 118,176 before 10-C → about 102,100 |
 | 11+ | FreeBSD, then macOS programs, on the shared services | Planned; step 0 done in wave 4 | |
 
 - **Why the line count rose in wave 3:** step 1 added the forwarding machinery (`src/lx`, 946 lines) and PCID (`src/arch/pcid.rs`, 365 lines). It also keeps the in-kernel copy of each moved piece, as the switch back to the kernel (`lx=kernel`), until a later step deletes it.
-- **Today:** the Linux layer (`src/compat/linux`) is 51,444 lines, still mostly in the kernel. The ring-3 drivers and servers (`userland/drivers`) are 22,339 lines.
+- **2026-11-18:** the Linux layer (`src/compat/linux`) was 51,444 lines, still mostly in the kernel; the ring-3 drivers and servers (`userland/drivers`) 22,339 lines.
+- **After wave 10 (2026-11-24):** no service has an in-kernel copy and there is no switch back (decision 32). `src/compat/linux` is about 37,700 lines of mechanism (descriptor table, page cache, mm, exec's back half, the walk and path calls vfs-server sends back, `/proc` files lx-proc leaves to the kernel, signals, futexes, io_uring/aio rings, the ptrace stop mechanism); `userland/drivers` is about 68,900 lines.
 
 ## Ground rules (every wave)
 

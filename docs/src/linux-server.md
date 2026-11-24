@@ -65,11 +65,13 @@ Each table entry was a byte of flags (wave 6 widened it to a u32 that also names
 descriptor whose server object the call carries (`T_FD0`: `LxCall::obj`), and the call
 carries the caller's IPC namespace and umask (`T_IPC`).
 
-**The switch back to the in-kernel code** (for bisecting inside one build): QEMU's
-`-fw_cfg name=opt/hydra/lx,string=kernel`, or the word `lx=kernel` in the boot entry's
-options. The kernel's copy of `keys.rs` then answers, exactly as before step 1; the test call
-returns 0 from the kernel. The boot log says which: `[lx] add_key, request_key, keyctl:
-forwarded to linux-server` or `... in the kernel (switched back: lx=kernel)`.
+**No switch back since wave 10 (10-C, decision 32).** Until wave 10, QEMU's
+`-fw_cfg name=opt/hydra/lx,string=kernel` or the boot word `lx=kernel` (and per service
+`lx.<name>=kernel`, `lx.<name>=linux`) sent calls back to an in-kernel copy. Those copies are
+deleted; the words are read only to log `[lx] <word>: ignored (no switch back since wave 10: a
+crashed service is restarted)`. A service that is not running answers `ENOSYS` (`EIO` once
+the restart ladder gave it up; `EAFNOSUPPORT` for `socket` of its family); a restarting one
+is waited for.
 
 ## Several services (wave 6, Group 19)
 
@@ -1123,6 +1125,50 @@ slave to master) and `pty_rtt` (two processes ping-pong a byte).
 - **Measured** (KDE login + Firefox + Dolphin, prof line `vfs to kernel by call`): vfs-server
   served 267,289 file calls, the kernel's code 7,956 (openat 6,064, readlink 777, ftruncate
   451 on non-pool handles, faccessat2 150, readlinkat 142, statx 87, statfs 83, ...).
+
+## What the kernel is after wave 10 (Group 10-C)
+
+Wave 10's closing group deleted every in-kernel copy of a moved piece and every switch-back
+word. Measured first (KDE login + Firefox + Dolphin, with a temporary counter of moved call
+numbers reaching the kernel's dispatcher and of device opens the kernel's own drivers
+answered): 525,978 calls were forwarded and the copies answered nothing; the only moved
+numbers that reached the kernel were lx-proc's approved redirects (`prctl` options it leaves
+to the kernel, `unshare` after its decision), which are mechanism.
+
+- **Gone:** `keys.rs`, `mqueue.rs`, `inet.rs`, `socket.rs`, `sockopt.rs`, `netlink.rs`,
+  `eventfd.rs`, `signalfd.rs`, `timerfd.rs`; the System V semaphore and message queue copy;
+  bpf's maps, programs and `bpf()`; the kernel's DRM, evdev and ALSA devices; the kernel's
+  terminals (ptys, the console line discipline); the setuid family, `setgroups`,
+  `setpgid`/`setsid`/`getpgid`/`getsid`, `setrlimit`/`prlimit64`, `sethostname` and
+  `setdomainname` arms; the kernel's TCP/UDP/ICMP socket client in `net/client.rs`; the
+  `FileDescriptor` kinds only those copies made (`Socket`, `Inet`, `Unix`, `EventFd`,
+  `SignalFd`, `TimerFd`, `PidFd`, `Pty`); `SvcMode`, `all_kernel`, `lx.uring=kernel`;
+  linux-server's co-located builds of lx-net, lx-ipc and lx-sec (`lx.<name>=linux`).
+- **Kept, as mechanism:** the descriptor table and file handles, the page cache, `mm`,
+  `tmem`, exec's back half, the info and identity primitives, the ptrace stop mechanism and
+  perf counters (lx-proc decides, decision 35), the `io_uring`/`aio` rings (decision 34; each
+  request is routed to its descriptor's owner), readiness words, `lx/shm.rs` (maps System V
+  segments after lx-ipc's answer; `shmdt`), the bpf device-program interpreter (lx-sec hands
+  device programs over), the device services' kernel side (`ipc/input.rs`' ring and routing,
+  `ipc/screen.rs`, `ipc/sound.rs` with the HDA probe and stream programming in `snd.rs`, the
+  VT switch hooks in `drm.rs`, the `/sys` input descriptions in `evdev.rs`, `lx/console.rs`),
+  the `/dev/mem` family, `/dev/pts` names answered with tty-server's node table, the
+  path half of a Unix socket's `bind`/`connect` (`unix.rs`), `/proc/net/dev` and the
+  interface ioctls (`rtnetlink.rs`), the emergency prompt, and the `prctl`/`unshare`/
+  `setns`/`syslog`/`acct` mechanism lx-proc approves.
+- **The kernel walk and path calls stay:** they implement what vfs-server still sends back
+  (1,796 calls under KDE: the `/proc` files the kernel keeps, `mount`/`umount2`/`pivot_root`
+  in the kernel's mount table, changes inside FUSE mounts through `fuse.rs`) and boot before
+  vfs-server runs. `mount.rs` stays (the table's write-through owner, the FUSE ns-0 mirror).
+- **linux-server stays, smaller:** it serves `/sys` (cpu ranges, efivars), exec's front half
+  (169 under KDE) and Hydra's test calls (`lx_null`, `svc_rtt`, `dcall_rtt` benches). With no
+  unkept pieces left it is **FailObjects** now (was EndLinux): a crash fails its calls in flight
+  and its open `/sys` files, nothing else. Retiring it would mean moving `/sys` to vfs-server
+  or lx-proc, exec's front half to vfs-server and the test calls to svc-test: small, but not
+  needed for decision 32 (no copy is left in it).
+
+Kernel `src/`: 118,176 lines at the start of 10-C, about 102,100 after (wave 9 ended at
+113,823).
 
 ## lx-proc: the process service (wave 10, Group 7b-1)
 

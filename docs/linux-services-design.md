@@ -263,6 +263,8 @@ Group 14's hook gives each personality its own table, selected through a per-CPU
 
 ### 3.7 The switch back
 
+**Superseded (wave 10, decision 32):** the in-kernel copies are deleted and every word below is ignored with a boot-log line; crashes are handled by restarts. Kept here as the history of how the moves were bisected.
+
 - **`lx=kernel`** (QEMU fw_cfg or boot word) sends every moved call back to the in-kernel code, as today. It clears every `svc` and `FAMILY_SVC` entry.
 - **New: `lx.<name>=kernel`** (for example `lx.vfs=kernel`) sends back only that service's calls: bisecting inside one build, per service.
 - **New: `lx.<name>=linux`** co-locates a split service back into linux-server (its registry entry points at 0x29). This bisects "the code is wrong" against "the split is wrong".
@@ -639,6 +641,8 @@ Total about 19–24 agent-days, six groups.
 | **C** | Closing: in-kernel copies of waves 6–9 deleted after deployment; linux-server reduced to `io_uring`/`aio` (FailObjects); line counts; the final budget run; a kill test of every service under KDE in one session | 3–4 |
 
 Total about 15–19 agent-days, five groups.
+
+**As done (2026-11-24):** wave 10 ran as 7b-1, V1, 8-2, N, then 7b-2, 8-1, V2, then 10-C. 10-C deleted every in-kernel copy and switch-back word (decision 32). The io_uring/aio rings stayed in the kernel as mechanism (decision 34), so linux-server was not reduced to them: it keeps `/sys` (cpu ranges, efivars), exec's front half and the test calls, and is FailObjects now (it hosts no unkept pieces). See `docs/src/linux-server.md`, "What the kernel is after wave 10".
 
 ### 9.6 After wave 10: other systems' programs
 
