@@ -271,6 +271,12 @@ Built from [linux-services-design.md](linux-services-design.md) section 9.5 plus
 
 About 26–32 agent-days, eight groups.
 
+**10-C as done (2026-11-24, E:\os-70, `w10-close`):**
+- **Map first:** under KDE + Firefox + Dolphin with a temporary counter, 525,978 calls were forwarded and no in-kernel copy answered any (the only moved numbers reaching the kernel were lx-proc's approved `prctl`/`unshare` redirects, i.e. mechanism).
+- **Deleted:** every switch-back word (`lx=kernel`, `lx.<name>=kernel`, `lx.<name>=linux`, `lx.uring=kernel`: ignored with a boot-log line), the "service not running" fallbacks into the kernel, and the copies: keys, POSIX queues, SysV semaphores/messages, bpf objects, Internet/Unix/netlink sockets, pipes/eventfd/signalfd/timerfd/pidfd objects, the kernel's DRM, evdev, ALSA and terminal devices, the process-policy arms lx-proc serves, the kernel's socket client in `net/client.rs`; linux-server's co-located lx-net/lx-ipc/lx-sec builds. Kernel `src/` 118,176 → about 102,100 lines; 449 host tests of deleted code went with it (2,890 → 2,441, all passing).
+- **Kept (mechanism, see `docs/src/linux-server.md`):** the walk and path calls (vfs-server still sends back the kernel-kept `/proc` files, `mount`/`pivot_root` and FUSE changes), `mount.rs`, the io_uring/aio rings (decision 34), the ptrace stop mechanism, the device services' kernel side. linux-server stays (`/sys`, exec's front half, test calls), now FailObjects.
+- **Checks:** suite 100/100 forwarded, with `--lx kernel` (now only logged as ignored) and with the IOMMU; suite_loop; host crates; budget A/B against a2c070d (2 rounds alternating): every call within noise (forwarded `lx_null` 2.8 µs both, stat 4.6 vs 4.7–5.2, open+close 7.0–7.1 vs 7.3–7.9, `tcp_connect` 110 vs 108–111, fork+exec 2.05–2.17 ms vs 2.09 ms); every service killed once in one KDE session (desktop, Firefox, Dolphin, sound and Wine fine, 0 crashes). The installer test was not run (the live stick image `m-out/hydra-live.img` is no longer on WSL's disk).
+
 ### Waves 5–9: the rest of the Linux layer (one-server plan, superseded after wave 5)
 
 Each wave does one or two steps of section 7.2 of the design. Two habits carry through every step:
