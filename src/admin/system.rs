@@ -272,6 +272,8 @@ pub fn irqs(out: &mut Vec<u8>) {
 // wave11 GR begin
 /// Service kills asked for later (`service kill NAME after S`): name, when (ms since boot).
 static DELAYED_KILLS: spin::Mutex<Vec<(alloc::string::String, u64)>> = spin::Mutex::new(Vec::new());
+/// At most this many wait at once.
+const MAX_DELAYED_KILLS: usize = 16;
 /// Whether the task doing them runs.
 static KILLER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
@@ -313,8 +315,18 @@ pub fn service_ctl(code: u64, name: &str, delay_s: u64) -> Result<u64, Failure> 
         // kernel task, so the console can run a program meanwhile (kill tests of a call in
         // flight, e.g. a console read at a tty-server crash)
         SVCCTL_KILL if delay_s > 0 => {
+            // (review F10: a known service only, and at most MAX_DELAYED_KILLS waiting)
+            if !sv::get_service_snapshots().iter().any(|s| s.name == name) {
+                return Err(Message(ENOENT, "Service not found"));
+            }
             let at = crate::arch::pit::uptime_ms() + delay_s.min(3600) * 1000;
-            DELAYED_KILLS.lock().push((alloc::string::String::from(name), at));
+            {
+                let mut l = DELAYED_KILLS.lock();
+                if l.len() >= MAX_DELAYED_KILLS {
+                    return Err(Message(EIO, "Too many delayed kills waiting"));
+                }
+                l.push((alloc::string::String::from(name), at));
+            }
             if !KILLER.swap(true, core::sync::atomic::Ordering::AcqRel) {
                 crate::task::spawn("svc-killer", delayed_killer, crate::task::TaskPriority::Normal);
             }

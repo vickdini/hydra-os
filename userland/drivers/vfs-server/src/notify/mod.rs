@@ -292,7 +292,11 @@ fn refresh(st: &State, slots: &[u32], bump: bool) {
 // Start and restart
 // ----------------------------------------------------------------------
 
-/// wave11 GR: the owner of an inotify instance taken back without its records (unknown).
+/// wave11 GR: the owner of an inotify instance taken back without its records (unknown:
+/// the kernel's object list names no owner). No caller has this uid (`(uid_t)-1` is not a
+/// user), so such instances count against no user's instance limit, and their (empty)
+/// watch lists against nobody's watch limit; the first `inotify_add_watch` on one makes
+/// the caller its owner (review F2).
 const REBORN_UID: u32 = u32::MAX;
 
 /// Before going online: the window, the kept records and the previous instance's objects.
@@ -572,6 +576,13 @@ fn add_watch(cx: &Cx) -> Result<i64, i64> {
         Err(e) => return Err(e),
     };
     with(|st| {
+        // wave11 GR (review F2): an instance taken back without its records belongs to the
+        // first user who adds a watch to it (the program that holds it): from then on it
+        // counts against that user's limits, and its record says so
+        if let Some(i) = st.inos.get_mut(&slot).filter(|i| i.uid == REBORN_UID) {
+            i.uid = cx.c.uid;
+            st.keep((slot, 0, 0), KRec::InGroup { slot, uid: cx.c.uid });
+        }
         // (a new watch counts against its user's limit)
         let uid = st.inos.get(&slot).map_or(0, |i| i.uid);
         let known = st.inos.get(&slot).is_some_and(|i| i.by_ino.contains_key(&ino));

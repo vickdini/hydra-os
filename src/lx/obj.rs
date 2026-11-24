@@ -48,6 +48,7 @@ use crate::ipc::protocol::{
 use crate::task::wait::{QueueRef, WaitQueue, WaitSet};
 use crate::task::TaskId;
 
+const EPERM: i64 = -1; // wave11 GR
 const ESRCH: i64 = -3;
 const EBADF: i64 = -9;
 const EBUSY: i64 = -16;
@@ -789,6 +790,11 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
             crate::compat::linux::vfs::copy_out(c, p).map_or_else(|e| e, |()| p.len() as i64)
         }
         LX_OBJ_BPF_DEVICE => {
+            // wave11 GR (review F5): the device-program list is lx-sec's alone (reading and
+            // replacing it)
+            if h == 0 || h != super::svc::host_of(crate::ipc::protocol::LXS_SEC) {
+                return EPERM;
+            }
             // wave11 GR begin: c = 1 reads the list the kernel holds back (into a, cap b):
             // its length, or ERANGE when it does not fit
             if c == 1 {
