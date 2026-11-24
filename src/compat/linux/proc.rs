@@ -2113,7 +2113,13 @@ pub fn parent_of(pid: u64) -> u64 {
 
 /// The process thread `tid` belongs to.
 pub fn tgid_of(tid: u64) -> Option<u64> {
-    PROCS.lock().values().find(|p| !p.zombie && p.threads.contains_key(&tid)).map(|p| p.pid)
+    tgid_in(&PROCS.lock(), tid)
+}
+
+/// wave10 G8-1: [`tgid_of`] on a process table the caller holds (`lx::trace`'s lock-free
+/// path takes it only if free).
+pub fn tgid_in(procs: &BTreeMap<u64, alloc::boxed::Box<Process>>, tid: u64) -> Option<u64> {
+    procs.values().find(|p| !p.zombie && p.threads.contains_key(&tid)).map(|p| p.pid)
 }
 
 /// Whether thread `tid` of process `pid` has an unblocked signal pending (`true` also when

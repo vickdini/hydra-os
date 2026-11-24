@@ -32,7 +32,6 @@ const EOPNOTSUPP: i64 = -95;
 
 const PAGE: u64 = 4096;
 
-const CAP_SYS_PTRACE: u64 = 1 << 19;
 const CAP_SYS_NICE: u64 = 1 << 23;
 
 fn has_cap(bit: u64) -> bool {
@@ -431,23 +430,13 @@ fn with_thread<R>(tid: u64, f: impl FnOnce(&crate::task::Task) -> R) -> Option<R
     sched.with_task_mut(crate::task::TaskId(tid), |t| (t.state != crate::task::TaskState::Dead).then(|| f(t))).flatten()
 }
 
-/// Ptrace-style access check (`PTRACE_MODE_ATTACH_REALCREDS`): same real, effective and
-/// saved user IDs, or `CAP_SYS_PTRACE`.
+/// Ptrace-style access check (`PTRACE_MODE_ATTACH_REALCREDS`). wave10 G8-1: the one rule
+/// (`lx::ptrace_rules::may_access`: same real, effective and saved user and group IDs and a
+/// dumpable target, or `CAP_SYS_PTRACE` over it), decided here for the callers that do not
+/// go through lx-proc.
 pub(crate) fn may_access(pid: u64) -> Result<(), i64> {
-    let target = crate::task::SCHEDULER.lock().with_process(pid, |t| (t.uid, t.euid, t.suid, t.service.is_some()));
-    let Some((uid, euid, suid, service)) = target else { return Err(ESRCH) };
-    if pid == super::proc::current_ids().1 {
-        return Ok(());
-    }
-    if service {
-        return Err(EPERM);
-    }
-    let me = crate::task::with_current_task_mut(|t| t.uid).unwrap_or(u32::MAX);
-    if has_cap(CAP_SYS_PTRACE) || (me == uid && me == euid && me == suid) {
-        Ok(())
-    } else {
-        Err(EPERM)
-    }
+    use crate::lx::ptrace_rules::{MODE_ATTACH, MODE_REALCREDS};
+    crate::lx::trace::may_access_mode(pid, MODE_ATTACH | MODE_REALCREDS)
 }
 
 // ----------------------------------------------------------------------
@@ -745,11 +734,13 @@ fn process_vm(pid: u64, liov: u64, lcnt: u64, riov: u64, rcnt: u64, flags: u64, 
         Ok(v) => v,
         Err(e) => return e,
     };
+    let args = [pid, liov, lcnt, riov, rcnt, flags];
     let pid = match target_pid(pid) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    if let Err(e) = may_access(pid) {
+    // wave10 G8-1: lx-proc's verdict, or the rule here (`lx::trace`)
+    if let Err(e) = crate::lx::trace::check(if write { 311 } else { 310 }, &args, 0) {
         return e;
     }
     let Some(mm) = crate::task::SCHEDULER.lock().with_process(pid, |t| t.mm.clone()).flatten() else { return ESRCH };
@@ -874,10 +865,10 @@ fn kcmp(pid1: u64, pid2: u64, kind: u64, idx1: u64, idx2: u64) -> i64 {
     };
     let info = |tid: u64| with_thread(tid, |t| (t.tgid, t.fds.clone(), t.mm.clone()));
     let (Some((ga, fa, ma)), Some((gb, fb, mb))) = (info(a), info(b)) else { return ESRCH };
-    for g in [ga, gb] {
-        if let Err(e) = may_access(g) {
-            return e;
-        }
+    let _ = (ga, gb);
+    // wave10 G8-1: both by the ptrace read rule: lx-proc's verdict, or the rule here
+    if let Err(e) = crate::lx::trace::check(312, &[pid1, pid2, kind, idx1, idx2, 0], 0) {
+        return e;
     }
     let order = |x: usize, y: usize| -> i64 {
         if x == y {

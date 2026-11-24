@@ -202,7 +202,7 @@ pub const STATIC: &[(&str, &[u8])] = &[
     ("sys/kernel/msgmax", b"8192\n"),
     ("sys/kernel/msgmnb", b"16384\n"),
     ("sys/kernel/msgmni", b"32000\n"),
-    ("sys/kernel/yama/ptrace_scope", b"3\n"),
+    ("sys/kernel/yama/ptrace_scope", b"0\n"), // wave10 G8-1: Yama scope 0, what Hydra enforces
     ("sys/kernel/perf_event_paranoid", b"2\n"),
 ];
 

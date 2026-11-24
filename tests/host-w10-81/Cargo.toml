@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w10_81"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group 8-1 host unit tests (wave 10): the ptrace access rule and the tracing calls' decisions (src/lx/ptrace_rules.rs) and lx-proc's half (userland/drivers/lx-proc/src/trace.rs) against a model of the kernel's facts and approval marks"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

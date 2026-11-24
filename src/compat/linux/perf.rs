@@ -27,7 +27,6 @@ use crate::task::wait::WaitSet;
 const ENOENT: i64 = -2;
 const ESRCH: i64 = -3;
 const EBADF: i64 = -9;
-const EACCES: i64 = -13;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 const EMFILE: i64 = -24;
@@ -372,10 +371,6 @@ impl CharDevice for PerfDev {
     }
 }
 
-fn caps(bit: u32) -> bool {
-    crate::task::with_current_task_mut(|t| t.caps.effective & (1 << bit) != 0 && !t.caps.in_userns).unwrap_or(false)
-}
-
 /// `perf_event_open(attr, pid, cpu, group_fd, flags)`.
 pub fn sys_perf_event_open(attr: u64, pid: u64, cpu: u64, group_fd: u64, flags: u64) -> i64 {
     if flags & !(FLAG_FD_NO_GROUP | FLAG_FD_OUTPUT | FLAG_PID_CGROUP | FLAG_FD_CLOEXEC) != 0 || flags & FLAG_PID_CGROUP != 0 {
@@ -420,10 +415,12 @@ pub fn sys_perf_event_open(attr: u64, pid: u64, cpu: u64, group_fd: u64, flags: 
     if (sample != 0 || freq) && config != SW_DUMMY {
         return EOPNOTSUPP; // counting only: no sampling
     }
-    let privileged = caps(38) || caps(21); // CAP_PERFMON, CAP_SYS_ADMIN
-    // perf_event_paranoid = 2: user space only for the unprivileged
-    if !exclude_kernel && !privileged {
-        return EACCES;
+    // wave10 G8-1 begin: perf_event_paranoid 2 (kernel-mode counting and whole-CPU events for
+    // CAP_PERFMON/CAP_SYS_ADMIN), the CPU, another task by the ptrace read rule: lx-proc's
+    // verdict or the rule here (`lx::trace`, `ptrace_rules::decide`, in this order)
+    let kernel_mode = if exclude_kernel { 0 } else { crate::lx::ptrace_rules::PERF_KERNEL };
+    if let Err(e) = crate::lx::trace::check(298, &[attr, pid, cpu, group_fd, flags, 0], kernel_mode) {
+        return e;
     }
     let cpu = cpu as i32;
     if cpu < -1 || cpu > 0 {
@@ -434,22 +431,17 @@ pub fn sys_perf_event_open(attr: u64, pid: u64, cpu: u64, group_fd: u64, flags: 
             if cpu < 0 {
                 return EINVAL;
             }
-            if !privileged {
-                return EACCES;
-            }
             None
         }
         0 => Some(super::proc::current_ids().1),
         p if p > 0 => {
             let sys = super::ns::pid_from_caller(p as u64);
             let Some(tgid) = super::proc::tgid_of(sys) else { return ESRCH };
-            if let Err(e) = super::extra::may_access(tgid) {
-                return if e == ESRCH { e } else { EACCES };
-            }
             Some(tgid)
         }
         _ => return ESRCH,
     };
+    // wave10 G8-1 end
     // Group leader
     let leader = if group_fd as i32 == -1 {
         None

@@ -98,6 +98,12 @@ pub mod proc;
 #[cfg(not(target_os = "uefi"))]
 pub use crate::host::lx_proc as proc;
 // wave9 G7a end
+// wave10 G8-1 begin: the tracing calls' rule (pure; also lx-proc's) and the kernel's half
+// of their decisions
+pub mod ptrace_rules;
+#[cfg(target_os = "uefi")]
+pub mod trace;
+// wave10 G8-1 end
 // wave10 G7b-1 begin: lx-proc's way to the primitives (`SYS_LX_OBJ` op 75)
 #[cfg(target_os = "uefi")]
 pub mod procsvc;
@@ -308,12 +314,85 @@ pub const MOVED_PROC: &[(u64, u32, SvcId)] = &[
     (103, 0, crate::ipc::protocol::LXS_PROC),
 ];
 
+// wave10 G8-1 begin
+/// The tracing calls lx-proc decides (wave 10, Group 8-1): `ptrace` (only its attach family
+/// and options that suspend seccomp: [`forward`] sends every other request to the kernel at
+/// once), `perf_event_open`, `process_vm_readv`, `process_vm_writev`, `kcmp`, `pidfd_getfd`.
+/// lx-proc leaves its verdict as an approval mark and redirects them to the kernel.
+pub const MOVED_TRACE: &[(u64, u32, SvcId)] = &[
+    (101, 0, crate::ipc::protocol::LXS_PROC),
+    (298, 0, crate::ipc::protocol::LXS_PROC),
+    (310, 0, crate::ipc::protocol::LXS_PROC),
+    (311, 0, crate::ipc::protocol::LXS_PROC),
+    (312, 0, crate::ipc::protocol::LXS_PROC),
+    (438, 0, crate::ipc::protocol::LXS_PROC),
+];
+
+/// Per CPU: `tid << 12 | nr` of a tracing call lx-proc decided on the lock-free path and
+/// redirected to the kernel, so that [`forward`] on the ordinary path that follows does not
+/// send it to lx-proc a second time.
+static TRACE_TO_KERNEL: [AtomicU64; crate::arch::smp::MAX_CPUS] = [const { AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
+
+/// (marks set, marks taken) (diagnostics).
+pub static TRACE_MARKS: (AtomicU64, AtomicU64) = (AtomicU64::new(0), AtomicU64::new(0));
+
+/// `"; "` and the tracing calls' line for [`summary`] (none on the host build).
+fn trace_summary() -> alloc::string::String {
+    #[cfg(target_os = "uefi")]
+    return alloc::format!("; {}", trace::summary());
+    #[cfg(not(target_os = "uefi"))]
+    alloc::string::String::new()
+}
+
+/// Whether `nr` is one of [`MOVED_TRACE`]'s calls.
+#[inline]
+fn is_trace_nr(nr: u64) -> bool {
+    matches!(nr, 101 | 298 | 310 | 311 | 312 | 438)
+}
+
+/// Whether lx-proc decides call `nr` and has the kernel run it (a redirect to service 0,
+/// with or without an approval mark): the tracing calls and 7b-1's syslog, acct, unshare, setns, prctl. A
+/// lock-free redirect of one of them is marked so the ordinary path runs it at once.
+#[inline]
+fn is_decided_nr(nr: u64) -> bool {
+    is_trace_nr(nr) || matches!(nr, 103 | 157 | 163 | 272 | 308)
+}
+
+/// [`fast_entry`] got a redirect to the kernel for the calling thread's tracing call `nr`.
+fn trace_to_kernel_set(tid: u64, nr: u64) {
+    if is_decided_nr(nr) && tid != 0 {
+        let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+        TRACE_TO_KERNEL[cpu].store(tid << 12 | nr, Ordering::Relaxed);
+        TRACE_MARKS.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Takes this CPU's mark: whether it was the calling thread's call `nr`.
+fn trace_to_kernel_take(nr: u64) -> bool {
+    if !is_decided_nr(nr) {
+        return false;
+    }
+    let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
+    let tid = crate::task::CURRENT_TID.load(Ordering::Relaxed);
+    let m = TRACE_TO_KERNEL[cpu].load(Ordering::Relaxed);
+    if tid != 0 && m >> 12 == tid {
+        TRACE_TO_KERNEL[cpu].store(0, Ordering::Relaxed);
+        if m & 0xfff == nr {
+            TRACE_MARKS.1.fetch_add(1, Ordering::Relaxed);
+        }
+        return m & 0xfff == nr;
+    }
+    false
+}
+// wave10 G8-1 end
+
 /// A call lx-proc may approve (syslog, acct, unshare, setns) was answered without reaching
 /// the kernel's code (lx-proc refused it, or died after approving it): any mark it left for
 /// the calling thread goes.
 #[inline]
 fn proc_answered(nr: u64) {
-    if matches!(nr, 103 | 163 | 272 | 308) {
+    // (wave10 G8-1: + the tracing calls)
+    if matches!(nr, 103 | 163 | 272 | 308 | 101 | 298 | 310 | 311 | 312 | 438) {
         proc::clear_approval(crate::task::CURRENT_TID.load(Ordering::Relaxed));
     }
 }
@@ -492,6 +571,11 @@ pub fn set_forwarding(on: bool) {
     for &(nr, bits, s) in MOVED.iter().chain(MOVED_STEP2).chain(MOVED_STEP4).chain(MOVED_PROC) {
         TABLE[nr as usize].store(ent(bits, s), Ordering::Release);
     }
+    // wave10 G8-1 begin: the tracing calls (with the process service: `lx.proc=kernel`)
+    for &(nr, bits, s) in MOVED_TRACE {
+        TABLE[nr as usize].store(ent(bits, s), Ordering::Release);
+    }
+    // wave10 G8-1 end
     for &(nr, bits, s) in MOVED_PRIV.iter().chain(MOVED_PRIV_VFS) {
         // (wave7 G7-1: + vfs-server's)
         PRIV[(nr - PRIV_BASE) as usize].store(ent(bits, s), Ordering::Release);
@@ -620,6 +704,16 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
         return None;
     }
     // wave10 G8-2 end
+    // wave10 G8-1 begin: a ptrace request on an attached tracee is mechanism: the kernel's
+    // at once (no hop per PEEK/POKE/GETREGS/CONT); only the attach family goes to lx-proc
+    if nr == ptrace_rules::NR_PTRACE && !ptrace_rules::ptrace_routed(frame.rdi, frame.r10) {
+        return None;
+    }
+    // (lx-proc already decided it on the lock-free path and redirected it here)
+    if trace_to_kernel_take(nr) {
+        return None;
+    }
+    // wave10 G8-1 end
     let r = forward_svc(frame, nr, e)?;
     if r == fileh::LX_TO_KERNEL {
         return None;
@@ -1202,6 +1296,11 @@ fn call_ident_raw(x: &'static Host, mut c: LxCall, groups: bool) -> i64 {
             c.ngroups = n as u64;
         }
     }
+    // wave10 G8-1: a tracing call carries its facts (no LXP_TRACE_FACTS round trip)
+    #[cfg(target_os = "uefi")]
+    if is_trace_nr(c.nr) {
+        trace::carry(&mut c, true);
+    }
     // The waits of `call_with` need no kernel lock: let the worker's answer switch straight
     // back to this thread even from a CPU without it (a thread blocked under the lock could
     // only be woken through the scheduler), and take the lock again before going on
@@ -1267,6 +1366,11 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
             // wave10 GV2 end
             // wave7 G7-2: service 0: the kernel's own code answers the call
             if s == 0 {
+                // wave10 G8-1: a tracing call's verdict rides on lx-proc's redirect (its key,
+                // `ptrace_rules::key`), taken by the kernel's code at its permission check
+                if redir.1 != 0 && is_trace_nr(c.nr) && x.id == svc::host_of(crate::ipc::protocol::LXS_PROC) {
+                    proc::approve(me, c.nr, redir.1);
+                }
                 return fileh::LX_TO_KERNEL;
             }
             // wave7 G7-4: a redirect to a service the kernel answers (`lx.proc=kernel`, `lx=kernel`):
@@ -1902,6 +2006,10 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     if bits == 0 || crate::compat::linux::TRACE_SYSCALLS.load(Ordering::Relaxed) || crate::task::scheduler::handoff_active() {
         return None;
     }
+    // wave10 G8-1: ptrace requests on an attached tracee are the kernel's (see `forward`)
+    if nr == ptrace_rules::NR_PTRACE && !ptrace_rules::ptrace_routed(frame.rdi, frame.r10) {
+        return None;
+    }
     let id = ident()?;
     // wave7 G7-2 begin: the file service's calls (`fileh`)
     if bits & fileh::T_VFS != 0 {
@@ -2057,6 +2165,11 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
         drop(table);
         drop_last(fds);
     }
+    // wave10 G8-1: a tracing call carries its facts (no LXP_TRACE_FACTS round trip)
+    #[cfg(target_os = "uefi")]
+    if is_trace_nr(nr) {
+        trace::carry(&mut c, false);
+    }
     let idx = crate::task::scheduler::CURRENT_IDX.load(Ordering::Relaxed) as usize;
     FAST_CALLS.fetch_add(1, Ordering::Relaxed);
     let r = call_with(x, id.tid, idx, c, true);
@@ -2067,6 +2180,7 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
     }
     // wave7 G7-2: redirected to the kernel: the ordinary path (`forward` asks again)
     if r == fileh::LX_TO_KERNEL {
+        trace_to_kernel_set(id.tid, nr); // wave10 G8-1: (not for the tracing calls)
         return None;
     }
     proc_answered(nr);
@@ -2115,6 +2229,7 @@ pub fn summary() -> alloc::string::String {
         REPLY_WOKEN.load(Ordering::Relaxed),
         per
     ) + "; " + &restart::summary() // wave6 G21
+        + &trace_summary() // wave10 G8-1
         + &copy_summary()
         + "; " + &fileh::summary() // wave7 G7-2
         + "; " + &xexec::summary() // wave7 G7-5

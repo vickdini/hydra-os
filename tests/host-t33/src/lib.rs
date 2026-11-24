@@ -297,6 +297,39 @@ pub mod pkg;
 /// *stub* The forwarding to the ring-3 Linux server.
 pub mod lx {
     pub fn note(_kind: u64, _a: u64, _b: u64, _c: u64) {}
+    // wave10 G8-1 begin: the tracing calls' rule (real) and a *stub* of the kernel's half
+    // (`src/lx/trace.rs`): the facts from the fakes (the caller's capabilities; the target
+    // by `proc::tgid_of` and `extra::may_access`: Ok = same ids, ESRCH = gone, else another
+    // user), decided by the real `decide`
+    #[path = "../../../../src/lx/ptrace_rules.rs"]
+    pub mod ptrace_rules;
+    pub mod trace {
+        use super::ptrace_rules::*;
+        pub fn check(nr: u64, a: &[u64; 6], extra: u32) -> Result<(), i64> {
+            let (caps, in_userns) = crate::task::with_current_task_mut(|t| (t.caps.effective, t.caps.in_userns)).unwrap_or((0, false));
+            let who = Who { uid: [1000; 3], gid: [1000; 3], caps, perm: caps, in_userns, seccomp: false, suspended: false };
+            let mut f = Facts { nr, who, cpu: a[2] as i32, ..Facts::default() };
+            let class = match a[1] as i32 {
+                0 => PERF_PID_SELF,
+                -1 => PERF_PID_CPU,
+                p if p > 0 => {
+                    if let Some(g) = crate::compat::linux::proc::tgid_of(p as u64) {
+                        let base = Target { tgid: g, tid: g, uid: [1000; 3], gid: [1000; 3], same: false, service: false, within: true, same_ns: true, owned: false, tracer_cap: false, dumpable: 1, perm: 0 };
+                        f.t[0] = match crate::compat::linux::extra::may_access(g) {
+                            Ok(()) => Some(base),
+                            Err(-3) => None,
+                            Err(_) => Some(Target { uid: [5; 3], ..base }),
+                        };
+                    }
+                    PERF_PID_OTHER
+                }
+                _ => PERF_PID_BAD,
+            };
+            f.extra = extra | class << PERF_PID_SHIFT;
+            decide(&f)
+        }
+    }
+    // wave10 G8-1 end
     /// *stub* wave10 G7b-1: lx-proc's approvals (none on the host).
     pub mod proc {
         pub fn take_approval(_tid: u64, _nr: u64) -> bool {

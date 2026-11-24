@@ -65,13 +65,22 @@ pub fn task_creds(tid: u64) -> Option<(Creds, bool, bool)> {
 /// Sets the credentials of thread `tid` (0: the caller) to `new`; a change of user ids
 /// applies the capability rules (`Caps::on_uid_change`). `false`: no such thread.
 pub fn task_creds_set(tid: u64, new: Creds) -> bool {
-    with_thread(tid, |t| {
+    // (wave10 G8-1: + whether the change leaves the process not dumpable, and its process)
+    let r = with_thread(tid, |t| {
         let old = (t.uid, t.euid, t.suid);
+        let before = (t.euid, t.egid, t.caps.permitted);
         [t.uid, t.euid, t.suid] = new.uid;
         [t.gid, t.egid, t.sgid] = new.gid;
         t.caps.on_uid_change(old, (t.uid, t.euid, t.suid));
-    })
-    .is_some()
+        (super::ptrace_rules::creds_clear_dumpable(before, (t.euid, t.egid, t.caps.permitted)), t.tgid)
+    });
+    // wave10 G8-1: Linux's commit_creds: a change of the effective (file-system) ids or new
+    // permitted capabilities make the process not dumpable (suid_dumpable 0) until its next
+    // exec; the ptrace rule reads it
+    if let Some((true, tgid)) = r {
+        proc_attrs_set(tgid, |p| p.dumpable = 0);
+    }
+    r.is_some()
 }
 
 // ----------------------------------------------------------------------

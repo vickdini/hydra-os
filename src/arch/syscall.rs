@@ -527,8 +527,9 @@ pub fn syscall_dispatch(frame: &mut SyscallFrame, fpu: *mut crate::arch::idt::Fp
     SYSCALL_ENTRIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     crate::task::scheduler::wait_out_handoff();
     let nr = frame.rax;
+    let arg0 = frame.rdi; // wave10 G8-1: (ptrace's request: see `changes_identity_of`)
     dispatch(frame, fpu);
-    if crate::compat::linux::changes_identity(nr) {
+    if crate::compat::linux::changes_identity_of(nr, arg0) {
         crate::compat::linux::ident_changed();
     }
     // Retired during the call: no return to user mode

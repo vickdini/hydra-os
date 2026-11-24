@@ -37,6 +37,9 @@
 extern crate alloc;
 
 mod policy;
+// wave10 G8-1: the tracing calls' decisions (ptrace, perf_event_open, process_vm_*, kcmp,
+// pidfd_getfd)
+mod trace;
 // wave10 G7b-2: `/proc` (moved here from linux-server)
 mod procfs;
 
@@ -131,7 +134,16 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
     }
     // wave10 G7b-2 end
     let call = Call { nr: c.nr, args: c.args, tgid: c.tgid, caps: c.caps, ids: [c.uid, c.euid, c.suid, c.gid, c.egid, c.sgid] };
-    match policy::serve(&Sys { req: c.id }, &CallerMem(&cx), &call) {
+    // wave10 G8-1 begin
+    if trace::handles(c.nr) {
+        // (the facts the kernel carried with the call, if it could)
+        let facts = (c.flags & LX_CALL_FACTS != 0).then(|| core::array::from_fn(|i| c.groups[2 * i] as u64 | (c.groups[2 * i + 1] as u64) << 32));
+        let trace::Answer::Kernel(key) = trace::serve(&Sys { req: c.id }, &CallerMem(&cx), &call, facts);
+        return svcrt::redirect(page, 0, key, 0);
+    }
+    let out = policy::serve(&Sys { req: c.id }, &CallerMem(&cx), &call);
+    // wave10 G8-1 end
+    match out {
         Out::Ret(r) => (r, 0),
         // The kernel's own code answers (service 0)
         Out::Kernel => svcrt::redirect(page, 0, 0, 0),

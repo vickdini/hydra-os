@@ -93,6 +93,10 @@ pub mod linux {
     pub fn changes_identity(nr: u64) -> bool {
         nr == 105 // setuid
     }
+    // wave10 G8-1: *stub* (the request does not matter here)
+    pub fn changes_identity_of(nr: u64, _arg0: u64) -> bool {
+        changes_identity(nr)
+    }
     pub fn ident_changed() {
         rec!("linux::ident_changed");
     }

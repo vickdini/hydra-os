@@ -2724,6 +2724,21 @@ pub const LXP_ATTR_SUBREAPER: u64 = 6;
 /// `LXP_ATTR_SET`: capability sets.
 pub const LXP_ATTR_CAPS: u64 = 7;
 // wave10 G7b-1 end
+// wave10 G8-1 begin: the tracing calls' decisions in lx-proc
+/// `a[0]` a system call number (`ptrace`, `perf_event_open`, `process_vm_readv`/`writev`,
+/// `kcmp`, `pidfd_getfd`), `a[1..7]` the caller's arguments, `a[7]` `perf_event_open`'s
+/// kernel-mode bit (from the attribute lx-proc read): the facts of the caller's call as the
+/// kernel will run it (`ptrace_rules::Facts::encode`, 16 words) for `ptrace_rules::decide`;
+/// lx-proc then redirects the call to the kernel (service 0) with the verdict's
+/// `ptrace_rules::key` in the redirect's object word, which the kernel keeps as the call's
+/// approval mark. Errors: those of the call before its permission check (`ESRCH`, `EBADF`,
+/// ...): lx-proc redirects with key 0 (the kernel decides).
+pub const LXP_TRACE_FACTS: u64 = 17;
+/// [`LxCall::flags`] bit: a tracing call (lx-proc's) carries its facts, the 16 words of
+/// `LXP_TRACE_FACTS`, in [`LxCall::groups`] (word `i` = `groups[2i] | groups[2i+1] << 32`;
+/// the call has no use for the groups), so lx-proc needs no `LXP_TRACE_FACTS` round trip.
+pub const LX_CALL_FACTS: u64 = 1 << 8;
+// wave10 G8-1 end
 
 // wave10 G7b-2 begin: `/proc` in lx-proc: the kernel-held snapshot of an open `/proc` file
 /// `SYS_LX_OBJ` op (the host of `LXS_PROC` only, for its own requests): `LX_OBJ_PSNAP(req,

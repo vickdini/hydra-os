@@ -268,15 +268,9 @@ fn walk(frame: &SyscallFrame, s: &Scratch, dirfd: u64, path: &str, flags: u64, r
 /// target's real, effective and saved user, or `CAP_SYS_PTRACE`).
 fn ptrace_target(fd: u64) -> Result<u64, i64> {
     let pid = super::pidfd::pid_of(fd)?;
-    let target = crate::task::SCHEDULER.lock().with_process(pid, |t| (t.uid, t.euid, t.suid, t.service.is_some()));
-    let Some((uid, euid, suid, service)) = target else { return Err(ESRCH) };
-    if service {
-        return Err(EPERM);
-    }
-    let (me, cap) = crate::task::with_current_task_mut(|t| (t.uid, t.caps.has(1 << 19))).unwrap_or((u32::MAX, false));
-    if !cap && !(me == uid && me == euid && me == suid) {
-        return Err(EPERM);
-    }
+    crate::task::SCHEDULER.lock().with_process(pid, |_| ()).ok_or(ESRCH)?;
+    // wave10 G8-1: the one ptrace rule (`lx::ptrace_rules`)
+    super::extra::may_access(pid)?;
     Ok(pid)
 }
 
@@ -285,10 +279,14 @@ fn pidfd_getfd(pidfd: u64, target: u64, flags: u64) -> i64 {
     if flags != 0 {
         return EINVAL;
     }
-    let pid = match ptrace_target(pidfd) {
+    let pid = match super::pidfd::pid_of(pidfd) {
         Ok(p) => p,
         Err(e) => return e,
     };
+    // wave10 G8-1: the ptrace attach rule: lx-proc's verdict, or the rule here (`lx::trace`)
+    if let Err(e) = crate::lx::trace::check(438, &[pidfd, target, flags, 0, 0, 0], 0) {
+        return e;
+    }
     let Some(fds) = crate::task::SCHEDULER.lock().with_process(pid, |t| t.fds.clone()) else { return ESRCH };
     let desc = fds.lock().get(target as usize).cloned();
     let Some(desc) = desc else { return EBADF };

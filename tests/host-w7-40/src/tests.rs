@@ -617,3 +617,29 @@ fn access_rule_for_read_only_files_and_the_self_link() {
     assert_eq!(access_rule(4, 0x200 | 0x100 | 0x1000, 0, 0o444, 0), Ok(()));
     assert_eq!(access_rule(4, 0x400, 0, 0o444, 0), Err(-22));
 }
+
+// wave10 G8-1: the read rule's capability and user-namespace inputs (review 10-81)
+#[test]
+fn may_read_applies_the_commoncap_test() {
+    let all = |v: u32| (v, v, v);
+    let plain = crate::lx::info::TargetCaps::PLAIN;
+    // same ids, dumpable, capability-less, same namespace: readable
+    assert!(may_read(false, false, (1000, 1000), 0, all(1000), all(1000), true, plain));
+    // not dumpable
+    assert!(!may_read(false, false, (1000, 1000), 0, all(1000), all(1000), false, plain));
+    // holding capabilities the reader lacks
+    let capped = crate::lx::info::TargetCaps { perm: 1 << 13, ..plain };
+    assert!(!may_read(false, false, (1000, 1000), 0, all(1000), all(1000), true, capped));
+    assert!(may_read(false, false, (1000, 1000), 1 << 13, all(1000), all(1000), true, capped));
+    // another user namespace (not below, or below but not the reader's)
+    let other = crate::lx::info::TargetCaps { within: false, same_ns: false, ..plain };
+    assert!(!may_read(false, false, (1000, 1000), 0, all(1000), all(1000), true, other));
+    let below = crate::lx::info::TargetCaps { within: true, same_ns: false, ..plain };
+    assert!(!may_read(false, false, (1000, 1000), 0, all(1000), all(1000), true, below));
+    assert!(may_read(false, false, (1000, 1000), 0, all(1000), all(1000), true, crate::lx::info::TargetCaps { owned: true, ..below }));
+    // CAP_SYS_PTRACE reads anything but a service
+    assert!(may_read(false, false, (1000, 1000), CAP_SYS_PTRACE, all(0), all(0), false, crate::lx::info::TargetCaps { perm: u64::MAX >> 23, ..below }));
+    assert!(!may_read(false, true, (0, 0), CAP_SYS_PTRACE, all(0), all(0), true, plain));
+    // its own process always
+    assert!(may_read(true, false, (1000, 1000), 0, all(0), all(0), false, other));
+}

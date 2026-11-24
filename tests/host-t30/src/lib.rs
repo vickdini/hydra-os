@@ -80,6 +80,10 @@ pub mod host {
         pub use crate::compat::linux::proc::PROCS;
         /// *stub* wave10 G7b-1: lx-proc's approval marks (none on the host).
         pub fn clear_approval(_tid: u64) {}
+        /// *stub* wave10 G8-1: a tracing call's verdict carried by lx-proc's redirect (dropped).
+        pub fn approve(_tid: u64, _nr: u64, _key: u64) -> bool {
+            false
+        }
         /// *mirror* of the kernel's call context.
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
         pub struct CallCtx {

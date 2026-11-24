@@ -667,6 +667,53 @@ fn user_ns_within(inner: &Option<Arc<UserNs>>, outer: &Option<Arc<UserNs>>) -> b
     }
 }
 
+// wave10 G8-1 begin: the ptrace rule's "capabilities count over the target"
+/// Whether process `target`'s user namespace is process `caller`'s or lies below it
+/// (`false` when `target` is gone).
+pub fn user_within(target: u64, caller: u64) -> bool {
+    user_within_in(&super::proc::PROCS.lock(), target, caller)
+}
+
+/// How process `target`'s user namespace stands to process `caller`'s (whose effective
+/// user is `euid`), on a process table the caller holds: (it is the caller's or lies below
+/// it, it is the caller's own, it lies below and the caller's user made it or one between
+/// them: Linux's `ns_capable` owner rule). `None` when `target` is gone.
+pub fn user_rel_in(procs: &alloc::collections::BTreeMap<u64, alloc::boxed::Box<super::proc::Process>>, target: u64, caller: u64, euid: u32) -> Option<(bool, bool, bool)> {
+    let t = procs.get(&target)?;
+    let mine = procs.get(&caller).and_then(|p| p.ns.user.clone());
+    let same = match (&t.ns.user, &mine) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    };
+    let within = user_ns_within(&t.ns.user, &mine);
+    let mut owned = false;
+    if within && !same {
+        let mut cur = t.ns.user.clone();
+        while let Some(ns) = cur {
+            let parent_is_mine = match (&ns.parent, &mine) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            };
+            if parent_is_mine {
+                owned = ns.owner_uid == euid;
+                break;
+            }
+            cur = ns.parent.clone();
+        }
+    }
+    Some((within, same, owned))
+}
+
+/// [`user_within`] on a process table the caller holds.
+pub fn user_within_in(procs: &alloc::collections::BTreeMap<u64, alloc::boxed::Box<super::proc::Process>>, target: u64, caller: u64) -> bool {
+    let Some(t) = procs.get(&target) else { return false };
+    let mine = procs.get(&caller).and_then(|p| p.ns.user.clone());
+    user_ns_within(&t.ns.user, &mine)
+}
+// wave10 G8-1 end
+
 // wave10 G7b-1 begin: what lx-proc's setns/unshare rules need (`LXP_NS_FD`, `LXP_NS_GET`)
 /// The process and the namespace kinds `setns(fd, nstype)` names in descriptor table `fds`:
 /// a pidfd's process (`nstype` the kinds), or a `/proc/<pid>/ns/*` file's.
