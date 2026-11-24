@@ -501,10 +501,9 @@ pub(super) fn offline(x: &Host) {
     for (_, d) in kept {
         release_kept(d);
     }
-    // The bpf device programs went with the service that hosts bpf
-    if super::svc::host_of(crate::ipc::protocol::LXS_SEC) == x.id {
-        crate::compat::linux::bpf::set_server_device_programs(&[]);
-    }
+    // (wave10 G10-C: the bpf device programs are not dropped with lx-sec's objects: the
+    // kernel keeps enforcing them across a restart, until the new instance hands its list
+    // over or the ladder gives lx-sec up, `server_gone`)
 }
 
 // wave6 G21 begin: restart support (`super::restart`, design 5.1 point 4)

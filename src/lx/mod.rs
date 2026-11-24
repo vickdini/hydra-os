@@ -134,6 +134,12 @@ fn usable(s: SvcId) -> bool {
     svc::online(s) || restart::restarting(svc::host_of(s))
 }
 
+/// wave10 G10-C: whether the IPC service can take calls now (online or restarting): the
+/// kernel's own requests for its objects (a clone's pidfd) check it first.
+pub fn ipc_usable() -> bool {
+    usable(LXS_IPC)
+}
+
 /// [`usable`] for host `x`.
 #[inline]
 fn host_usable(x: &Host) -> bool {
@@ -173,7 +179,6 @@ const EBUSY: i64 = -16;
 const EINVAL: i64 = -22;
 const ENAMETOOLONG: i64 = -36;
 const ENOSYS: i64 = -38;
-const EAFNOSUPPORT: i64 = -97;
 const ELOOP: i64 = -40;
 
 /// A server object at a descriptor, held for the length of a forwarded call: the device,
@@ -698,10 +703,11 @@ fn forward_svc(frame: &SyscallFrame, nr: u64, e: u32) -> Option<i64> {
             return None;
         }
         // (wave6 G21: a restarting service's callers wait for it; wave10 G10-C: a service
-        // not running answers EAFNOSUPPORT, one the ladder gave up EIO: the kernel has no
-        // copy of the sockets any more)
+        // that is not running — never registered, stopped, or given up by the ladder —
+        // answers EIO: the kernel has no copy of the sockets any more. EAFNOSUPPORT stays for
+        // a family no service has, the kernel's dispatcher answers that)
         if !usable(s) {
-            return Some(if restart::down(svc::host_of(s)) { EIO } else { EAFNOSUPPORT });
+            return Some(EIO);
         }
         return Some(call(frame, s, None));
     }
@@ -727,8 +733,9 @@ fn forward_svc(frame: &SyscallFrame, nr: u64, e: u32) -> Option<i64> {
     }
     let s = entry_svc(e);
     if !usable(s) {
-        // (wave6 G21: a service the ladder gave up fails with EIO)
-        return Some(if restart::down(svc::host_of(s)) { EIO } else { ENOSYS });
+        // (wave6 G21: a service the ladder gave up fails with EIO; wave10 G10-C: so does one
+        // that is not running at all, there is no kernel copy to answer instead)
+        return Some(EIO);
     }
     Some(call(frame, s, None))
 }
@@ -862,7 +869,8 @@ fn plain_svc(nr: u64, args: &[u64; 6]) -> SvcId {
 /// caller holds the kernel lock (an ordinary system call path).
 pub fn call_plain(nr: u64, args: [u64; 6]) -> i64 {
     let s = plain_svc(nr, &args);
-    let Some(x) = svc::host(svc::host_of(s)).filter(|x| host_usable(x)) else { return ENOSYS };
+    // (wave10 G10-C: the service not running: EIO, as for the calls routed by number)
+    let Some(x) = svc::host(svc::host_of(s)).filter(|x| host_usable(x)) else { return EIO };
     let mut c = LxCall::EMPTY;
     c.nr = nr;
     c.args = args;
@@ -2786,6 +2794,12 @@ fn server_gone(h: SvcId) {
     }
     x.notes.store(0, Ordering::Release);
     x.notes_head.store(0, Ordering::Release);
+    // wave10 G10-C: the cgroup device programs lx-sec handed over stay enforced while it
+    // restarts (its new instance sends its kept list again); only a service the ladder gave
+    // up takes them away (device control would otherwise fail open during every restart)
+    if svc::host_of(LXS_SEC) == h && !decision.restart {
+        crate::compat::linux::bpf::set_server_device_programs(&[]);
+    }
     // wave6 G21: a Transparent restart keeps the objects for the new instance to adopt
     if !resend {
         obj::offline(x);

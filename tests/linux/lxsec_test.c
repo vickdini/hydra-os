@@ -16,6 +16,8 @@
  *                     restart, "STALE OK"), a new map must work ("NEWMAP OK")
  *   lxsec devset      a device program refusing /dev/null attached (BPF_PROG_ATTACH) to the
  *                     cgroup /sys/fs/cgroup/lxsec; checks it works
+ *   lxsec devwatch S  a child in that cgroup tries /dev/null every ms for S seconds while
+ *                     lx-sec is killed: never allowed ("DEVWATCH OK"; wave 10 10-C)
  *   lxsec devcheck    a child in that cgroup: /dev/null still refused after a restart
  *                     ("DEV KEPT OK"), then the program is detached and /dev/null opens again
  *                     ("DEV DETACH OK"); the cgroup is removed
@@ -32,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -233,6 +236,32 @@ static int devset(void) {
     return 0;
 }
 
+/* wave10 G10-C: a child in the cgroup tries /dev/null every millisecond for `secs` seconds
+ * (lx-sec is killed meanwhile): the kernel must keep refusing it while lx-sec restarts. */
+static int devwatch(int secs) {
+    pid_t c = fork();
+    if (c == 0) {
+        char pid[16];
+        int pf = open(CG "/cgroup.procs", O_WRONLY);
+        snprintf(pid, sizeof pid, "%d", getpid());
+        write(pf, pid, strlen(pid));
+        close(pf);
+        long tries = 0, allowed = 0;
+        time_t end = time(0) + secs;
+        while (time(0) < end) {
+            int n = open("/dev/null", O_RDWR);
+            tries++;
+            if (n >= 0) { allowed++; close(n); }
+            usleep(1000);
+        }
+        printf("%s tries %ld allowed %ld\n", allowed == 0 && tries > 0 ? "DEVWATCH OK" : "DEVWATCH FAIL", tries, allowed);
+        _exit(allowed != 0);
+    }
+    int st;
+    waitpid(c, &st, 0);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+}
+
 static int devcheck(void) {
     int c = in_cgroup();
     printf("%s in the cgroup after the restart: %d\n", c == 3 ? "DEV KEPT OK" : "DEV KEPT FAIL", c);
@@ -259,6 +288,7 @@ int main(int argc, char **argv) {
     if (!strcmp(m, "bpfhold")) return bpfhold(argc > 2 ? atoi(argv[2]) : 60);
     if (!strcmp(m, "devset")) return devset();
     if (!strcmp(m, "devcheck")) return devcheck();
+    if (!strcmp(m, "devwatch")) return devwatch(argc > 2 ? atoi(argv[2]) : 20);
     fprintf(stderr, "usage: lxsec keep|check|hammer N S|bpfhold S|devset|devcheck\n");
     return 2;
 }

@@ -414,15 +414,16 @@ fn forward_answers_the_null_call_and_unrouted_calls() {
     assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(0));
     assert_eq!(forward(&frame(39, [0; 6])), None);
     set_forwarding();
-    // linux-server is not running: its calls are not implemented
-    assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(ENOSYS));
+    // linux-server is not running: EIO (wave10 G10-C: no kernel copy answers instead)
+    assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(EIO));
     // ... and fail with EIO once the ladder gave it up
     restart::tests::set_down(LXS_LINUX, true);
     assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(EIO));
     restart::tests::set_down(LXS_LINUX, false);
-    // A family whose service is not running: EAFNOSUPPORT (wave10 G10-C: no kernel copy)
-    assert_eq!(forward(&frame(41, [2, 1, 0, 0, 0, 0])), Some(-97));
-    // ... and one the ladder gave up: EIO
+    // A family whose service is not running: EIO (wave10 G10-C: no kernel copy); a family
+    // no service has is the kernel's (its dispatcher answers EAFNOSUPPORT)
+    assert_eq!(forward(&frame(41, [2, 1, 0, 0, 0, 0])), Some(EIO));
+    // ... and one the ladder gave up: EIO too
     restart::tests::set_down(svc::host_of(LXS_NET), true);
     assert_eq!(forward(&frame(41, [2, 1, 0, 0, 0, 0])), Some(EIO));
     restart::tests::set_down(svc::host_of(LXS_NET), false);

@@ -621,6 +621,18 @@ fn clone_fork_and_clone3() {
     assert!(c3 > 0);
     assert!(pidfd >= 0);
     assert!(fake::called(&format!("spawn_clone(0x11,0x7000)")));
+    // wave10 G10-C: lx-ipc failing the pidfd after the child exists: -1, never an errno
+    fake::set_ret("lx::call_plain", -5);
+    pidfd = 7;
+    assert!(sc(435, [ptr(&args), 88, 0, 0, 0, 0]) > 0);
+    assert_eq!(pidfd, -1);
+    fake::set_ret("lx::call_plain", 0);
+    // ... and lx-ipc not running at all: the clone fails before any child (EIO)
+    fake::set_ret("lx::ipc_usable", 1);
+    let spawned = fake::NEXT_TID.get();
+    assert_eq!(sc(435, [ptr(&args), 88, 0, 0, 0, 0]), -5);
+    assert_eq!(fake::NEXT_TID.get(), spawned, "no child");
+    fake::set_ret("lx::ipc_usable", 0);
     let mut bad = args;
     bad[4] = 65;
     assert_eq!(sc(435, [ptr(&bad), 88, 0, 0, 0, 0]), EINVAL, "exit signal");
@@ -656,4 +668,19 @@ fn kpipe(fds: &mut [i32; 2]) -> i64 {
     fds[0] = r as i32;
     fds[1] = w as i32;
     0
+}
+
+/// wave10 G10-C: the socket calls on a descriptor that is no socket answer ENOTSOCK (EBADF
+/// for no descriptor), setsockopt/getsockopt/recvmmsg/sendmmsg included; socket() of a family
+/// no service has answers EAFNOSUPPORT.
+#[test]
+fn socket_calls_on_other_descriptors() {
+    let _g = setup();
+    proc_(5090, 0);
+    install(3, FileDescriptor::ConsoleOut);
+    for nr in [42u64, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 54, 55, 288, 299, 307] {
+        assert_eq!(sc(nr, [3, 0, 0, 0, 0, 0]), -88, "{nr} on a non-socket");
+        assert_eq!(sc(nr, [99, 0, 0, 0, 0, 0]), -9, "{nr} on no descriptor");
+    }
+    assert_eq!(sc(41, [17, 3, 0, 0, 0, 0]), -97);
 }

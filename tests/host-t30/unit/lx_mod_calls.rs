@@ -252,9 +252,9 @@ fn linux_server_dying_ends_every_linux_program() {
     assert_eq!(sim.spawned().iter().filter(|n| **n == "lx-recover").count(), 1);
     // Its whole process was ended
     assert_eq!(sim.state(s.workers[0]), crate::task::TaskState::Dead);
-    // EndLinux: callers do not wait for the new instance
+    // EndLinux: callers do not wait for the new instance (wave10 G10-C: EIO)
     assert!(!restart::restarting(LXS_LINUX));
-    assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(ENOSYS));
+    assert_eq!(forward(&frame(LX_NULL_NR, [0; 6])), Some(EIO));
 }
 
 #[test]

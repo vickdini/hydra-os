@@ -274,8 +274,10 @@ mod kernel {
         if len == 0 {
             return 0;
         }
-        if !online() {
-            return EIO;
+        // wave10 G10-C: a restarting tty-server is waited for (the restart ladder's 30 s), as
+        // every forwarded call is; EIO only when it is not coming back
+        if let Err(e) = crate::lx::restart::wait_online(svc::host_of(LXS_TTY), &online) {
+            return e;
         }
         let (g, sp) = attach_args();
         let r = kcall([LX_TTY_K_READ, buf, len as u64, nonblock as u64, g, sp], 0);

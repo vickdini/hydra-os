@@ -1054,7 +1054,7 @@ pub(crate) fn dispatch_checked(frame: &mut SyscallFrame) -> i64 {
         // owner by descriptor. What reaches the kernel is another family or a descriptor that
         // is no socket.
         SYS_SOCKET | SYS_SOCKETPAIR => -EAFNOSUPPORT,
-        SYS_BIND | SYS_LISTEN | SYS_ACCEPT | SYS_ACCEPT4 | SYS_CONNECT | SYS_SENDTO | SYS_RECVFROM | SYS_SENDMSG | SYS_RECVMSG | SYS_SHUTDOWN | SYS_GETSOCKNAME | SYS_GETPEERNAME => {
+        SYS_BIND | SYS_LISTEN | SYS_ACCEPT | SYS_ACCEPT4 | SYS_CONNECT | SYS_SENDTO | SYS_RECVFROM | SYS_SENDMSG | SYS_RECVMSG | SYS_SHUTDOWN | SYS_GETSOCKNAME | SYS_GETPEERNAME | 54 | 55 | 299 | 307 => {
             if crate::task::with_current_fds_mut(|fds| fds.get(arg0 as usize).is_some()) {
                 -ENOTSOCK
             } else {
@@ -1832,6 +1832,11 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
     if let Err(e) = ns::check_clone(args[0]) {
         return e;
     }
+    // wave10 G10-C: pidfds are lx-ipc's alone: with lx-ipc not running (nor restarting), a
+    // clone that asks for one fails before any child exists
+    if pidfd_ptr.is_some() && !crate::lx::ipc_usable() {
+        return -EIO;
+    }
     // CLONE_PARENT (spawn_clone makes our parent the child's): refused to a PID namespace's init and to init
     let sibling = args[0] & (CLONE_PARENT | types::CLONE_THREAD) == CLONE_PARENT;
     if sibling && (proc::current_ids().1 == 1 || proc::is_pid_ns_init(proc::current_ids().1)) {
@@ -1876,8 +1881,9 @@ fn do_clone(frame: &mut SyscallFrame, mut args: [u64; 5], pidfd_ptr: Option<u64>
         proc::set_fs_peer(child, proc::current_ids().1);
     }
     if let Some(ptr) = pidfd_ptr {
-        // Group 13: pidfds are lx-ipc's
-        let fd = crate::lx::call_plain(crate::ipc::protocol::LX_KCALL_PIDFD, [child, 0, 0, 0, 0, 0]) as i32;
+        // Group 13: pidfds are lx-ipc's (wave10 G10-C: if lx-ipc failed it after all, the
+        // child exists: -1 as "no descriptor", never an errno as a descriptor number)
+        let fd = crate::lx::call_plain(crate::ipc::protocol::LX_KCALL_PIDFD, [child, 0, 0, 0, 0, 0]).max(-1) as i32;
         if !crate::memory::vm::prefault_current(ptr, 4, true) {
             return -EFAULT;
         }
