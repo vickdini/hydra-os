@@ -240,7 +240,7 @@ fn sample(per: usize, size: u32) -> Fat {
 fn locate_follows_dirs_and_fragmented_chain() {
     let f = sample(1, 2500);
     let mut r = f.reader();
-    let m = locate(&mut r, &["logs", "BOOT001.TXT"]).unwrap();
+    let m = locate(&mut r, 1 << 40, &["logs", "BOOT001.TXT"]).unwrap();
     assert_eq!(m.size, 2500);
     let c = |n: u32| f.cluster_off(n) as u64;
     assert_eq!(
@@ -257,7 +257,7 @@ fn locate_follows_dirs_and_fragmented_chain() {
 fn locate_with_bigger_clusters() {
     let f = sample(8, 9000);
     let mut r = f.reader();
-    let m = locate(&mut r, &["LOGS", "boot001.txt"]).unwrap();
+    let m = locate(&mut r, 1 << 40, &["LOGS", "boot001.txt"]).unwrap();
     assert_eq!(m.size, 9000);
     // 3 clusters of 4 KiB: 4, 5 (adjacent), then 9
     assert_eq!(m.extents.len(), 2);
@@ -269,23 +269,23 @@ fn locate_with_bigger_clusters() {
 fn locate_errors() {
     let f = sample(1, 2500);
     let mut r = f.reader();
-    assert_eq!(locate(&mut r, &["logs", "boot002.txt"]), Err("not found"));
-    assert_eq!(locate(&mut r, &["efi", "boot001.txt"]), Err("not found"));
-    assert_eq!(locate(&mut r, &["logs"]), Err("a directory"));
-    assert_eq!(locate(&mut r, &["logs", "boot001.txt", "x"]), Err("not a directory"));
+    assert_eq!(locate(&mut r, 1 << 40, &["logs", "boot002.txt"]), Err("not found"));
+    assert_eq!(locate(&mut r, 1 << 40, &["efi", "boot001.txt"]), Err("not found"));
+    assert_eq!(locate(&mut r, 1 << 40, &["logs"]), Err("a directory"));
+    assert_eq!(locate(&mut r, 1 << 40, &["logs", "boot001.txt", "x"]), Err("not a directory"));
     // A chain shorter than the file
     let f = sample(1, 9000);
     let mut r = f.reader();
-    assert_eq!(locate(&mut r, &["logs", "boot001.txt"]), Err("the file's cluster chain is shorter than the file"));
+    assert_eq!(locate(&mut r, 1 << 40, &["logs", "boot001.txt"]), Err("the file's cluster chain is shorter than the file"));
     // A loop
     let mut f = sample(1, 5000);
     f.set(11, 4);
     let mut r = f.reader();
-    assert!(locate(&mut r, &["logs", "boot001.txt"]).is_ok(), "only the clusters the size needs are followed");
+    assert!(locate(&mut r, 1 << 40, &["logs", "boot001.txt"]).is_ok(), "only the clusters the size needs are followed");
     let mut f = sample(1, 2500);
     f.set(3, 3); // the directory's chain loops
     let mut r = f.reader();
-    assert!(locate(&mut r, &["logs", "boot002.txt"]).is_err());
+    assert!(locate(&mut r, 1 << 40, &["logs", "boot002.txt"]).is_err());
 }
 
 #[test]
@@ -293,13 +293,13 @@ fn locate_refuses_other_volumes() {
     let mut f = sample(1, 100);
     f.img[510] = 0;
     let mut r = f.reader();
-    assert_eq!(locate(&mut r, &["logs", "boot001.txt"]), Err("no FAT boot sector"));
+    assert_eq!(locate(&mut r, 1 << 40, &["logs", "boot001.txt"]), Err("no FAT boot sector"));
     let mut f = sample(1, 100);
     f.img[22] = 9; // a FAT16 FAT size
     let mut r = f.reader();
-    assert_eq!(locate(&mut r, &["logs", "boot001.txt"]), Err("not FAT32"));
+    assert_eq!(locate(&mut r, 1 << 40, &["logs", "boot001.txt"]), Err("not FAT32"));
     let mut r = |_: u64, _: &mut [u8]| false;
-    assert_eq!(locate(&mut r, &["x"]), Err("cannot read the boot sector"));
+    assert_eq!(locate(&mut r, 1 << 40, &["x"]), Err("cannot read the boot sector"));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -425,4 +425,78 @@ fn pm1_value_keeps_other_bits() {
     assert_eq!(pm1_sleep_value(0x0001, 7), 0x0001 | 7 << 10 | 1 << 13);
     assert_eq!(pm1_sleep_value(0xFFFF, 0), 0xFFFF & !(7 << 10));
     assert_eq!(pm1_sleep_value(0x1C01, 5), 0x0001 | 5 << 10 | 1 << 13);
+}
+
+#[test]
+fn locate_refuses_a_volume_bigger_than_its_partition_or_its_fat() {
+    let f = sample(1, 2500);
+    let len = f.img.len() as u64;
+    let mut r = f.reader();
+    assert!(locate(&mut r, len, &["logs", "boot001.txt"]).is_ok());
+    assert_eq!(locate(&mut r, len - 512, &["logs", "boot001.txt"]), Err("the FAT volume is larger than its partition"));
+    let mut f = sample(1, 2500);
+    f.img[36..40].copy_from_slice(&1u32.to_le_bytes()); // a FAT of one sector (128 entries) for 1000 clusters
+    let len = f.img.len() as u64;
+    let mut r = f.reader();
+    assert_eq!(locate(&mut r, len, &["logs", "boot001.txt"]), Err("the FAT is too small for the volume"));
+}
+
+#[test]
+fn fingerprints_differ() {
+    assert_eq!(fingerprint(b""), 0xcbf2_9ce4_8422_2325);
+    assert_ne!(fingerprint(b"boot001"), fingerprint(b"boot002"));
+}
+
+// ---------------------------------------------------------------------------------------
+// Start menu (review M1): it always starts something
+
+fn run(m: &mut Menu, keys: &[Option<MenuKey>], max: usize) -> (Option<&'static str>, usize) {
+    for i in 0..max {
+        let k = keys.get(i).copied().flatten();
+        if let Some(w) = m.step(k) {
+            return (Some(w), i);
+        }
+    }
+    (None, max)
+}
+
+#[test]
+fn menu_counts_down_to_entry_1() {
+    let mut m = Menu::new(5);
+    assert_eq!(run(&mut m, &[], 1000), (Some(""), 50));
+    let mut m = Menu::new(0);
+    assert_eq!(m.step(None), Some(""));
+}
+
+#[test]
+fn menu_keys_choose() {
+    let mut m = Menu::new(5);
+    assert_eq!(run(&mut m, &[None, None, Some(MenuKey::Char('2'))], 1000), (Some(SAFE), 2));
+    let mut m = Menu::new(5);
+    assert_eq!(m.step(Some(MenuKey::Char('3'))), Some(SAFE_CONSOLE));
+    let mut m = Menu::new(5);
+    assert_eq!(m.step(Some(MenuKey::Char('\r'))), Some(""));
+}
+
+#[test]
+fn menu_special_keys_do_not_stop_the_countdown() {
+    let keys: Vec<Option<MenuKey>> = (0..100).map(|_| Some(MenuKey::Special)).collect();
+    let mut m = Menu::new(5);
+    assert_eq!(run(&mut m, &keys, 1000), (Some(""), 50));
+}
+
+#[test]
+fn menu_other_key_waits_30_s_then_starts_entry_1() {
+    let mut m = Menu::new(5);
+    let (w, i) = run(&mut m, &[None, Some(MenuKey::Char('x'))], 10_000);
+    assert_eq!(w, Some(""));
+    assert_eq!(i, 1 + MENU_IDLE_LIMIT as usize - 1);
+    assert!(!m.counting);
+    // Another key restarts the 30 s
+    let mut m = Menu::new(5);
+    let mut keys = vec![None; 400];
+    keys[1] = Some(MenuKey::Char('x'));
+    keys[200] = Some(MenuKey::Char('y'));
+    let (_, i) = run(&mut m, &keys, 10_000);
+    assert_eq!(i, 200 + MENU_IDLE_LIMIT as usize - 1);
 }

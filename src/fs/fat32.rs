@@ -105,7 +105,7 @@ fn le32(b: &[u8], at: usize) -> u64 {
 
 /// Reads the boot sector (only FAT32 volumes: what UEFI system partitions of this size
 /// are, and what Hydra's tools make).
-fn volume(read: &mut dyn FnMut(u64, &mut [u8]) -> bool) -> Result<Volume, &'static str> {
+fn volume(read: &mut dyn FnMut(u64, &mut [u8]) -> bool, part_len: u64) -> Result<Volume, &'static str> {
     let mut bs = [0u8; 512];
     if !read(0, &mut bs) {
         return Err("cannot read the boot sector");
@@ -133,6 +133,13 @@ fn volume(read: &mut dyn FnMut(u64, &mut [u8]) -> bool) -> Result<Volume, &'stat
     let data_sector = reserved + fats * fat32;
     if total <= data_sector {
         return Err("a broken FAT boot sector");
+    }
+    // The volume fits its partition, and its FAT covers every cluster
+    if total * sector > part_len {
+        return Err("the FAT volume is larger than its partition");
+    }
+    if (total - data_sector) / per + 2 > fat32 * sector / 4 {
+        return Err("the FAT is too small for the volume");
     }
     Ok(Volume {
         sector,
@@ -214,8 +221,9 @@ fn find(read: &mut dyn FnMut(u64, &mut [u8]) -> bool, v: &Volume, dir: u32, name
 
 /// Finds the regular file at `path` (8.3 names from the root, e.g. `["logs", "boot001.txt"]`)
 /// and where its bytes are.
-pub fn locate(read: &mut dyn FnMut(u64, &mut [u8]) -> bool, path: &[&str]) -> Result<FileMap, &'static str> {
-    let v = volume(read)?;
+/// `part_len` is the partition's length (a boot sector claiming more is refused).
+pub fn locate(read: &mut dyn FnMut(u64, &mut [u8]) -> bool, part_len: u64, path: &[&str]) -> Result<FileMap, &'static str> {
+    let v = volume(read, part_len)?;
     let mut dir = v.root;
     for (i, part) in path.iter().enumerate() {
         let name = short_name(part).ok_or("not an 8.3 name")?;

@@ -804,20 +804,59 @@ fn refresh_signatures(hba: &Hba, wanted: Option<usize>, cap: u32) {
     if todo.is_empty() {
         return;
     }
-    let Ok((_, fb)) = sys::dma_alloc(4096) else { return };
-    if cap & CAP_S64A == 0 && fb >= 0x1_0000_0000 {
+    // Scratch page: received FISes at 0, the command list at 1 KiB, one command table at 2 KiB
+    let Ok((mem, base)) = sys::dma_alloc(4096) else { return };
+    if cap & CAP_S64A == 0 && base >= 0x1_0000_0000 {
         return;
     }
+    let (fb, clb, ctba) = (base, base + 1024, base + 2048);
     for p in todo {
-        // The engine and FIS receive off (they may still run from the firmware)
+        let in_use = hba.port_read(p, PX_CMD) & (CMD_ST | CMD_CR) != 0;
+        // The engine and FIS receive off (they may still run from the firmware); a port that
+        // will not stop is left alone (its registers must not change while it runs)
         hba.port_write(p, PX_CMD, hba.port_read(p, PX_CMD) & !CMD_ST);
-        hba.wait_port(p, PX_CMD, CMD_CR, 0, 500);
+        if !hba.wait_port(p, PX_CMD, CMD_CR, 0, 500) {
+            println!("[ahci-driver] port {}: the firmware's command engine does not stop; left alone", p);
+            continue;
+        }
         hba.port_write(p, PX_CMD, hba.port_read(p, PX_CMD) & !CMD_FRE);
-        hba.wait_port(p, PX_CMD, CMD_FR, 0, 500);
+        if !hba.wait_port(p, PX_CMD, CMD_FR, 0, 500) {
+            println!("[ahci-driver] port {}: FIS receive does not stop; left alone", p);
+            continue;
+        }
         hba.port_write(p, PX_FB, fb as u32);
         hba.port_write(p, PX_FBU, (fb >> 32) as u32);
+        hba.port_write(p, PX_CLB, clb as u32);
+        hba.port_write(p, PX_CLBU, (clb >> 32) as u32);
         hba.port_write(p, PX_SERR, 0xFFFF_FFFF);
+        hba.port_write(p, PX_IS, 0xFFFF_FFFF);
         hba.port_write(p, PX_CMD, hba.port_read(p, PX_CMD) | CMD_FRE | CMD_POD | CMD_SUD);
+        // A port the firmware was using: its writes leave the drive's cache first (FLUSH
+        // CACHE EXT), before the link reset
+        if in_use && hba.wait_port(p, PX_TFD, TFD_BSY | TFD_DRQ, 0, 1000) {
+            unsafe {
+                core::ptr::write_bytes(mem.add(1024), 0, 3072);
+                // Command header 0: a 5-dword command FIS, no data
+                core::ptr::write_volatile(mem.add(1024) as *mut u32, 5);
+                core::ptr::write_volatile(mem.add(1024 + 8) as *mut u32, ctba as u32);
+                core::ptr::write_volatile(mem.add(1024 + 12) as *mut u32, (ctba >> 32) as u32);
+                // Register host-to-device FIS: command 0xEA, the C bit set
+                let cfis = mem.add(2048);
+                *cfis = 0x27;
+                *cfis.add(1) = 0x80;
+                *cfis.add(2) = 0xEA;
+                *cfis.add(7) = 0x40;
+            }
+            hba.port_write(p, PX_CMD, hba.port_read(p, PX_CMD) | CMD_ST);
+            hba.port_write(p, PX_CI, 1);
+            let flushed = hba.wait_port(p, PX_CI, 1, 0, 5000) && hba.port_read(p, PX_TFD) & TFD_ERR == 0;
+            hba.port_write(p, PX_CMD, hba.port_read(p, PX_CMD) & !CMD_ST);
+            if !hba.wait_port(p, PX_CMD, CMD_CR, 0, 500) {
+                println!("[ahci-driver] port {}: the command engine does not stop after the cache flush; left alone", p);
+                continue;
+            }
+            println!("[ahci-driver] port {}: drive cache flushed before the link reset: {}", p, if flushed { "ok" } else { "no answer" });
+        }
         let sctl = hba.port_read(p, PX_SCTL) & !0xF;
         hba.port_write(p, PX_SCTL, sctl | 1);
         sys::sleep_ms(2);
@@ -825,6 +864,7 @@ fn refresh_signatures(hba: &Hba, wanted: Option<usize>, cap: u32) {
         hba.wait_port(p, PX_SSTS, 0xF, 3, 1000);
         let got = hba.wait_port(p, PX_SIG, 0xFFFF_FFFF, SIG_ATA, 1000);
         hba.port_write(p, PX_SERR, 0xFFFF_FFFF);
+        hba.port_write(p, PX_IS, 0xFFFF_FFFF);
         hba.port_write(p, PX_CMD, hba.port_read(p, PX_CMD) & !CMD_FRE);
         hba.wait_port(p, PX_CMD, CMD_FR, 0, 500);
         println!("[ahci-driver] port {}: no signature from the firmware's use; after a link reset {:#x}{}", p, hba.port_read(p, PX_SIG), if got { "" } else { " (still none)" });

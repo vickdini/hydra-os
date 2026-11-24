@@ -303,8 +303,9 @@ impl Nic {
     /// (as Linux's `e1000_toggle_lanphypc_pch_lpt`), which power-cycles the PHY.
     fn toggle_lanphypc(&self) {
         // The PHY configuration counter: 50 ms after the power cycle
+        // (FEXTNVM3.PHY_CFG_COUNTER, bits 27:26: 2 = 50 ms, as Linux's e1000_toggle_lanphypc_pch_lpt)
         let f = self.read(REG_FEXTNVM3);
-        self.write(REG_FEXTNVM3, (f & !7) | 0x1);
+        self.write(REG_FEXTNVM3, (f & !0x0C00_0000) | 0x0800_0000);
         let ctrl = self.read(REG_CTRL);
         self.write(REG_CTRL, (ctrl | CTRL_LANPHYPC_OVERRIDE) & !CTRL_LANPHYPC_VALUE);
         self.read(REG_STATUS);
@@ -345,13 +346,16 @@ impl Nic {
             println!("[e1000-driver] PHY {:#010x} answers", id);
             return true;
         }
-        // The MAC through SMBus for a moment (50 ms for it to finish its retries)
-        self.write(REG_CTRL_EXT, self.read(REG_CTRL_EXT) | CTRL_EXT_FORCE_SMBUS);
-        sys::sleep_ms(50);
-        if let Some(id) = self.phy_id() {
-            println!("[e1000-driver] PHY {:#010x} answers after the SMBus switch", id);
-            self.write(REG_CTRL_EXT, self.read(REG_CTRL_EXT) & !CTRL_EXT_FORCE_SMBUS);
-            return true;
+        // The MAC through SMBus for a moment (50 ms for it to finish its retries); not while
+        // the management firmware runs (it uses that path itself; Linux does the same)
+        if fwsm & FWSM_FW_VALID == 0 {
+            self.write(REG_CTRL_EXT, self.read(REG_CTRL_EXT) | CTRL_EXT_FORCE_SMBUS);
+            sys::sleep_ms(50);
+            if let Some(id) = self.phy_id() {
+                println!("[e1000-driver] PHY {:#010x} answers after the SMBus switch", id);
+                self.write(REG_CTRL_EXT, self.read(REG_CTRL_EXT) & !CTRL_EXT_FORCE_SMBUS);
+                return true;
+            }
         }
         if fwsm & FWSM_RSPCIPHY == 0 {
             println!("[e1000-driver] the PHY does not answer and the management firmware blocks its power cycle");

@@ -110,6 +110,7 @@ fn out(s: &str) {
 /// The start menu on the firmware's text screen: the words the chosen entry adds (`None`
 /// for entry 1, or when there is no keyboard to ask).
 fn menu(wait: u32) -> Option<&'static str> {
+    use bootwords::{Menu, MenuKey};
     use uefi::proto::console::text::Key;
     out("\r\n  Hydra - how to start\r\n\r\n");
     out("    1  Start Hydra\r\n");
@@ -118,40 +119,38 @@ fn menu(wait: u32) -> Option<&'static str> {
     if wait == 0 {
         return None;
     }
-    let mut left = wait * 10; // tenths of a second
-    let mut counting = true;
+    // Keys pressed before the menu (the one held for the firmware's boot menu) do not count
+    for _ in 0..64 {
+        if uefi::system::with_stdin(|i| i.read_key().ok().flatten()).is_none() {
+            break;
+        }
+    }
+    let mut m = Menu::new(wait);
     let mut shown = u32::MAX;
+    let mut was_counting = true;
     loop {
-        if counting && left / 10 != shown {
-            shown = left / 10;
+        if m.counting && m.left / 10 != shown {
+            shown = m.left / 10;
             let mut line = crate::console::FixedBuf::new();
             let _ = core::fmt::Write::write_fmt(&mut line, format_args!("\r  Press 1, 2 or 3. Starting entry 1 in {} s ", shown));
             out(line.as_str());
         }
-        let key = uefi::system::with_stdin(|i| i.read_key().ok().flatten());
-        if let Some(Key::Printable(c)) = key {
-            let c = char::from(c);
-            if let Some(words) = bootwords::menu_choice(c) {
-                out("\r\n\r\n");
-                if !words.is_empty() {
-                    out("  Starting in safe mode.\r\n");
-                }
-                return (!words.is_empty()).then_some(words);
+        let key = uefi::system::with_stdin(|i| i.read_key().ok().flatten()).map(|k| match k {
+            Key::Printable(c) => MenuKey::Char(char::from(c)),
+            Key::Special(_) => MenuKey::Special,
+        });
+        if let Some(words) = m.step(key) {
+            out("\r\n\r\n");
+            if !words.is_empty() {
+                out("  Starting in safe mode.\r\n");
             }
+            return (!words.is_empty()).then_some(words);
         }
-        if key.is_some() && counting {
-            // Any other key: wait for a choice
-            counting = false;
+        if was_counting && !m.counting {
+            was_counting = false;
             // (the firmware restarts the machine after 5 minutes in a boot program otherwise)
             let _ = uefi::boot::set_watchdog_timer(0, 0x10000, None);
-            out("\r  Press 1, 2 or 3.                                   ");
-        }
-        if counting {
-            if left == 0 {
-                out("\r\n\r\n");
-                return None;
-            }
-            left -= 1;
+            out("\r  Press 1, 2 or 3 (entry 1 starts after 30 s without a key).   ");
         }
         uefi::boot::stall(core::time::Duration::from_millis(100));
     }

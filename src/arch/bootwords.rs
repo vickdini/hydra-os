@@ -157,3 +157,63 @@ pub fn menu_choice(key: char) -> Option<&'static str> {
         _ => None,
     }
 }
+
+// wave11 GH review (M1): the start menu never waits for ever
+/// A key at the start menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuKey {
+    /// A printable character.
+    Char(char),
+    /// A function, arrow or other special key (ignored: the one held to reach the
+    /// firmware's setup or boot menu may still be waiting).
+    Special,
+}
+
+/// After a printable non-menu key stopped the countdown: tenths of a second without a key
+/// before entry 1 starts anyway (30 s).
+pub const MENU_IDLE_LIMIT: u32 = 300;
+
+/// The start menu's countdown, in tenths of a second.
+#[derive(Clone, Copy, Debug)]
+pub struct Menu {
+    /// Tenths left in the countdown.
+    pub left: u32,
+    /// The countdown runs (no printable non-menu key yet).
+    pub counting: bool,
+    /// Tenths since the last key, once the countdown stopped.
+    pub idle: u32,
+}
+
+impl Menu {
+    /// A countdown of `wait_s` seconds.
+    pub fn new(wait_s: u32) -> Self {
+        Menu { left: wait_s * 10, counting: true, idle: 0 }
+    }
+
+    /// One tenth of a second with `key` (if one came): the words of the entry to start
+    /// (`""` for entry 1), or `None` to go on waiting.
+    pub fn step(&mut self, key: Option<MenuKey>) -> Option<&'static str> {
+        match key {
+            Some(MenuKey::Char(c)) => {
+                if let Some(words) = menu_choice(c) {
+                    return Some(words);
+                }
+                self.counting = false;
+                self.idle = 0;
+            }
+            Some(MenuKey::Special) | None => {}
+        }
+        if self.counting {
+            if self.left == 0 {
+                return Some("");
+            }
+            self.left -= 1;
+        } else {
+            self.idle += 1;
+            if self.idle >= MENU_IDLE_LIMIT {
+                return Some("");
+            }
+        }
+        None
+    }
+}

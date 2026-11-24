@@ -64,6 +64,8 @@ struct Target {
     disk: usize,
     /// The partition's first byte on the disk.
     part_start: u64,
+    /// The partition's length (no write goes past it).
+    part_len: u64,
     /// Where the file's bytes are.
     map: fat32::FileMap,
     /// Bytes of the rendered log already in the file (when the ring has not wrapped).
@@ -278,14 +280,20 @@ pub fn prepare_file() {
 /// Hydra EFI partition the firmware sees (an installed system's: `\EFI\hydra\hydra.efi`
 /// and no `\hydra\live`) into `\logs\disk\` on the stick. So after a test of the installed
 /// system, starting the stick once more brings its logs to where Windows can read them.
+///
+/// Only disks are connected (handles with the block I/O protocol: their partitions and file
+/// systems), never every controller (network boot stacks...). A copy is written only when
+/// the source changed since the last start: `\logs\disk\index.txt` keeps each copied file's
+/// name and fingerprint.
 fn collect_disk_logs(stick_logs: &mut uefi::proto::media::file::Directory, bounce: &mut [u8]) {
+    use uefi::proto::media::block::BlockIO;
     use uefi::proto::media::file::{File, FileAttribute, FileMode};
     use uefi::proto::media::fs::SimpleFileSystem;
     let own = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()).ok().and_then(|i| i.device());
-    // The firmware may have connected only the device it booted from: every controller's
-    // drivers first (the disks, their partitions, their file systems)
-    if let Ok(all) = uefi::boot::locate_handle_buffer(uefi::boot::SearchType::AllHandles) {
-        for &h in all.iter() {
+    // The disks' partitions and file systems (the firmware may have connected only the
+    // device it booted from); at most 16 disks
+    if let Ok(disks) = uefi::boot::locate_handle_buffer(uefi::boot::SearchType::from_proto::<BlockIO>()) {
+        for &h in disks.iter().take(16) {
             let _ = uefi::boot::connect_controller(h, &[], None, true);
         }
     }
@@ -294,7 +302,7 @@ fn collect_disk_logs(stick_logs: &mut uefi::proto::media::file::Directory, bounc
     #[repr(C, align(8))]
     struct EntryBuf([u8; 1024]);
     let mut eb = EntryBuf([0; 1024]);
-    let mut copied = 0;
+    let (mut copied, mut same) = (0, 0);
     for &h in handles.iter() {
         if Some(h) == own {
             continue;
@@ -321,6 +329,16 @@ fn collect_disk_logs(stick_logs: &mut uefi::proto::media::file::Directory, bounc
                 names.push(n);
             }
         }
+        // What was copied at earlier starts (name and fingerprint per line)
+        let mut ib = [0u16; 64];
+        let Some(ic) = crate::fs::bootfs::path_to_cstr16("index.txt", &mut ib) else { continue };
+        let mut index = alloc::string::String::new();
+        if let Some(mut f) = out.open(ic, FileMode::Read, FileAttribute::empty()).ok().and_then(|f| f.into_regular_file()) {
+            let mut buf = alloc::vec![0u8; 4096];
+            let n = crate::fs::bootfs::fw_read(&mut f, &mut buf).unwrap_or(0);
+            index = alloc::string::String::from_utf8_lossy(&buf[..n]).into_owned();
+        }
+        let mut new_index = alloc::string::String::new();
         for n in names {
             let mut nb = [0u16; 64];
             let Some(c) = crate::fs::bootfs::path_to_cstr16(&n, &mut nb) else { continue };
@@ -333,6 +351,12 @@ fn collect_disk_logs(stick_logs: &mut uefi::proto::media::file::Directory, bounc
                     Ok(k) => len += k,
                 }
             }
+            let line = alloc::format!("{} {:016x}\r\n", n.to_ascii_lowercase(), logring::fingerprint(&data[..len]));
+            new_index.push_str(&line);
+            if index.contains(&line) {
+                same += 1;
+                continue;
+            }
             // A fresh copy (an older one of the same name goes first)
             if let Some(old) = out.open(c, FileMode::ReadWrite, FileAttribute::empty()).ok().and_then(|f| f.into_regular_file()) {
                 let _ = old.delete();
@@ -344,13 +368,22 @@ fn collect_disk_logs(stick_logs: &mut uefi::proto::media::file::Directory, bounc
                 let _ = dst.flush();
             }
         }
+        // The index last: a copy cut short is copied again at the next start
+        if let Some(old) = out.open(ic, FileMode::ReadWrite, FileAttribute::empty()).ok().and_then(|f| f.into_regular_file()) {
+            let _ = old.delete();
+        }
+        if let Some(mut f) = out.open(ic, FileMode::CreateReadWrite, FileAttribute::empty()).ok().and_then(|f| f.into_regular_file()) {
+            let _ = fw_write(&mut f, 0, new_index.as_bytes(), bounce);
+            let _ = f.flush();
+        }
     }
     crate::kprintln!(
-        "[bootlog] {} other EFI volumes, {} with an installed Hydra: {} of its log files copied to \\{}\\disk on the stick",
+        "[bootlog] {} other EFI volumes, {} with an installed Hydra: {} of its log files copied to \\{}\\disk on the stick, {} unchanged",
         handles.len().saturating_sub(1),
         hydra_volumes,
         copied,
-        DIR
+        DIR,
+        same
     );
 }
 
@@ -388,17 +421,27 @@ fn find_target() -> Result<Target, &'static str> {
     let (idx, start, len) = boot_partition().ok_or("the boot partition is on no disk the drivers found")?;
     let mut read = |off: u64, buf: &mut [u8]| off + buf.len() as u64 <= len && crate::fs::blockdev::read_at(idx, start + off, buf) == Ok(buf.len());
     let name = logring::file_name(seq);
-    let map = fat32::locate(&mut read, &[DIR, &name])?;
+    let map = fat32::locate(&mut read, len, &[DIR, &name])?;
     if map.size as usize != logring::FILE_SIZE {
         return Err("the log file does not have its full size");
     }
-    Ok(Target { disk: idx, part_start: start, map, written: 0 })
+    if map.extents.iter().any(|e| e.part_off + e.len > len) {
+        return Err("the log file's clusters lie past the partition's end");
+    }
+    Ok(Target { disk: idx, part_start: start, part_len: len, map, written: 0 })
 }
 
 /// Writes the new part of the log (all of it after the head once the ring wrapped) and
 /// `end` after it. Returns whether it worked.
-fn write_out(end: &str, last: bool) -> bool {
-    let mut t = TARGET.lock();
+fn write_out(end: &str, last: bool, wait_ms: u64) -> bool {
+    // (the lock is held across disk calls: never spin for it, wait with a deadline; with one
+    // processor a spinning high-priority task would starve the holder)
+    let Some(mut t) = lock_target(wait_ms) else {
+        if last {
+            STOPPED.store(true, Ordering::Release);
+        }
+        return false;
+    };
     // After the last write nothing more (the file keeps its end line)
     if STOPPED.load(Ordering::Acquire) {
         return true;
@@ -419,6 +462,13 @@ fn write_out(end: &str, last: bool) -> bool {
         }
     }
     let t = t.as_mut().unwrap();
+    // The disk the drivers have under that index must still hold the boot partition where
+    // it was (a stick replaced by another disk must never get the log)
+    if boot_partition() != Some((t.disk, t.part_start, t.part_len)) {
+        crate::kprintln!("[bootlog] the boot partition is not where it was: no more log writes");
+        STOPPED.store(true, Ordering::Release);
+        return false;
+    }
     let Some((mut text, h)) = snapshot() else { return false };
     let from = if logring::wrapped(&h) { (h.head_len as usize).min(t.written) } else { t.written };
     let from = from & !4095;
@@ -427,6 +477,10 @@ fn write_out(end: &str, last: bool) -> bool {
     let mut ok = true;
     for (part_off, file_off, len) in t.map.pieces(from as u64, (text.len() - from.min(text.len())) as u64) {
         let data = &text[file_off as usize..(file_off + len) as usize];
+        if part_off + len > t.part_len {
+            ok = false;
+            break;
+        }
         if crate::fs::blockdev::write_at(t.disk, t.part_start + part_off, data) != Ok(data.len()) {
             ok = false;
             break;
@@ -439,6 +493,21 @@ fn write_out(end: &str, last: bool) -> bool {
     ok
 }
 
+/// The writer's state, waiting at most `ms` for it (sleeping, not spinning).
+fn lock_target(ms: u64) -> Option<spin::MutexGuard<'static, Option<Target>>> {
+    let mut waited = 0;
+    loop {
+        if let Some(g) = TARGET.try_lock() {
+            return Some(g);
+        }
+        if waited >= ms {
+            return None;
+        }
+        crate::task::sleep_ms(10);
+        waited += 10;
+    }
+}
+
 /// The writer task: every [`PERIOD_MS`], the new part of the log.
 fn writer_task() {
     let mut failures = 0;
@@ -448,7 +517,7 @@ fn writer_task() {
         }
         let up = crate::arch::pit::now_ns() / 1_000_000_000;
         let end = alloc::format!("\r\n--- the log so far (Hydra was running, {} s after the start) ---\r\n", up);
-        if write_out(&end, false) {
+        if write_out(&end, false, 60_000) {
             failures = 0;
         } else {
             failures += 1;
@@ -473,7 +542,7 @@ pub fn at_power(what: &'static str) {
     fn last() {
         let what = *WHAT.lock();
         let end = alloc::format!("\r\n--- end of the log: Hydra {} ---\r\n", what);
-        if write_out(&end, true) {
+        if write_out(&end, true, 4_000) {
             set_flags(logring::F_WRITTEN);
         }
         DONE.store(true, Ordering::SeqCst);
@@ -525,7 +594,7 @@ pub fn check_pool() {
         return;
     }
     crate::kprintln!("[bootlog] the pool's disk was not found");
-    if write_out("\r\n--- the log so far (the pool's disk was not found) ---\r\n", false) {
+    if write_out("\r\n--- the log so far (the pool's disk was not found) ---\r\n", false, 10_000) {
         return;
     }
     if PREV_WAS_SAVE.load(Ordering::Relaxed) {

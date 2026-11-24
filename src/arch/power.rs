@@ -206,7 +206,8 @@ fn find_table(sig: &[u8; 4]) -> Option<alloc::vec::Vec<u8>> {
         if sdt == 0 {
             return None;
         }
-        let len = rd32(sdt + 4) as u64;
+        // (a broken length must not walk off into unmapped memory: at most 4096 entries)
+        let len = (rd32(sdt + 4) as u64).clamp(36, 36 + 4096 * entry);
         let mut at = sdt + 36;
         while at + entry <= sdt + len {
             let t = if entry == 8 { rd64(at) } else { rd32(at) as u64 };
@@ -260,10 +261,14 @@ fn acpi_power_off() {
                 spin_ms(10);
             }
         }
+        // As ACPICA: the sleep type first, then the same value with SLP_EN (some chipsets
+        // need the two writes)
         let v = super::acpi_s5::pm1_sleep_value(cnt.read(), a);
+        let mut cntb: Port<u16> = Port::new(f.pm1b_cnt);
+        let vb = if f.pm1b_cnt != 0 { super::acpi_s5::pm1_sleep_value(cntb.read(), b) } else { 0 };
+        cnt.write(v & !(1 << 13));
         if f.pm1b_cnt != 0 {
-            let mut cntb: Port<u16> = Port::new(f.pm1b_cnt);
-            let vb = super::acpi_s5::pm1_sleep_value(cntb.read(), b);
+            cntb.write(vb & !(1 << 13));
             cntb.write(vb);
         }
         cnt.write(v);
@@ -278,7 +283,12 @@ fn acpi_reset() {
     unsafe {
         match space {
             1 => x86_64::instructions::port::Port::<u8>::new(addr as u16).write(value),
-            0 => core::ptr::write_volatile(crate::memory::frame_allocator::phys_to_virt(addr), value),
+            0 => {
+                // A memory register (chipset MMIO: not in the direct map of RAM): through the
+                // kernel's tables, whose low half is the firmware's identity map
+                crate::memory::paging::load_kernel_tables_for_good();
+                core::ptr::write_volatile(addr as *mut u8, value)
+            }
             _ => return,
         }
     }
