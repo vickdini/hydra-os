@@ -93,6 +93,32 @@ impl View {
         false
     }
 
+    // wave11 GF begin
+    /// The mount of FUSE inode `ino` in the initial namespace's table (the first FUSE mount of
+    /// its connection): for a node the kernel names without its mount.
+    pub fn fuse_mount_of(&self, ino: u64) -> Option<u16> {
+        let (conn, _) = crate::fuse::wire::split(ino)?;
+        let i = self.recs.iter().position(|r| r.kind == LX_MNT_FUSE && crate::fuse::wire::split(r.root).is_some_and(|(k, _)| k == conn))?;
+        u16::try_from(i + 1).ok()
+    }
+
+    /// [`View::walkable`], or a file of one of vfs-server's FUSE mounts of the table (a
+    /// descriptor, working directory or node in such a mount: its mount record is a FUSE one
+    /// of the node's own connection, mounted on a walkable tree).
+    pub fn walkable_or_fuse(&self, n: Node) -> bool {
+        let Some((conn, _)) = crate::fuse::wire::split(n.ino) else { return self.walkable(n) };
+        match self.rec(n.mnt as u32) {
+            Some(r) if r.kind == LX_MNT_FUSE && crate::fuse::wire::split(r.root).is_some_and(|(k, _)| k == conn) => {
+                if self.ns == 0 {
+                    return r.parent == 0;
+                }
+                r.parent != 0 && self.walkable(Node::new(r.parent as u16, r.mountpoint))
+            }
+            _ => false,
+        }
+    }
+    // wave11 GF end
+
     /// Whether directory `n` is the mount point of any mount (listed or not): it cannot be
     /// removed or renamed (Linux: `EBUSY`; the kernel decides).
     pub fn is_mountpoint(&self, n: Node) -> bool {
@@ -123,6 +149,10 @@ impl Mounts for View {
         let kind = match r.kind {
             LX_MNT_KERNEL => MountKind::Redirect { svc: 0, obj: 0 },
             LX_MNT_FUSE => MountKind::Fuse, // wave9 G6b-2
+            // wave11 GF: proc and devpts mounted elsewhere (bubblewrap's `/oldroot/proc`,
+            // `/newroot/dev/pts`): their services, with the rest below the mount
+            crate::proto::LX_MNT_PROC => MountKind::Redirect { svc: crate::proto::LXS_PROC, obj: crate::proto::LX_VFS_PSEUDO_PROC },
+            crate::proto::LX_MNT_DEVPTS => MountKind::Redirect { svc: crate::proto::LXS_TTY, obj: crate::proto::LX_VFS_PSEUDO_DEVPTS | crate::calls::served::PTS_BELOW },
             _ => MountKind::Zfs,
         };
         // A mount with nothing below it (a namespace's root): its mount point is itself,
@@ -145,7 +175,8 @@ pub fn parse(ns: u32, head: &LxMntHead, recs: &[LxMntRec]) -> Option<View> {
     if ns != 0 && (head.root == 0 || recs[head.root as usize - 1].kind == LX_MNT_HOLE) {
         return None;
     }
-    if recs.iter().any(|r| r.kind > LX_MNT_FUSE || (r.kind != LX_MNT_HOLE && r.parent as usize > recs.len())) {
+    // (wave11 GF: up to LX_MNT_DEVPTS)
+    if recs.iter().any(|r| r.kind > crate::proto::LX_MNT_DEVPTS || (r.kind != LX_MNT_HOLE && r.parent as usize > recs.len())) {
         return None;
     }
     Some(View { ns, gen: head.gen, root: head.root, recs: recs.to_vec() })

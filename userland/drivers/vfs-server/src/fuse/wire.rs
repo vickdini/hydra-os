@@ -444,3 +444,38 @@ impl ConnRec {
         })
     }
 }
+
+// wave11 GF begin
+/// `struct fuse_setattr_in` (88 bytes) setting what is given: the mode, owner, group, size,
+/// access and modification times (`FATTR_*` valid bits), as the kernel's client made it.
+pub fn setattr_in(mode: Option<u32>, uid: Option<u32>, gid: Option<u32>, size: Option<u64>, atime: Option<(i64, u32)>, mtime: Option<(i64, u32)>) -> Vec<u8> {
+    const FATTR_MODE: u32 = 1;
+    const FATTR_UID: u32 = 2;
+    const FATTR_GID: u32 = 4;
+    const FATTR_SIZE: u32 = 8;
+    const FATTR_ATIME: u32 = 16;
+    const FATTR_MTIME: u32 = 32;
+    let valid = [(mode.is_some(), FATTR_MODE), (uid.is_some(), FATTR_UID), (gid.is_some(), FATTR_GID), (size.is_some(), FATTR_SIZE), (atime.is_some(), FATTR_ATIME), (mtime.is_some(), FATTR_MTIME)]
+        .iter()
+        .filter(|(on, _)| *on)
+        .fold(0u32, |v, (_, b)| v | b);
+    let mut a = Vec::with_capacity(88);
+    a.extend_from_slice(&valid.to_le_bytes());
+    a.extend_from_slice(&0u32.to_le_bytes());
+    a.extend_from_slice(&0u64.to_le_bytes()); // fh
+    a.extend_from_slice(&size.unwrap_or(0).to_le_bytes());
+    a.extend_from_slice(&0u64.to_le_bytes()); // lock_owner
+    a.extend_from_slice(&(atime.map_or(0, |t| t.0) as u64).to_le_bytes());
+    a.extend_from_slice(&(mtime.map_or(0, |t| t.0) as u64).to_le_bytes());
+    a.extend_from_slice(&0u64.to_le_bytes()); // ctime
+    a.extend_from_slice(&atime.map_or(0, |t| t.1).to_le_bytes());
+    a.extend_from_slice(&mtime.map_or(0, |t| t.1).to_le_bytes());
+    a.extend_from_slice(&0u32.to_le_bytes()); // ctimensec
+    a.extend_from_slice(&mode.unwrap_or(0).to_le_bytes());
+    a.extend_from_slice(&0u32.to_le_bytes());
+    a.extend_from_slice(&uid.unwrap_or(0).to_le_bytes());
+    a.extend_from_slice(&gid.unwrap_or(0).to_le_bytes());
+    a.extend_from_slice(&0u32.to_le_bytes());
+    a
+}
+// wave11 GF end

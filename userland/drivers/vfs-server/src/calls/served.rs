@@ -102,3 +102,26 @@ pub fn served(tree: Tree, name: &[u8], rest: &[&[u8]], open: bool) -> Option<(Sv
         _ => None,
     }
 }
+
+// wave11 GF begin: efivars unlinks (linux-server deletes the variable)
+/// Whether directory `dir` is the caller's root's `sys/firmware/efi/efivars` (from the
+/// caches).
+pub fn is_efivars_dir(be: &dyn Backend, cx: &Ctx, dir: Node) -> bool {
+    let mut n = cx.root;
+    for name in [&b"sys"[..], b"firmware", b"efi", b"efivars"] {
+        match be.lookup(n, name) {
+            Ok(x) => n = x,
+            Err(_) => return false,
+        }
+    }
+    n == dir
+}
+
+/// Where the part below `/sys` starts in `path` (an absolute or relative path naming an
+/// efivars file: `.../firmware/efi/efivars/<name>`), as linux-server's rules take it.
+pub fn efivars_tail(path: &[u8]) -> Option<u32> {
+    let key: &[u8] = b"firmware/efi/efivars/";
+    let i = path.windows(key.len()).rposition(|w| w == key)?;
+    (i == 0 || path[i - 1] == b'/').then_some(i as u32)
+}
+// wave11 GF end

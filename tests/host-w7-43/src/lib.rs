@@ -39,6 +39,17 @@ pub mod lock {
 /// *stub* The calls' "redirect to the kernel" answer (`calls::rules::KERNEL`).
 pub mod calls {
     pub const KERNEL: i64 = i64::MIN;
+    // wave11 GF: the "below `pts`" bit of the devpts redirect (`calls/served.rs`)
+    pub mod served {
+        pub const PTS_BELOW: u64 = 0x100;
+    }
+}
+
+/// wave11 GF: vfs-server's FUSE inode numbers (`fuse/wire.rs`; `kmounts` checks a FUSE
+/// node's mount by its connection).
+pub mod fuse {
+    #[path = "../../../../userland/drivers/vfs-server/src/fuse/wire.rs"]
+    pub mod wire;
 }
 
 #[path = "../../../userland/drivers/vfs-server/src/cache.rs"]

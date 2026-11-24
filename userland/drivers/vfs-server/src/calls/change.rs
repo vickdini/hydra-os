@@ -36,7 +36,7 @@ const AT_REMOVEDIR: u64 = 0x200;
 const RENAME_NOREPLACE: u64 = 1;
 
 /// Tells the kernel's caches about change `what` (`LX_FHC_*`) to `ino`.
-pub(super) fn tell_kernel(ino: u64, what: u64, size: u64) {
+pub fn tell_kernel(ino: u64, what: u64, size: u64) {
     let _ = sys::lx_obj(LX_FH_CHANGED, ino, what, &size as *const u64 as u64);
 }
 
@@ -54,10 +54,39 @@ fn target(cx: &Cx, who: &Ctx, ptr: u64, follow: bool, empty_ok: bool) -> Result<
             return Err(rules::ENOENT);
         }
         let n = ctxt::handle(c)?;
-        return Ok((n, ctxt::BE.getattr(n)?));
+        return Ok((n, ctxt::attr_of(c, n)?)); // wave11 GF: (a FUSE file's too)
     }
     ctxt::find(c, who, &path, follow)
 }
+
+// wave11 GF begin: changes of FUSE files (the daemon's operations; the reply answers)
+/// [`setattr`], or for a FUSE file the daemon's SETATTR (the call waits for the reply).
+fn set_on(c: &LxCall, who: &Ctx, n: Node, a: &Attr, set: SetAttr) -> Result<i64, i64> {
+    if !ctxt::is_fuse(n) {
+        return setattr(who, n, a, set);
+    }
+    let what = LX_FHC_ATTR | if set.size.is_some() { LX_FHC_TRUNC } else { 0 };
+    let size = set.size.unwrap_or(0);
+    crate::fuse::start(c, n.ino, crate::fuse::Req::Setattr(set), then_tell(crate::fuse::How::Zero, n.ino, what, size))
+}
+
+/// A [`crate::fuse::Then`] telling the kernel's caches `what` about `ino` after a success.
+pub(super) fn then_tell(how: crate::fuse::How, ino: u64, what: u64, size: u64) -> crate::fuse::Then {
+    crate::fuse::Then { how, tell: Some((ino, what, size)) }
+}
+
+/// The FUSE operation of a name change in directory `dir`: 0 from the daemon's reply (the
+/// kernel's name caches are told, as [`names_changed`]).
+pub(super) fn fuse_names(c: &LxCall, dir: Node, req: crate::fuse::Req) -> Result<i64, i64> {
+    // ("." and ".." always exist: Linux's VFS answers before the file system)
+    if let crate::fuse::Req::Mkdir { name, .. } | crate::fuse::Req::Mknod { name, .. } | crate::fuse::Req::Symlink { name, .. } | crate::fuse::Req::Link { name, .. } = &req {
+        if name == b"." || name == b".." {
+            return Err(EEXIST);
+        }
+    }
+    crate::fuse::start(c, dir.ino, req, then_tell(crate::fuse::How::Zero, 0, LX_FHC_NAMES | LX_FHC_ALL_ATTRS, 0))
+}
+// wave11 GF end
 
 /// Applies `set` to `n` (attributes `a` before) through zfs-server (the caller checked that
 /// `n`'s mount is writable: [`attrs`]).
@@ -179,7 +208,7 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
             if !owner(&who, &at) {
                 return Err(EPERM);
             }
-            setattr(&who, n, &at, SetAttr { mode: Some(mode as u32), ..SetAttr::default() })
+            set_on(c, &who, n, &at, SetAttr { mode: Some(mode as u32), ..SetAttr::default() })
         }
         // chown(path, uid, gid), lchown, fchownat(dirfd, path, uid, gid, flags), fchown
         92 | 94 | 260 | 93 => {
@@ -202,7 +231,7 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
                 kill_suid: true,
                 ..SetAttr::default()
             };
-            setattr(&who, n, &at, set)
+            set_on(c, &who, n, &at, set)
         }
         // truncate(path, size)
         76 => {
@@ -218,14 +247,15 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
             }
             ctxt::writable(c, n)?; // wave7 G7-7
             let acl = ctxt::acl_of(n, &at)?;
+            // (wave11 GF: EACCES, as Linux's `do_sys_truncate`; the kernel's copy said EPERM)
             if !ctxt::allowed(&who, &at, acl.as_deref(), c.euid, c.egid, rules::MAY_WRITE, b"")? {
-                return Err(EPERM);
+                return Err(EACCES);
             }
             // wave10 GV1 (review 3): a running program's file is not truncated
             if crate::tmem::text_busy_attr(&at) {
                 return Err(-26); // ETXTBSY
             }
-            setattr(&who, n, &at, SetAttr { size: Some(a[1]), ..SetAttr::default() })
+            set_on(c, &who, n, &at, SetAttr { size: Some(a[1]), ..SetAttr::default() })
         }
         // ftruncate(fd, size): a handle open for writing
         77 => {
@@ -241,8 +271,8 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
             }
             let n = ctxt::handle(c)?;
             ctxt::writable(c, n)?; // wave7 G7-7
-            let at = ctxt::BE.getattr(n)?;
-            setattr(&who, n, &at, SetAttr { size: Some(a[1]), ..SetAttr::default() })
+            let at = ctxt::attr_of(c, n)?; // wave11 GF: (a FUSE file's too)
+            set_on(c, &who, n, &at, SetAttr { size: Some(a[1]), ..SetAttr::default() })
         }
         // wave10 GV1 begin: utimensat(dirfd, path, times, flags), utime(path, times),
         // utimes(path, times), futimesat(dirfd, path, times); "now" from the wall clock
@@ -284,7 +314,7 @@ pub fn attrs(cx: &Cx) -> Result<i64, i64> {
                     return Err(EACCES);
                 }
             }
-            setattr(&who, n, &at, SetAttr { atime, mtime, ..SetAttr::default() })
+            set_on(c, &who, n, &at, SetAttr { atime, mtime, ..SetAttr::default() })
             // wave10 GV1 end
         }
     }
@@ -309,10 +339,7 @@ pub(super) fn parent(c: &LxCall, who: &Ctx, path: &[u8], create: bool) -> Result
 /// [`parent`]'s checks on an already walked parent `p` (wave10 GV1: a creating open walks
 /// it itself).
 pub(super) fn parent_checks(c: &LxCall, who: &Ctx, p: walk::Parent, path: &[u8], create: bool) -> Result<walk::Parent, i64> {
-    // (wave10 GV1: a FUSE directory's changes are the kernel's, which asks the daemon)
-    if crate::fuse::wire::split(p.dir.ino).is_some() {
-        return Err(KERNEL);
-    }
+    // (wave11 GF: a FUSE directory's changes are this service's too: `crate::fuse::start`)
     if !p.dir_attr.is_dir() {
         return Err(ENOTDIR);
     }
@@ -337,11 +364,13 @@ pub(super) fn parent_checks(c: &LxCall, who: &Ctx, p: walk::Parent, path: &[u8],
 }
 
 /// The kernel's sticky-directory rule ([`rules::sticky_denied`]).
-pub(super) fn sticky_denied(dir: &Attr, entry: Node, euid: u32) -> Result<bool, i64> {
+pub(super) fn sticky_denied(c: &LxCall, dir: &Attr, entry: Node) -> Result<bool, i64> {
+    let euid = c.euid;
     if euid == 0 || dir.mode & 0o1000 == 0 || dir.uid == euid {
         return Ok(false);
     }
-    Ok(rules::sticky_denied(dir.mode, dir.uid, ctxt::BE.getattr(entry)?.uid, euid))
+    // (wave11 GF: a FUSE entry's owner from the daemon)
+    Ok(rules::sticky_denied(dir.mode, dir.uid, ctxt::attr_of(c, entry)?.uid, euid))
 }
 
 /// After a change of names in `dirs`: vfs-server's caches and the kernel's.
@@ -368,6 +397,11 @@ pub fn mkdir(cx: &Cx) -> Result<i64, i64> {
     // wave9 G6b-3: Landlock
     if let Some(d) = policy::domain(c)? {
         policy::check_dir(&d, p.dir, ll::MAKE_DIR)?;
+    }
+    // wave11 GF: in a FUSE mount: the daemon's MKDIR (the umask applied here)
+    if ctxt::is_fuse(p.dir) {
+        let perm = mode as u32 & 0o7777 & !(c.umask as u32);
+        return fuse_names(c, p.dir, crate::fuse::Req::Mkdir { name: p.name, perm });
     }
     // wave10 GV1: a default ACL and the labels are inherited here
     let (perm, plan) = super::xattr::new_mode(p.dir, &p.dir_attr, mode as u32 & 0o7777, c.umask as u32, true)?;
@@ -403,6 +437,10 @@ pub fn symlink(cx: &Cx) -> Result<i64, i64> {
     if let Some(d) = policy::domain(c)? {
         policy::check_dir(&d, p.dir, ll::MAKE_SYM)?;
     }
+    // wave11 GF: in a FUSE mount: the daemon's SYMLINK
+    if ctxt::is_fuse(p.dir) {
+        return fuse_names(c, p.dir, crate::fuse::Req::Symlink { name: p.name, to: target });
+    }
     let r = zfs::request(FS_SYMLINK, |w| {
         w.u64(p.dir.ino);
         w.bytes(&p.name);
@@ -429,6 +467,14 @@ pub fn unlink(cx: &Cx) -> Result<i64, i64> {
     let path = ctxt::path(cx, ptr, false)?;
     let who = ctxt::caller(c)?;
     let p = parent(c, &who, &path, false)?;
+    // wave11 GF: an efivars file: linux-server deletes the variable (the pool's file follows)
+    if !rmdir && super::served::is_efivars_dir(&ctxt::walker(c)?, &who, p.dir) {
+        if let Some(tail) = super::served::efivars_tail(&path) {
+            let r = crate::walk::Redirect { svc: crate::proto::LXS_LINUX, obj: crate::proto::LX_VFS_PSEUDO_SYS, tail: Some(tail), text: alloc::vec::Vec::new() };
+            return Err(super::pseudo_redirect(&r));
+        }
+        return Err(KERNEL);
+    }
     // wave9 G6b-3: Landlock (by the call: rmdir needs REMOVE_DIR, unlink REMOVE_FILE)
     if let Some(d) = policy::domain(c)? {
         policy::check_dir(&d, p.dir, if rmdir { ll::REMOVE_DIR } else { ll::REMOVE_FILE })?;
@@ -438,13 +484,33 @@ pub fn unlink(cx: &Cx) -> Result<i64, i64> {
     // told after the unlink here)
     let mem = !rmdir && victim.is_some_and(crate::tmem::node_is_tmem);
     if let Some(v) = victim {
-        if sticky_denied(&p.dir_attr, v, c.euid)? {
+        if sticky_denied(c, &p.dir_attr, v)? {
             return Err(EPERM);
         }
         // wave9 G6b-3: the access policies: deleting needs the delete right on the file
-        if who.abac && c.euid != 0 && !policy::abac(&who, &ctxt::BE.getattr(v)?, 0, true, &path)? {
+        if who.abac && c.euid != 0 && !policy::abac(&who, &ctxt::attr_of(c, v)?, 0, true, &path)? {
             return Err(EACCES);
         }
+    }
+    // wave11 GF: in a FUSE mount: the daemon's UNLINK or RMDIR (the types checked here, as
+    // Linux's VFS does before asking any file system)
+    if ctxt::is_fuse(p.dir) {
+        match (&p.name[..], rmdir) {
+            (b".", true) => return Err(EINVAL),
+            (b"..", true) => return Err(-39), // ENOTEMPTY
+            (b"." | b"..", false) => return Err(-21), // EISDIR
+            _ => {}
+        }
+        let v = victim.ok_or(rules::ENOENT)?;
+        let dir = ctxt::attr_of(c, v)?.is_dir();
+        if rmdir && !dir {
+            return Err(ENOTDIR);
+        }
+        if !rmdir && dir {
+            return Err(-21); // EISDIR
+        }
+        let req = if rmdir { crate::fuse::Req::Rmdir { name: p.name } } else { crate::fuse::Req::Unlink { name: p.name } };
+        return fuse_names(c, p.dir, req);
     }
     let r = zfs::request(if rmdir { FS_RMDIR } else { FS_UNLINK }, |w| {
         w.u64(p.dir.ino);
@@ -523,23 +589,23 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
         }
     }
     if let Some(s) = src.child {
-        if sticky_denied(&src.dir_attr, s, c.euid)? {
+        if sticky_denied(c, &src.dir_attr, s)? {
             return Err(EPERM);
         }
         // wave9 G6b-3: the access policies: moving a file away from its folder needs the
         // delete right
-        if who.abac && c.euid != 0 && src.dir.ino != dst.dir.ino && !policy::abac(&who, &ctxt::BE.getattr(s)?, 0, true, &op)? {
+        if who.abac && c.euid != 0 && src.dir.ino != dst.dir.ino && !policy::abac(&who, &ctxt::attr_of(c, s)?, 0, true, &op)? {
             return Err(EACCES);
         }
     }
     // wave9 G6b-3: and a file replaced
     if let Some(d) = dst.child {
-        if who.abac && c.euid != 0 && !policy::abac(&who, &ctxt::BE.getattr(d)?, 0, true, &np)? {
+        if who.abac && c.euid != 0 && !policy::abac(&who, &ctxt::attr_of(c, d)?, 0, true, &np)? {
             return Err(EACCES);
         }
     }
     if let Some(d) = dst.child {
-        if sticky_denied(&dst.dir_attr, d, c.euid)? {
+        if sticky_denied(c, &dst.dir_attr, d)? {
             return Err(EPERM);
         }
         if flags & RENAME_NOREPLACE != 0 {
@@ -557,6 +623,31 @@ pub fn rename(cx: &Cx) -> Result<i64, i64> {
         policy::check_move(&dom, src.dir, dst.dir, ftype, remove_dst)?;
     }
     // wave9 G6b-3 end
+    // wave11 GF: in a FUSE mount (both directories: one mount): the daemon's RENAME
+    if ctxt::is_fuse(src.dir) {
+        let s = src.child.ok_or(rules::ENOENT)?;
+        if [&src.name[..], &dst.name[..]].iter().any(|n| *n == b"." || *n == b"..") {
+            return Err(-16); // EBUSY
+        }
+        let sdir = ctxt::attr_of(c, s)?.is_dir();
+        if let Some(d) = dst.child {
+            if d == s {
+                return Ok(0);
+            }
+            let ddir = ctxt::attr_of(c, d)?.is_dir();
+            if sdir && !ddir {
+                return Err(ENOTDIR);
+            }
+            if !sdir && ddir {
+                return Err(-21); // EISDIR
+            }
+        }
+        // (a directory into itself or below it)
+        if sdir && crate::fuse::descends(dst.dir.ino, s.ino) {
+            return Err(EINVAL);
+        }
+        return fuse_names(c, src.dir, crate::fuse::Req::Rename { sname: src.name, ddir: dst.dir.ino, dname: dst.name });
+    }
     let r = zfs::request(FS_RENAME, |w| {
         w.u64(src.dir.ino);
         w.bytes(&src.name);

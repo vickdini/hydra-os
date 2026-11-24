@@ -361,6 +361,11 @@ impl Ttys {
         self.live.get(&index).copied()
     }
 
+    /// wave11 GF: the slaves `/dev/pts` lists (ascending).
+    pub fn live_indexes(&self) -> alloc::vec::Vec<u32> {
+        self.live.keys().copied().collect()
+    }
+
     /// The pair that is session `sid`'s controlling terminal.
     fn controlling(&self, sid: u64) -> Option<u64> {
         if sid == 0 {

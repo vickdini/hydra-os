@@ -18,6 +18,11 @@
 //!   object, `lseek` and `pread64` as the kernel's calls `LX_KCALL_PSEEK`/`LX_KCALL_PREAD`. A
 //!   seek to 0 or a `pread` at 0 makes the text again.
 //! - Callers in a PID or user namespace of their own go to the kernel.
+//! - wave11 GF: efivarfs **writes**: an open for writing (`CAP_SYS_ADMIN`, `O_CREAT` makes a
+//!   new variable) takes one `write` of the attributes and the data, as efivarfs; `unlink`
+//!   deletes the variable (vfs-server redirects it here); both through the kernel's firmware
+//!   call `LX_INFO_EFIVAR_SET`. `FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS` answer as the kernel's
+//!   efivarfs did (no immutable flag).
 //!
 //! `pseudo=0` among the program's arguments sends every redirected call to the kernel.
 
@@ -35,6 +40,10 @@ use crate::lock::YLock;
 use sys::File;
 
 const ENXIO: i64 = -6;
+const EACCES: i64 = -13; // wave11 GF
+const ENOENT: i64 = -2; // wave11 GF
+/// `CAP_SYS_ADMIN` (wave11 GF: changing UEFI variables needs it).
+const CAP_SYS_ADMIN: u64 = 1 << 21;
 const EBADF: i64 = -9;
 const ENOTTY: i64 = -25;
 const EINVAL: i64 = -22;
@@ -79,6 +88,8 @@ struct Open {
     pos: u64,
     /// This open's number (a slot freed and taken again meanwhile is not this open).
     seq: u64,
+    /// wave11 GF: opened for writing (an efivars file).
+    write: bool,
 }
 
 /// The next [`Open::seq`].
@@ -89,7 +100,8 @@ static OPENS: YLock<BTreeMap<u32, Open>> = YLock::new(BTreeMap::new());
 
 /// Whether `nr` is a path call this module serves when redirected here.
 pub fn is_path_call(nr: u64) -> bool {
-    matches!(nr, 4 | 6 | 262 | 332 | 21 | 269 | 439 | 89 | 267 | 2 | 257)
+    // (wave11 GF: and unlink, unlinkat of an efivars file)
+    matches!(nr, 4 | 6 | 262 | 332 | 21 | 269 | 439 | 89 | 267 | 2 | 257 | 87 | 263)
 }
 
 /// The answer that sends the call on to the kernel's own code.
@@ -131,6 +143,7 @@ pub fn redirected(cx: &Cx) -> Answer {
         (4 | 6 | 262 | 332, File::CpuRange) => stat(cx, obj, tail),
         (21 | 269 | 439, File::CpuRange) => Some(access(cx)),
         (2 | 257, _) => open(cx, obj, tail, file),
+        (87 | 263, File::Efivar) => Some(efivar_unlink(cx, tail)), // wave11 GF
         _ => None,
     };
     match r {
@@ -225,16 +238,31 @@ fn make(file: File, tail: &[u8]) -> Result<Vec<u8>, i64> {
 /// `open`/`openat` of a served file, read-only: a pseudo-file object with its text.
 fn open(cx: &Cx, obj: u64, tail: &[u8], file: File) -> Option<i64> {
     let flags = if cx.nr == 2 { cx.args[1] } else { cx.args[2] };
-    if flags & O_ACCMODE != 0 || flags & (O_CREAT | O_TRUNC | O_DIRECTORY | O_PATH | O_TMPFILE) != 0 {
+    // wave11 GF begin: an efivars file may be opened for writing (and made), as efivarfs
+    let efi_write = file == File::Efivar && (flags & O_ACCMODE != 0 || flags & O_CREAT != 0);
+    if efi_write {
+        if flags & (O_DIRECTORY | O_PATH) != 0 || flags & O_TMPFILE == O_TMPFILE {
+            return None;
+        }
+        if flags & O_ACCMODE != 0 && cx.c.caps & CAP_SYS_ADMIN == 0 {
+            return Some(EACCES);
+        }
+    } else if flags & O_ACCMODE != 0 || flags & (O_CREAT | O_TRUNC | O_DIRECTORY | O_PATH | O_TMPFILE) != 0 {
         return None;
     }
-    // (errors: the kernel answers)
-    let text = make(file, tail).ok()?;
+    // (errors: the kernel answers; wave11 GF: a variable an O_CREAT open makes is empty)
+    let text = match make(file, tail) {
+        Ok(t) => t,
+        Err(ENOENT) if efi_write && flags & O_CREAT != 0 => Vec::new(),
+        Err(ENOENT) if file == File::Efivar => return Some(ENOENT),
+        Err(_) => return None,
+    };
+    // wave11 GF end
     let mut shown = alloc::string::String::from("/sys/");
     shown.push_str(&alloc::string::String::from_utf8_lossy(tail));
     let slot = crate::obj::alloc(LX_OBJ_KIND_PSEUDO).ok()?;
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    OPENS.lock().insert(slot, Open { file, tail: tail.to_vec(), text, pos: 0, seq });
+    OPENS.lock().insert(slot, Open { file, tail: tail.to_vec(), text, pos: 0, seq, write: efi_write && flags & O_ACCMODE != 0 });
     crate::obj::set_ready(slot, READY, GEN_SIZE);
     let mut d = LxObjDesc {
         slot,
@@ -355,13 +383,60 @@ pub fn io(cx: &Cx) -> (i64, u64) {
                 new
             }
         }
-        1 | 20 => EBADF,
+        // wave11 GF: a write of an efivars file opened for it: one variable, whole
+        1 | 20 => efivar_write(cx, slot),
+        // (wave11 GF: FS_IOC_GETFLAGS / FS_IOC_SETFLAGS of an efivars file: no immutable flag)
+        16 if cx.args[1] == 0x8008_6601 && OPENS.lock().get(&slot).is_some_and(|o| o.file == File::Efivar) => cx.copy_out(cx.args[2], &0u32.to_le_bytes()).err().unwrap_or(0),
+        16 if cx.args[1] == 0x4008_6602 && OPENS.lock().get(&slot).is_some_and(|o| o.file == File::Efivar) => 0,
         16 => ENOTTY,
         LX_KCALL_REOPEN => ENXIO,
         _ => EINVAL,
     };
     (r, 0)
 }
+
+// wave11 GF begin: UEFI variables written and deleted
+/// The variable file name (the last component) of efivars tail `tail`.
+fn efivar_name(tail: &[u8]) -> &[u8] {
+    tail.rsplit(|&b| b == b'/').find(|c| !c.is_empty()).unwrap_or(b"")
+}
+
+/// `write`/`writev` of efivars file `slot`: the attributes and the data in one write.
+fn efivar_write(cx: &Cx, slot: u32) -> i64 {
+    let (tail, write) = match OPENS.lock().get(&slot) {
+        Some(o) if o.file == File::Efivar => (o.tail.clone(), o.write),
+        _ => return EBADF,
+    };
+    if !write {
+        return EBADF;
+    }
+    let iov = match crate::fdio::Iov::of_call(cx) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if iov.total() < 4 || iov.total() > 1 << 20 {
+        return EINVAL;
+    }
+    let data = match iov.gather(cx, 0, iov.total()) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let name = efivar_name(&tail);
+    match hydra_rt::sys::lx_obj(LX_INFO_EFIVAR_SET, name.as_ptr() as u64, name.len() as u64 | (data.len() as u64) << 32, data.as_ptr() as u64) {
+        Ok(_) => data.len() as i64,
+        Err(e) => e,
+    }
+}
+
+/// `unlink`/`unlinkat` of efivars file `tail`: the variable is deleted.
+fn efivar_unlink(cx: &Cx, tail: &[u8]) -> i64 {
+    if cx.c.caps & CAP_SYS_ADMIN == 0 {
+        return EACCES;
+    }
+    let name = efivar_name(tail);
+    hydra_rt::sys::lx_obj(LX_INFO_EFIVAR_SET, name.as_ptr() as u64, name.len() as u64, 0).err().unwrap_or(0)
+}
+// wave11 GF end
 
 /// The last descriptor of pseudo file `slot` went away.
 pub fn closed(slot: u32) {

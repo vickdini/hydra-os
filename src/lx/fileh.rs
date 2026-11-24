@@ -207,6 +207,15 @@ pub fn plain_ino(ino: u64) -> bool {
     ino >> 62 == 0 && ino < u64::MAX - 1
 }
 
+// wave11 GF begin
+/// Whether `ino` is an object vfs-server serves for handles and working directories: a pool
+/// object, or a file of one of its FUSE connections (it walks into those mounts and decides
+/// their changes since wave 11).
+pub fn served_ino(ino: u64) -> bool {
+    plain_ino(ino) || crate::compat::linux::fuse_svc::is_remote(ino)
+}
+// wave11 GF end
+
 /// Whether `path` (as the kernel shows it) lies where the kernel serves files by name
 /// (`/proc`): lookups relative to it are the kernel's until those trees are served by their
 /// services (group 7-4). (wave10 GV2: `/sys` and `/dev` are pool trees vfs-server walks,
@@ -219,7 +228,8 @@ pub fn pseudo_path(path: &str) -> bool {
 /// through another process's root, a FUSE file).
 pub fn info_of_open(f: &OpenFile) -> Option<AtInfo> {
     // (the `/proc` directory of the pool is served by name: the kernel lists it)
-    if f.foreign.is_some() || !plain_ino(f.ino) || f.path.ends_with("/proc") || pseudo_path(&f.path) {
+    // (wave11 GF: a file of vfs-server's FUSE connections too)
+    if f.foreign.is_some() || !served_ino(f.ino) || f.path.ends_with("/proc") || pseudo_path(&f.path) {
         return None;
     }
     // wave9 G6b-3: and whether Landlock refused truncating it at the open
@@ -330,7 +340,8 @@ pub(super) fn fill(c: &mut LxCall, t: &FdTable, sh: Shape, wait: bool) -> Result
     c.cwd = t.cwd_ino;
     c.cwd_mnt = t.cwd_mnt as u32;
     c.umask = t.umask as u64;
-    if !plain_ino(t.root_ino) || !plain_ino(t.cwd_ino) || pseudo_path(&t.cwd_path) || t.cwd_path.ends_with("/proc") {
+    // (wave11 GF: a working directory in one of vfs-server's FUSE mounts too)
+    if !plain_ino(t.root_ino) || !served_ino(t.cwd_ino) || pseudo_path(&t.cwd_path) || t.cwd_path.ends_with("/proc") {
         c.fs_flags |= LX_FS_FOREIGN;
     }
     c.fs_flags |= fstree::cwd_bits(&t.cwd_path); // wave10 GV2
@@ -474,7 +485,9 @@ fn kernel_only(c: &LxCall) -> bool {
     // namespace a root or working directory on a mount is a FUSE one)
     // (wave8 GF: the initial namespace's mounts are fixed apart from FUSE, which is the
     // kernel's: its mount calls stay here; wave10 GV2: vfs-server decides them, FUSE too)
-    let mounts = c.mnt_ns == 0 && (c.root_mnt != 0 || c.cwd_mnt != 0) && !is_notify_call(c.nr); // (wave9 G6b-1)
+    // (wave11 GF: a working directory in one of vfs-server's FUSE mounts is the service's)
+    let fuse_cwd = crate::compat::linux::fuse_svc::is_remote(c.cwd);
+    let mounts = c.mnt_ns == 0 && (c.root_mnt != 0 || (c.cwd_mnt != 0 && !fuse_cwd)) && !is_notify_call(c.nr); // (wave9 G6b-1)
     if hit == 0 && !mounts {
         return false;
     }
@@ -1226,7 +1239,8 @@ pub fn install_in(t: &mut FdTable, d: &LxFhDesc) -> Result<usize, i64> {
 
 /// Makes the directory `d` names the current directory of table `t`.
 pub fn chdir_in(t: &mut FdTable, d: &LxFhDesc) -> Result<(), i64> {
-    if !plain_ino(d.ino) || d.is_dir == 0 {
+    // (wave11 GF: or a directory of vfs-server's FUSE connections)
+    if !served_ino(d.ino) || d.is_dir == 0 {
         return Err(EINVAL);
     }
     let path = shown_path(t, d)?;

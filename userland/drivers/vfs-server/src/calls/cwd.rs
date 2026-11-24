@@ -11,7 +11,7 @@ use super::ctxt;
 use super::rules::{self, KERNEL};
 use crate::perm::MAY_EXEC;
 use crate::proto::{LxFhDesc, LX_FH_CHDIR};
-use crate::walk::{self, Backend, Walked};
+use crate::walk::{self, Walked};
 
 const EACCES: i64 = -13;
 const AT_FDCWD: i32 = -100;
@@ -37,7 +37,7 @@ pub fn fchdir(cx: &Cx) -> Result<i64, i64> {
     ctxt::check(c, 0)?;
     let k = ctxt::call(c)?;
     let n = ctxt::handle(c)?;
-    let attr = k.w.getattr(n)?;
+    let attr = ctxt::attr_of(c, n)?; // wave11 GF: (a FUSE directory's too)
     // (the shown path is the handle's own: `LX_FHP_AT` with nothing after it)
     enter(cx, &k.who, n, &attr, b"", b"", cx.args[0] as i32)
 }
@@ -50,10 +50,8 @@ fn enter(cx: &Cx, who: &crate::ctx::Ctx, n: crate::ctx::Node, attr: &crate::fs::
     if !attr.is_dir() {
         return Err(rules::ENOTDIR);
     }
-    // (a FUSE directory: a working directory in a FUSE mount is the kernel's)
-    if crate::fuse::wire::split(n.ino).is_some() {
-        return Err(KERNEL);
-    }
+    // (wave11 GF: a FUSE directory too: the kernel takes vfs-server's FUSE inodes as working
+    // directories)
     let acl = ctxt::acl_of(n, attr)?;
     if !ctxt::allowed(who, attr, acl.as_deref(), c.euid, c.egid, MAY_EXEC, named)? {
         return Err(EACCES);

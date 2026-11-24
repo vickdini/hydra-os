@@ -87,6 +87,15 @@ pub fn mknod(cx: &Cx) -> Result<i64, i64> {
     if devnode && c.fs_flags & LX_FS_DEVCG != 0 {
         return Err(KERNEL);
     }
+    // wave11 GF: in a FUSE mount: the daemon's MKNOD (the umask applied here)
+    if ctxt::is_fuse(p.dir) {
+        if let Some(d) = policy::domain(c)? {
+            policy::check_dir(&d, p.dir, ll::make_right(ftype))?;
+        }
+        let ftype = if ftype == 0 { rules::S_IFREG } else { ftype };
+        let perm = mode & 0o7777 & !(c.umask as u32);
+        return super::change::fuse_names(c, p.dir, crate::fuse::Req::Mknod { name: p.name, mode: ftype | perm, rdev: dev });
+    }
     let (perm, plan) = super::xattr::new_mode(p.dir, &p.dir_attr, mode & 0o7777, c.umask as u32, false)?;
     let mode = ftype | perm;
     if let Some(d) = policy::domain(c)? {
@@ -142,7 +151,7 @@ pub fn link(cx: &Cx) -> Result<i64, i64> {
             return Err(KERNEL);
         }
         let n = ctxt::handle(c)?;
-        (n, ctxt::BE.getattr(n)?, None)
+        (n, ctxt::attr_of(c, n)?, None) // wave11 GF: (a FUSE file's too)
     } else if let Some(n) = proc_fd_link(cx, &op, flags & AT_SYMLINK_FOLLOW != 0)? {
         // `/proc/self/fd/N` followed: the open file itself (an O_TMPFILE file's way to a name)
         if dom.is_some() {
@@ -161,10 +170,6 @@ pub fn link(cx: &Cx) -> Result<i64, i64> {
         };
         (n, at, sdir)
     };
-    // (a FUSE object: the kernel's, which asks the daemon)
-    if crate::fuse::wire::split(src.ino).is_some() {
-        return Err(KERNEL);
-    }
     // The new name starts at the second directory descriptor
     let mut c2 = *c;
     c2.at_kind = c.at2_kind;
@@ -176,6 +181,13 @@ pub fn link(cx: &Cx) -> Result<i64, i64> {
     }
     if src.mnt != p.dir.mnt {
         return Err(EXDEV);
+    }
+    // wave11 GF: a FUSE file: the daemon's LINK (same connection: one mount)
+    if ctxt::is_fuse(src) {
+        if let (Some(d), Some(sd)) = (&dom, sdir) {
+            policy::check_move(d, sd, p.dir, attr.mode & rules::S_IFMT, 0)?;
+        }
+        return super::change::fuse_names(c, p.dir, crate::fuse::Req::Link { file: src.ino, name: p.name });
     }
     // A file without names: only an O_TMPFILE one (not O_EXCL) may get one
     if attr.nlink == 0 {
@@ -247,6 +259,9 @@ pub enum Made {
     New(Node, Attr, Node, Vec<u8>),
     /// The name exists after all (another caller made it first; not `O_EXCL`): open it.
     Exists,
+    /// wave11 GF: in FUSE directory `.0`: name `.1` to make with permissions `.2` (the umask
+    /// applied); the open asks the daemon (CREATE) and installs the handle from the reply.
+    Fuse(Node, Vec<u8>, u32),
 }
 
 /// The making half of `open(path, O_CREAT ...)` when the walk found no object: makes a
@@ -315,6 +330,10 @@ pub fn create(cx: &Cx, k: &Call, path: &[u8], flags: u32, mode: u32) -> Result<M
     if let Some(d) = policy::domain(c)? {
         policy::check_dir(&d, p.dir, ll::MAKE_REG)?;
     }
+    // wave11 GF: in a FUSE mount: the open asks the daemon
+    if ctxt::is_fuse(p.dir) {
+        return Ok(Made::Fuse(p.dir, p.name, mode & 0o7777 & !(c.umask as u32)));
+    }
     let (perm, plan) = super::xattr::new_mode(p.dir, &p.dir_attr, mode & 0o7777, c.umask as u32, false)?;
     let r = zfs::request(FS_CREATE, |w| {
         w.u64(p.dir.ino);
@@ -382,9 +401,9 @@ pub fn tmpfile(cx: &Cx, k: &Call, path: &[u8], flags: u32, mode: u32, dirfd: i32
     if !dattr.is_dir() {
         return Err(ENOTDIR);
     }
-    // (FUSE: the kernel's answer)
-    if crate::fuse::wire::split(dir.ino).is_some() {
-        return Err(KERNEL);
+    // (wave11 GF: FUSE: no O_TMPFILE, as a daemon without FUSE_TMPFILE on Linux)
+    if ctxt::is_fuse(dir) {
+        return Err(rules::EOPNOTSUPP);
     }
     k.writable(dir)?;
     let acl = ctxt::acl_of(dir, &dattr)?;

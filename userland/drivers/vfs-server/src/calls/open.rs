@@ -120,6 +120,14 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
                     (n, a)
                 }
                 super::make::Made::Exists => k.find(c, &path, follow)?,
+                // wave11 GF: in a FUSE mount: the daemon makes it; its reply installs the
+                // handle and answers (a name another caller made first: the call runs again)
+                super::make::Made::Fuse(dir, name, perm) => {
+                    let d = rules::handle_desc(c, 0, dir.mnt, false, flags, &path, dirfd)?;
+                    let again = (flags & O_EXCL == 0).then(|| alloc::boxed::Box::new(*c));
+                    let then = crate::fuse::Then { how: crate::fuse::How::Fd { desc: d, dir: dir.ino, name: name.clone(), again }, tell: None };
+                    return crate::fuse::start(c, dir.ino, crate::fuse::Req::Create { name, perm }, then);
+                }
             },
             Err(e) => return Err(e),
         }
@@ -234,6 +242,12 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     };
     // (a truncation that fails after the install answers its error; the descriptor stays
     // open: there is no way to close it from here, and it is rare — EIO)
+    // wave11 GF: a FUSE file: the daemon's SETATTR; its reply answers with the descriptor
+    if trunc && fuse {
+        let set = crate::fs::fsproto::SetAttr { size: Some(0), ..Default::default() };
+        let then = crate::fuse::Then { how: crate::fuse::How::Value(fd as i64), tell: Some((n.ino, crate::proto::LX_FHC_ATTR | crate::proto::LX_FHC_TRUNC, 0)) };
+        return crate::fuse::start(c, n.ino, crate::fuse::Req::Setattr(set), then);
+    }
     if trunc {
         super::change::truncate_for_open(who, n, &attr)?;
     }
@@ -244,7 +258,8 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
 /// A walk's error as a plain answer: a redirect to another service or a FUSE wait is the
 /// kernel's for the opens that do not go there (`O_PATH`, `O_TMPFILE`).
 fn plain(e: i64) -> i64 {
-    if e < -4095 {
+    // (wave11 GF: a walk's question to a FUSE daemon waits, as for the other opens)
+    if e < -4095 && !crate::fuse::is_miss(e) {
         KERNEL
     } else {
         e
@@ -263,11 +278,18 @@ fn opath(cx: &Cx, c: &crate::proto::LxCall, n: crate::ctx::Node, attr: &crate::f
     if kind == rules::S_IFDIR && flags & rules::O_ACCMODE != rules::O_RDONLY {
         return Err(rules::EISDIR);
     }
-    // (a FUSE object: the daemon's handles live while it is open; the kernel's)
-    if crate::fuse::wire::split(n.ino).is_some() {
-        return Err(KERNEL);
-    }
     let d = rules::handle_desc(c, n.ino, n.mnt, attr.is_dir(), flags, path, dirfd)?;
+    // wave11 GF: a FUSE object: counted here (the daemon's handles live while it is open), as
+    // the kernel's `FUSE_OP_OPEN_REF`
+    if crate::fuse::local_open_ref(n.ino) {
+        return match sys::lx_obj(LX_FH_INSTALL, cx.id, &d as *const LxFhDesc as u64, 0) {
+            Ok(fd) => Ok(fd as i64),
+            Err(e) => {
+                crate::fuse::local_release(n.ino);
+                Err(e)
+            }
+        };
+    }
     if c.flags & crate::proto::LX_CALL_FHANSWER != 0 && !cx.page().is_null() && n.ino != 0 && n.ino < 1 << 45 && d.flags & !rules::FH_PLAIN == 0 {
         *fh = n.ino | (n.mnt as u64) << 45 | (attr.is_dir() as u64) << 61;
         return Err(FHANSWER);

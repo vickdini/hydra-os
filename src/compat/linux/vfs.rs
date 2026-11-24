@@ -1774,7 +1774,14 @@ fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
     }
     let file = match fd_vnode(fd) {
         Some(f) => f,
-        None => return if fd_exists(fd) { ENOTDIR } else { EBADF },
+        None => {
+            // wave11 GF: a service's directory object (tty-server's `/dev/pts`): the service
+            // lists it (the call as it is, on the object)
+            if let Some(r) = object_getdents64(fd, buf, count) {
+                return r;
+            }
+            return if fd_exists(fd) { ENOTDIR } else { EBADF };
+        }
     };
     let (ino, cookie) = {
         let f = file.lock();
@@ -1826,6 +1833,20 @@ fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
     file.lock().offset = next;
     out.len() as i64
 }
+
+// wave11 GF begin
+/// `getdents64` of descriptor `fd` when it is a server object of a directory (`None`: it is
+/// not one): the call goes to the object's service.
+fn object_getdents64(fd: i32, buf: u64, count: usize) -> Option<i64> {
+    let desc = crate::task::with_current_fds_mut(|fds| fds.get(fd as usize).cloned())?;
+    let FileDescriptor::Device(d) = &desc else { return None };
+    d.as_server()?;
+    if d.stat().st_mode & 0o170000 != 0o040000 {
+        return Some(ENOTDIR);
+    }
+    Some(crate::lx::call_obj(217, [fd as u64, buf, count as u64, 0, 0, 0], d))
+}
+// wave11 GF end
 
 /// `getdents64` of `/proc`: `self`, `thread-self`, the files and directories served
 /// there, and a directory for each process the caller can see. The directory offset is

@@ -97,7 +97,8 @@ static TURN: YLock<()> = YLock::new(());
 
 /// A real errno, or "the kernel answers" for anything else (a redirect the walk found).
 fn errno_or_kernel(e: i64) -> i64 {
-    if (-4095..0).contains(&e) { e } else { calls::KERNEL }
+    // (wave11 GF: a walk's question to a FUSE daemon: the call waits and runs again)
+    if (-4095..0).contains(&e) || crate::fuse::is_miss(e) { e } else { calls::KERNEL }
 }
 
 /// `mount`, `umount2`, `pivot_root`: decided on the namespace's table, which is then
@@ -401,7 +402,7 @@ fn locate(cx: &Cx, t: &MntTable, who: &Ctx, ptr: u64, follow: bool, lenient: boo
         if e != ENOENT || !lenient || cx.nr == 166 {
             let n = LOCATE_ERRS.fetch_add(1, Ordering::Relaxed);
             if n < 8 {
-                hydra_rt::println!("[vfs-server] mount call {}: {} did not resolve here ({})", cx.nr, abs, if (-4095..0).contains(&e) { e } else { 0 });
+                hydra_rt::println!("[vfs-server] mount call {}: {} did not resolve here ({:#x})", cx.nr, abs, e);
             }
         }
     }
@@ -431,11 +432,9 @@ fn change_once(cx: &Cx) -> Result<i64, i64> {
     let c = &cx.c;
     let a = cx.args;
     let admin = c.fs_flags & LX_FS_MNTADMIN != 0;
-    // (FUSE: the kernel is its client — before the capability, as the kernel's order)
+    // (wave11 GF: a new FUSE mount is this service's too, below: vfs-server is the client)
     let fs = if cx.nr == 165 && a[2] != 0 { opt_str(cx, a[2]) } else { None };
-    if cx.nr == 165 && fs.as_deref().is_some_and(ktab::is_fuse_type) && a[3] & (ktab::MS_REMOUNT | ktab::MS_BIND | ktab::MS_MOVE) == 0 {
-        return Err(calls::KERNEL);
-    }
+    let new_fuse = cx.nr == 165 && fs.as_deref().is_some_and(ktab::is_fuse_type) && a[3] & (ktab::MS_REMOUNT | ktab::MS_BIND | ktab::MS_MOVE) == 0;
     if !admin {
         return Err(EPERM);
     }
@@ -450,6 +449,10 @@ fn change_once(cx: &Cx) -> Result<i64, i64> {
         return Err(calls::KERNEL);
     }
     let who = ctxt::caller(c)?;
+    // wave11 GF: a FUSE mount in this namespace
+    if new_fuse {
+        return ns_fuse_mount(cx, &mut t, &who, fs.as_deref().unwrap_or("fuse"));
+    }
     let mut env = SysEnv { made: None };
     let r = match cx.nr {
         165 => {
@@ -457,7 +460,8 @@ fn change_once(cx: &Cx) -> Result<i64, i64> {
             let target = locate(cx, &t, &who, a[1], true, ktab::lenient(flags))?;
             let source_name = opt_str(cx, a[0]);
             let data = opt_str(cx, a[4]);
-            let src = if flags & (ktab::MS_BIND | ktab::MS_MOVE) != 0 {
+            // (wave11 GF: a remount names no source: bubblewrap's "none")
+            let src = if flags & (ktab::MS_BIND | ktab::MS_MOVE) != 0 && flags & ktab::MS_REMOUNT == 0 {
                 if a[0] == 0 { Err(ktab::EFAULT) } else { Ok(locate(cx, &t, &who, a[0], true, false)?) }
             } else {
                 Err(ktab::EFAULT)
@@ -497,6 +501,52 @@ fn change_once(cx: &Cx) -> Result<i64, i64> {
     Ok(0)
 }
 // wave8 GF end
+
+// wave11 GF begin: FUSE mounts in a namespace of the caller's own
+/// `mount(source, target, "fuse[.name]", flags, "fd=N,...")` in namespace table `t`: the
+/// caller's `/dev/fuse` connection (one of this service's objects) mounted at the target as
+/// a tree whose root is the connection's root (the kernel's table shows it as a FUSE mount;
+/// the walk goes into it, `LX_MNT_FUSE`). The connection ends with its daemon's close.
+fn ns_fuse_mount(cx: &Cx, t: &mut MntTable, who: &Ctx, fstype: &str) -> Result<i64, i64> {
+    use crate::proto::{LX_OBJ_FD, LX_OBJ_KIND_FUSE};
+    let c = &cx.c;
+    let a = cx.args;
+    let target = locate(cx, t, who, a[1], true, false)?;
+    if !target.is_dir {
+        return Err(ENOTDIR);
+    }
+    let data = opt_str(cx, a[4]).ok_or(EINVAL)?;
+    let (fd, uid, gid, other) = fuse_options(&data)?;
+    let v = sys::lx_obj(LX_OBJ_FD, c.id, fd as i64 as u64, 0).map_err(|_| EBADF)?;
+    if (v >> 32) as u32 & 0x3FFF_FFFF != LX_OBJ_KIND_FUSE {
+        return Err(EINVAL);
+    }
+    let source = opt_str(cx, a[0]).unwrap_or_else(|| String::from(fstype));
+    let fw = crate::fuse::wire::Who { uid: c.euid, gid: c.egid, pid: c.tgid as u32 };
+    let conn = crate::fuse::mount_conn(v as u32, (uid, gid, other), fw)?;
+    t.push(mntrec::MntRec {
+        id: 0,
+        parent: target.mnt,
+        kind: mntrec::MK_TREE,
+        tmpfs: 0,
+        mountpoint: target.ino,
+        root: crate::fuse::wire::ino(conn, 1),
+        flags: a[3] & ktab::PER_MOUNT,
+        propagation: 0,
+        fstype: String::from(fstype),
+        source,
+        path: target.path.clone(),
+        serves: None,
+    });
+    // (the table changed meanwhile: the connection is ended, the caller sees EBUSY; rare)
+    if let Err(e) = push(c.mnt_ns, t) {
+        crate::fuse::abort_conn(conn);
+        return Err(if e == EAGAIN_PUT { -16 } else { e });
+    }
+    hydra_rt::println!("[vfs-server] FUSE connection {} mounted on {} (namespace {})", conn, target.path, c.mnt_ns);
+    Ok(0)
+}
+// wave11 GF end
 
 /// `chroot(path)`.
 fn chroot(cx: &Cx) -> Result<i64, i64> {

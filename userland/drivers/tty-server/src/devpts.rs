@@ -126,3 +126,38 @@ pub fn statx_bytes(ino: u64, mode: u32, uid: u32, gid: u32, rdev: u64, nlink: u3
     p32(&mut b, 140, (PTS_DEV & 0xFF) as u32);
     b
 }
+
+// wave11 GF begin: the `/dev/pts` directory listed
+/// The entries of `/dev/pts` with slaves `live` (sorted): `(inode, name, d_type)`: `.`, `..`,
+/// `ptmx` (inode 2), then each slave `N` (inode `N + 3`), as Linux's devpts lists them.
+pub fn entries(live: &[u32]) -> alloc::vec::Vec<(u64, alloc::vec::Vec<u8>, u8)> {
+    let mut v = alloc::vec![(1u64, b".".to_vec(), 4u8), (1, b"..".to_vec(), 4), (2, b"ptmx".to_vec(), 2)];
+    for &i in live {
+        v.push((i as u64 + 3, alloc::format!("{}", i).into_bytes(), 2));
+    }
+    v
+}
+
+/// `getdents64` records of `entries` from index `from`, at most `count` bytes: the bytes and
+/// the index after the last one taken (`d_off` is that index).
+pub fn dirents64(entries: &[(u64, alloc::vec::Vec<u8>, u8)], from: usize, count: usize) -> (alloc::vec::Vec<u8>, usize) {
+    let mut out = alloc::vec::Vec::new();
+    let mut i = from;
+    while i < entries.len() {
+        let (ino, name, kind) = &entries[i];
+        let reclen = (19 + name.len() + 1 + 7) & !7;
+        if out.len() + reclen > count {
+            break;
+        }
+        let start = out.len();
+        out.extend_from_slice(&ino.to_le_bytes());
+        out.extend_from_slice(&((i + 1) as i64).to_le_bytes());
+        out.extend_from_slice(&(reclen as u16).to_le_bytes());
+        out.push(*kind);
+        out.extend_from_slice(name);
+        out.resize(start + reclen, 0);
+        i += 1;
+    }
+    (out, i)
+}
+// wave11 GF end

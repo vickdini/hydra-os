@@ -114,6 +114,9 @@ struct Conn {
     link_shots: BTreeMap<u64, (Result<Vec<u8>, i64>, u64)>,
     /// wave10 GV2: the daemon's `statfs` answer fetched for a call that runs again.
     statfs_shot: Option<(Result<Vec<u8>, i64>, u64)>,
+    /// wave11 GF: program calls whose walk reached the mount before the daemon answered INIT
+    /// (they run again after it).
+    init_waits: Vec<LxCall>,
 }
 
 impl Conn {
@@ -138,6 +141,7 @@ impl Conn {
             attr_shots: BTreeMap::new(),
             link_shots: BTreeMap::new(),
             statfs_shot: None,
+            init_waits: Vec::new(),
         }
     }
 
@@ -186,21 +190,30 @@ struct Finish {
     /// A request handed to a daemon's read: the connection it goes back to if the read's
     /// buffer cannot take it.
     requeue: Option<u16>,
+    /// wave11 GF: a program's call answered from its operation's reply ([`Then`]).
+    then: Option<Box<Then>>,
 }
 
 impl Finish {
     fn err(id: u64, r: i64) -> Self {
-        Finish { id, parts: Vec::new(), out: Vec::new(), r, rerun: None, requeue: None }
+        Finish { id, parts: Vec::new(), out: Vec::new(), r, rerun: None, requeue: None, then: None }
     }
 
     fn kout(id: u64, r: i64, out: Vec<u8>) -> Self {
         let n = out.len() as u64;
-        Finish { id, parts: alloc::vec![(FUSE_KBUF_OUT, n)], out, r, rerun: None, requeue: None }
+        Finish { id, parts: alloc::vec![(FUSE_KBUF_OUT, n)], out, r, rerun: None, requeue: None, then: None }
     }
 
     fn run(self) {
         if let Some(c) = self.rerun {
             crate::rerun(&c);
+            return;
+        }
+        // wave11 GF: a program's call (a change decided by vfs-server)
+        if let Some(t) = self.then {
+            if let Some(r) = then_result(self.id, self.r, &self.out, *t) {
+                let _ = sys::lx_complete(self.id, r);
+            }
             return;
         }
         let mut r = self.r;
@@ -282,16 +295,19 @@ struct Op {
     who: Who,
     local: u64,
     kind: Kind,
+    /// wave11 GF: `None`: the kernel's operation (`LX_KCALL_FUSE`); else a program's call
+    /// answered from the reply.
+    to: Option<Then>,
 }
 
 /// The next step of an operation.
 enum Step {
     Send { opcode: u32, nodeid: u64, args: Vec<Vec<u8>>, op: Op },
-    Done { id: u64, r: i64, out: Vec<u8> },
+    Done { id: u64, r: i64, out: Vec<u8>, to: Option<Then> },
 }
 
 fn done(op: &Op, r: i64, out: Vec<u8>) -> Step {
-    Step::Done { id: op.id, r, out }
+    Step::Done { id: op.id, r, out, to: op.to.clone() }
 }
 
 fn want_of(k: &Kind) -> Want {
@@ -575,13 +591,13 @@ fn feed(c: &mut Conn, fin: &mut Vec<Finish>) {
         }
         let m = c.queue.pop_front().unwrap();
         let n = m.len() as i64;
-        fin.push(Finish { id: r.id, parts: r.parts, out: m, r: n, rerun: None, requeue: Some(c.id) });
+        fin.push(Finish { id: r.id, parts: r.parts, out: m, r: n, rerun: None, requeue: Some(c.id), then: None });
     }
     c.set_ready();
 }
 
 /// Runs `step`: a request is sent (`None`: the call waits), or the answer.
-fn drive(c: &mut Conn, step: Step, fin: &mut Vec<Finish>) -> Option<(u64, i64, Vec<u8>)> {
+fn drive(c: &mut Conn, step: Step, fin: &mut Vec<Finish>) -> Option<(u64, i64, Vec<u8>, Option<Then>)> {
     match step {
         Step::Send { opcode, nodeid, args, op } => {
             let who = op.who;
@@ -589,7 +605,7 @@ fn drive(c: &mut Conn, step: Step, fin: &mut Vec<Finish>) -> Option<(u64, i64, V
             send(c, opcode, nodeid, who, &refs, Wait::Op(op), fin);
             None
         }
-        Step::Done { id, r, out } => Some((id, r, out)),
+        Step::Done { id, r, out, to } => Some((id, r, out, to)),
     }
 }
 
@@ -605,6 +621,9 @@ fn abort(c: &mut Conn, fin: &mut Vec<Finish>) {
     }
     for op in core::mem::take(&mut c.before_init) {
         fin.push(Finish::err(op.id, ENOTCONN));
+    }
+    for call in core::mem::take(&mut c.init_waits) {
+        fin.push(Finish::err(call.id, ENOTCONN)); // wave11 GF
     }
     for r in core::mem::take(&mut c.readers) {
         fin.push(Finish::err(r.id, ENODEV));
@@ -833,7 +852,7 @@ fn kcall_locked(cx: &Cx, fin: &mut Vec<Finish>) -> Answer {
         _ => return (ENOSYS, 0),
     };
     OPS.fetch_add(1, Ordering::Relaxed);
-    let op = Op { id: cx.id, who, local, kind };
+    let op = Op { id: cx.id, who, local, kind, to: None };
     if !c.initialized {
         c.before_init.push(op);
         WAITED.fetch_add(1, Ordering::Relaxed);
@@ -841,7 +860,7 @@ fn kcall_locked(cx: &Cx, fin: &mut Vec<Finish>) -> Answer {
     }
     let step = begin(c, op);
     match drive(c, step, fin) {
-        Some((_, r, out)) => answer_now(cx, r, &out),
+        Some((_, r, out, _)) => answer_now(cx, r, &out),
         None => {
             WAITED.fetch_add(1, Ordering::Relaxed);
             (0, LX_REPLY_PENDING)
@@ -1010,10 +1029,15 @@ fn write_reply(c: &mut Conn, data: &[u8], fin: &mut Vec<Finish>) -> i64 {
                     c.max_write = mw;
                     c.initialized = true;
                     save_conn(c);
+                    // wave11 GF: the walks that waited for INIT run again
+                    for call in core::mem::take(&mut c.init_waits) {
+                        fin.push(Finish { id: call.id, parts: Vec::new(), out: Vec::new(), r: 0, rerun: Some(Box::new(call)), requeue: None, then: None });
+                    }
                     for op in core::mem::take(&mut c.before_init) {
                         let step = begin(c, op);
-                        if let Some((id, r, out)) = drive(c, step, fin) {
-                            fin.push(Finish::kout(id, r, out));
+                        if let Some((id, r, out, to)) = drive(c, step, fin) {
+                            let f = fin_of(c, id, r, out, to);
+                            fin.push(f);
                         }
                     }
                 }
@@ -1023,14 +1047,15 @@ fn write_reply(c: &mut Conn, data: &[u8], fin: &mut Vec<Finish>) -> i64 {
         }
         Some(Wait::Rerun(rr)) => {
             took_rerun(c, &rr, err, body);
-            fin.push(Finish { id: rr.call.id, parts: Vec::new(), out: Vec::new(), r: 0, rerun: Some(Box::new(rr.call)), requeue: None });
+            fin.push(Finish { id: rr.call.id, parts: Vec::new(), out: Vec::new(), r: 0, rerun: Some(Box::new(rr.call)), requeue: None, then: None });
             len
         }
         Some(Wait::Op(op)) => {
             let step = on_reply(c, op, err, body.to_vec());
-            if let Some((id, r, out)) = drive(c, step, fin) {
+            if let Some((id, r, out, to)) = drive(c, step, fin) {
                 let out = if r < 0 { Vec::new() } else { out };
-                fin.push(Finish::kout(id, r, out));
+                let f = fin_of(c, id, r, out, to);
+                fin.push(f);
             }
             len
         }
@@ -1122,6 +1147,8 @@ enum MissKind {
     Readlink,
     /// wave10 GV2: the file system's figures (`statfs` of a path in the mount).
     Statfs,
+    /// wave11 GF: the daemon's answer to INIT (the call runs again after it).
+    Init,
 }
 
 /// A walk's question, until its call waits for the answer (`wait_miss`).
@@ -1168,7 +1195,12 @@ fn miss(conn: u16, local: u64, kind: MissKind) -> i64 {
 /// kernel before their walk). Nothing in them changes anything before the walk ends.
 pub fn rerunnable(nr: u64) -> bool {
     // (wave10 GV2: and statfs, which asks the daemon for its figures)
+    // (wave11 GF: and the changes, which are this engine's operations after their walk and
+    // checks (`start`); fstatfs; creat; chdir/fchdir)
     matches!(nr, 4 | 6 | 262 | 332 | 21 | 269 | 439 | 89 | 267 | 2 | 257 | 137)
+        || matches!(nr, 138 | 85 | 80 | 81 | 90 | 268 | 452 | 91 | 92 | 94 | 260 | 93 | 76 | 77 | 280 | 132 | 235 | 261 | 83 | 258 | 133 | 259 | 88 | 266 | 87 | 84 | 263 | 82 | 264 | 316 | 86 | 265 | 188..=199)
+        // (and the mount calls: bind mounts of FUSE directories, flatpak's documents)
+        || matches!(nr, 155 | 161 | 165 | 166)
 }
 
 /// For the pool's back end: a FUSE node is never its (the kernel answers).
@@ -1218,8 +1250,9 @@ fn walk_conn(st: &mut State, conn: u16, euid: u32) -> Result<&mut Conn, i64> {
     if c.aborted {
         return Err(ENOTCONN);
     }
+    // (wave11 GF: before the daemon answered INIT the call waits for it: `wait_miss`)
     if !c.initialized {
-        return Err(crate::calls::KERNEL);
+        return Err(miss(conn, 0, MissKind::Init));
     }
     let (uid, _, other) = c.owner;
     if !other && euid != uid {
@@ -1344,6 +1377,18 @@ pub fn wait_miss(e: i64, call: &LxCall) -> bool {
     {
         let mut st = ST.lock();
         let Some(c) = st.conns.get_mut(&m.conn) else { return false };
+        // wave11 GF: a walk that reached the mount before INIT waits for it
+        if let (MissKind::Init, false) = (&m.kind, c.aborted) {
+            if c.initialized {
+                fin.push(Finish { id: call.id, parts: Vec::new(), out: Vec::new(), r: 0, rerun: Some(Box::new(*call)), requeue: None, then: None });
+            } else {
+                c.init_waits.push(*call);
+            }
+            WAITED.fetch_add(1, Ordering::Relaxed);
+            drop(st);
+            finish_all(fin);
+            return true;
+        }
         if c.aborted || !c.initialized {
             return false;
         }
@@ -1353,6 +1398,7 @@ pub fn wait_miss(e: i64, call: &LxCall) -> bool {
             MissKind::Getattr => (GETATTR, alloc::vec![0u8; 16]),
             MissKind::Readlink => (READLINK, Vec::new()),
             MissKind::Statfs => (STATFS, Vec::new()), // wave10 GV2
+            MissKind::Init => return false, // (wave11 GF: above)
         };
         WAITED.fetch_add(1, Ordering::Relaxed);
         send(c, opcode, nodeid, who, &[&args], Wait::Rerun(Box::new(Rerun { call: *call, local: m.local, kind: m.kind })), &mut fin);
@@ -1420,6 +1466,7 @@ fn took_rerun(c: &mut Conn, rr: &Rerun, err: i32, body: &[u8]) {
             let r = if err == ENOSYS { Ok(Vec::new()) } else if err != 0 { Err(err) } else { Ok(body[..body.len().min(80)].to_vec()) };
             c.statfs_shot = Some((r, now + SHOT_MS));
         }
+        MissKind::Init => {}
     }
 }
 
@@ -1591,3 +1638,297 @@ pub fn restart_init() -> (usize, usize) {
     objs::flush();
     (n, dropped)
 }
+
+// ----------------------------------------------------------------------
+// wave11 GF begin: changes inside FUSE mounts decided here
+// ----------------------------------------------------------------------
+//
+// Until wave 11 every change inside a FUSE mount (create, mkdir, mknod, symlink, link,
+// unlink, rmdir, rename, setattr, xattrs) went back to the kernel, which walked again and
+// sent the operation here as `LX_KCALL_FUSE`. Now the program's call walks here (its walk
+// may wait for the daemon and run again, as the stat family's: nothing changes before the
+// walk and the checks end), and the change is one operation of this engine whose reply
+// answers the program's call directly ([`Then`]): no worker waits for the daemon.
+
+/// What a change asks of the daemon (on the node [`start`] names).
+pub enum Req {
+    /// A regular file `name` (CREATE, MKNOD if the daemon has none), `perm` after the umask.
+    Create { name: Vec<u8>, perm: u32 },
+    /// MKNOD of `name` with `mode` (type and permissions) and device `rdev`.
+    Mknod { name: Vec<u8>, mode: u32, rdev: u64 },
+    /// MKDIR of `name` with `perm`.
+    Mkdir { name: Vec<u8>, perm: u32 },
+    /// SYMLINK `name` -> `to`.
+    Symlink { name: Vec<u8>, to: Vec<u8> },
+    /// LINK of FUSE inode `file` as `name` (same connection).
+    Link { file: u64, name: Vec<u8> },
+    /// UNLINK of `name`.
+    Unlink { name: Vec<u8> },
+    /// RMDIR of `name`.
+    Rmdir { name: Vec<u8> },
+    /// RENAME of `sname` to `dname` in FUSE directory `ddir` (same connection).
+    Rename { sname: Vec<u8>, ddir: u64, dname: Vec<u8> },
+    /// SETATTR.
+    Setattr(crate::fs::fsproto::SetAttr),
+    /// GETXATTR.
+    Getxattr { name: Vec<u8> },
+    /// LISTXATTR.
+    Listxattr,
+    /// SETXATTR.
+    Setxattr { name: Vec<u8>, value: Vec<u8>, flags: u32 },
+    /// REMOVEXATTR.
+    Removexattr { name: Vec<u8> },
+}
+
+/// How a program's call is answered from its operation's reply.
+#[derive(Clone)]
+pub enum How {
+    /// 0.
+    Zero,
+    /// This value (an open's descriptor installed before its truncation).
+    Value(i64),
+    /// A creating open: the new file's handle (`desc` with the new inode); `dir`/`name` to
+    /// remove it again if the handle cannot be installed; `again`: the call runs again if the
+    /// daemon says the name exists (another caller made it first; not `O_EXCL`).
+    Fd { desc: LxFhDesc, dir: u64, name: Vec<u8>, again: Option<Box<LxCall>> },
+    /// The reply's bytes to the caller's buffer `ptr` of `size` bytes, as the xattr calls
+    /// answer (`size` 0: the length; too small: `ERANGE`); `list`: names shown to a caller
+    /// with (`Some(true)`) or without `CAP_SYS_ADMIN`.
+    Bytes { ptr: u64, size: u64, list: Option<bool> },
+}
+
+/// [`How`], and what the kernel's caches are told after a success: `(ino, LX_FHC_*, size)`.
+#[derive(Clone)]
+pub struct Then {
+    /// The answer.
+    pub how: How,
+    /// The kernel's caches.
+    pub tell: Option<(u64, u64, u64)>,
+}
+
+/// The error a call answers when its change went to the daemon: the call waits
+/// (`calls::answer` makes it PENDING; the reply completes it).
+pub const STARTED: i64 = (0xBu64 << 60) as i64;
+/// Changes started here, since start.
+pub static CHANGES: AtomicU64 = AtomicU64::new(0);
+
+/// `struct fuse_setattr_in` for `set` (as the kernel's `fuse::setattr_in`).
+pub fn setattr_in(set: &crate::fs::fsproto::SetAttr) -> Vec<u8> {
+    wire::setattr_in(set.mode, set.uid, set.gid, set.size, set.atime, set.mtime)
+}
+
+/// The engine's operation for `req` on a node of connection `c` (number `conn`; `Err`: the
+/// call's answer: `EXDEV` for a second node on another connection).
+fn kind_of(c: &Conn, conn: u16, req: Req) -> Result<Kind, i64> {
+    let other = |ino: u64| -> Result<u64, i64> {
+        match split(ino) {
+            Some((k, l)) if k == conn => c.nodes.nodeid(l).ok_or(ESTALE),
+            _ => Err(EXDEV),
+        }
+    };
+    Ok(match req {
+        Req::Create { name, perm } => Kind::Create { name, perm, mknod: false },
+        Req::Mknod { name, mode, rdev } => {
+            let mut v = le(&[mode as u64, rdev & 0xFFFF_FFFF, 0, 0], &[4, 4, 4, 4]);
+            v.extend_from_slice(&cstr(&name));
+            Kind::Make { name, opcode: MKNOD, args: v }
+        }
+        Req::Mkdir { name, perm } => {
+            let mut v = le(&[(perm & 0o7777) as u64, 0], &[4, 4]);
+            v.extend_from_slice(&cstr(&name));
+            Kind::Make { name, opcode: MKDIR, args: v }
+        }
+        Req::Symlink { name, to } => {
+            let mut v = cstr(&name);
+            v.extend_from_slice(&cstr(&to));
+            Kind::Make { name, opcode: SYMLINK, args: v }
+        }
+        Req::Link { file, name } => {
+            let mut v = other(file)?.to_le_bytes().to_vec();
+            v.extend_from_slice(&cstr(&name));
+            Kind::Make { name, opcode: LINK, args: v }
+        }
+        Req::Unlink { name } => Kind::Plain { opcode: UNLINK, args: cstr(&name), xattr: false },
+        Req::Rmdir { name } => Kind::Plain { opcode: RMDIR, args: cstr(&name), xattr: false },
+        Req::Rename { sname, ddir, dname } => {
+            let mut v = other(ddir)?.to_le_bytes().to_vec();
+            v.extend_from_slice(&cstr(&sname));
+            v.extend_from_slice(&cstr(&dname));
+            Kind::Plain { opcode: RENAME, args: v, xattr: false }
+        }
+        Req::Setattr(set) => Kind::Setattr { set_in: setattr_in(&set) },
+        Req::Getxattr { name } => {
+            let mut v = le(&[65536, 0], &[4, 4]);
+            v.extend_from_slice(&cstr(&name));
+            Kind::Data { opcode: GETXATTR, args: v }
+        }
+        Req::Listxattr => Kind::Data { opcode: LISTXATTR, args: le(&[65536, 0], &[4, 4]) },
+        Req::Setxattr { name, value, flags } => {
+            let mut v = le(&[value.len() as u64, flags as u64], &[4, 4]);
+            v.extend_from_slice(&cstr(&name));
+            v.extend_from_slice(&value);
+            Kind::Plain { opcode: SETXATTR, args: v, xattr: true }
+        }
+        Req::Removexattr { name } => Kind::Plain { opcode: REMOVEXATTR, args: cstr(&name), xattr: true },
+    })
+}
+
+/// Starts change `req` of program call `call` on FUSE node `node`: `Err(STARTED)` (the call
+/// waits; the daemon's reply answers it as `then` says), or the call's answer now (an
+/// error: no connection, not the mount's owner, a stale node...).
+pub fn start(call: &LxCall, node: u64, req: Req, then: Then) -> Result<i64, i64> {
+    let (conn, local) = split(node).ok_or(crate::calls::KERNEL)?;
+    let who = Who { uid: call.euid, gid: call.egid, pid: call.tgid as u32 };
+    let mut fin = Vec::new();
+    let now = (|| -> Result<Option<(i64, Vec<u8>, Option<Then>)>, i64> {
+        let mut st = ST.lock();
+        let c = st.conns.get_mut(&conn).ok_or(ENOTCONN)?;
+        if c.aborted {
+            return Err(ENOTCONN);
+        }
+        let (uid, _, other) = c.owner;
+        if !other && call.euid != uid {
+            return Err(EACCES);
+        }
+        c.nodes.nodeid(local).ok_or(ESTALE)?;
+        let kind = kind_of(c, conn, req)?;
+        OPS.fetch_add(1, Ordering::Relaxed);
+        CHANGES.fetch_add(1, Ordering::Relaxed);
+        let op = Op { id: call.id, who, local, kind, to: Some(then) };
+        if !c.initialized {
+            c.before_init.push(op);
+            return Ok(None);
+        }
+        let step = begin(c, op);
+        Ok(drive(c, step, &mut fin).map(|(_, r, out, to)| {
+            // (answered without the daemon: counted as `fin_of` would)
+            if let (Some(Then { how: How::Fd { .. }, .. }), true) = (&to, r >= 0) {
+                if let Some((_, l)) = split(u64_at(&out, 0)) {
+                    c.handles.entry(l).or_default().refs += 1;
+                }
+            }
+            (r, out, to)
+        }))
+    })();
+    finish_all(fin);
+    match now? {
+        None => {
+            WAITED.fetch_add(1, Ordering::Relaxed);
+            Err(STARTED)
+        }
+        Some((r, out, Some(t))) => match then_result(call.id, r, &out, t) {
+            Some(r) if r < 0 => Err(r),
+            Some(r) => Ok(r),
+            // (the call runs again: the name exists after all)
+            None => Err(STARTED),
+        },
+        Some((r, _, None)) => Err(r.min(0)),
+    }
+}
+
+/// The [`Finish`] of operation `id`'s answer `r`, `out`: to the kernel's buffer, or (`to`)
+/// the program's call (a created file's open is counted here, as `local_open_ref`).
+fn fin_of(c: &mut Conn, id: u64, r: i64, out: Vec<u8>, to: Option<Then>) -> Finish {
+    match to {
+        None => Finish::kout(id, r, out),
+        Some(t) => {
+            if let (How::Fd { .. }, true) = (&t.how, r >= 0) {
+                if let Some((_, l)) = split(u64_at(&out, 0)) {
+                    c.handles.entry(l).or_default().refs += 1;
+                }
+            }
+            Finish { id, parts: Vec::new(), out, r, rerun: None, requeue: None, then: Some(Box::new(t)) }
+        }
+    }
+}
+
+/// The program's answer to change `id` from the reply (`r`, `out`), with what follows it
+/// (the handle, the caches); `None`: the call was run again instead.
+fn then_result(id: u64, r: i64, out: &[u8], t: Then) -> Option<i64> {
+    if r < 0 {
+        if let (How::Fd { again: Some(call), .. }, -17) = (&t.how, r) {
+            crate::rerun(call);
+            return None;
+        }
+        return Some(r);
+    }
+    if let Some((ino, what, size)) = t.tell {
+        crate::calls::tell_kernel(ino, what, size);
+    }
+    Some(match t.how {
+        How::Zero => 0,
+        How::Value(v) => v,
+        How::Fd { mut desc, dir, name, .. } => {
+            let ino = u64_at(out, 0);
+            desc.ino = ino;
+            match sys::lx_obj(LX_FH_INSTALL, id, &desc as *const LxFhDesc as u64, 0) {
+                Ok(fd) => fd as i64,
+                Err(e) => {
+                    local_release(ino);
+                    undo_create(dir, &name, Who::default());
+                    e
+                }
+            }
+        }
+        How::Bytes { ptr, size, list } => {
+            let shown;
+            let data = match list {
+                Some(admin) => {
+                    shown = crate::calls::rules::xattr_list_shown(out, admin);
+                    &shown[..]
+                }
+                None => out,
+            };
+            match crate::calls::rules::xattr_fits(data.len(), size) {
+                Ok(n) => {
+                    if size != 0 && n > 0 {
+                        if let Err(e) = sys::lx_write(id, ptr, data) {
+                            return Some(e);
+                        }
+                    }
+                    n as i64
+                }
+                Err(e) => e,
+            }
+        }
+    })
+}
+
+/// Whether FUSE directory `dir` is `anc` or lies below it, as the node table knows the
+/// names (a rename of directory `anc` into `dir`: `EINVAL`).
+pub fn descends(dir: u64, anc: u64) -> bool {
+    let (Some((c1, mut l)), Some((c2, a))) = (split(dir), split(anc)) else { return false };
+    if c1 != c2 {
+        return false;
+    }
+    let st = ST.lock();
+    let Some(c) = st.conns.get(&c1) else { return false };
+    for _ in 0..4096 {
+        if l == a {
+            return true;
+        }
+        match c.nodes.name_of(l) {
+            Some((p, _)) => l = p,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Removes `name` from FUSE directory `dir` again (a created file whose handle could not be
+/// installed); nothing waits for the reply.
+fn undo_create(dir: u64, name: &[u8], who: Who) {
+    let Some((conn, local)) = split(dir) else { return };
+    let mut fin = Vec::new();
+    {
+        let mut st = ST.lock();
+        let Some(c) = st.conns.get_mut(&conn) else { return };
+        let Some(n) = c.nodes.nodeid(local) else { return };
+        if !c.aborted && c.initialized {
+            c.forget_all();
+            send(c, UNLINK, n, who, &[&cstr(name)], Wait::Discard, &mut fin);
+        }
+    }
+    finish_all(fin);
+}
+// wave11 GF end

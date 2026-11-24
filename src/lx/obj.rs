@@ -670,6 +670,15 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
         return super::console::ctl(h, a, b, c);
     }
     // wave8 GT end
+    // wave11 GF begin: a UEFI variable written or deleted for linux-server (op 83)
+    #[cfg(target_os = "uefi")]
+    if op == crate::ipc::protocol::LX_INFO_EFIVAR_SET {
+        if h != super::svc::host_of(crate::ipc::protocol::LXS_LINUX) {
+            return -1; // EPERM
+        }
+        return crate::compat::linux::efivars::set_for(a, b, c);
+    }
+    // wave11 GF end
     // wave7 G7-4: the info primitives (`info`, ops 56..=61)
     if super::info::glue::is_info(op) {
         return super::info::glue::ctl(h, op, a, b, c);
