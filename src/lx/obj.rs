@@ -653,6 +653,7 @@ pub fn obj_ctl(op: u64, a: u64, b: u64, c: u64) -> i64 {
         return x86_64::instructions::interrupts::without_interrupts(|| {
             x.lx(|s| match s.reqs.iter_mut().find(|r| r.id == a && matches!(r.state, super::svc::RState::Delivered | super::svc::RState::Pending)) {
                 Some(r) => {
+                    // (wave11 GF: a negative errno: the answer instead of a resend)
                     r.partial = b as i64;
                     0
                 }

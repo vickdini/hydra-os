@@ -65,6 +65,9 @@ fn set_on(c: &LxCall, who: &Ctx, n: Node, a: &Attr, set: SetAttr) -> Result<i64,
     if !ctxt::is_fuse(n) {
         return setattr(who, n, a, set);
     }
+    // (review 1: the set-ID bits go as the pool's `setattr` drops them, in the mode sent)
+    let mut set = set;
+    set.mode = crate::fuse::wire::setid_mode(a.mode, a.is_dir(), set.mode, set.size.is_some(), set.kill_suid, who.cap(CAP_FSETID), who.uid == 0 || who.in_group(a.gid));
     let what = LX_FHC_ATTR | if set.size.is_some() { LX_FHC_TRUNC } else { 0 };
     let size = set.size.unwrap_or(0);
     crate::fuse::start(c, n.ino, crate::fuse::Req::Setattr(set), then_tell(crate::fuse::How::Zero, n.ino, what, size))
@@ -467,14 +470,6 @@ pub fn unlink(cx: &Cx) -> Result<i64, i64> {
     let path = ctxt::path(cx, ptr, false)?;
     let who = ctxt::caller(c)?;
     let p = parent(c, &who, &path, false)?;
-    // wave11 GF: an efivars file: linux-server deletes the variable (the pool's file follows)
-    if !rmdir && super::served::is_efivars_dir(&ctxt::walker(c)?, &who, p.dir) {
-        if let Some(tail) = super::served::efivars_tail(&path) {
-            let r = crate::walk::Redirect { svc: crate::proto::LXS_LINUX, obj: crate::proto::LX_VFS_PSEUDO_SYS, tail: Some(tail), text: alloc::vec::Vec::new() };
-            return Err(super::pseudo_redirect(&r));
-        }
-        return Err(KERNEL);
-    }
     // wave9 G6b-3: Landlock (by the call: rmdir needs REMOVE_DIR, unlink REMOVE_FILE)
     if let Some(d) = policy::domain(c)? {
         policy::check_dir(&d, p.dir, if rmdir { ll::REMOVE_DIR } else { ll::REMOVE_FILE })?;
@@ -491,6 +486,15 @@ pub fn unlink(cx: &Cx) -> Result<i64, i64> {
         if who.abac && c.euid != 0 && !policy::abac(&who, &ctxt::attr_of(c, v)?, 0, true, &path)? {
             return Err(EACCES);
         }
+    }
+    // wave11 GF: an efivars file: linux-server deletes the variable (the pool's file follows;
+    // review 2: after the Landlock, sticky, ABAC and read-only checks above)
+    if !rmdir && super::served::is_efivars_dir(&ctxt::walker(c)?, &who, p.dir) {
+        if let Some(tail) = super::served::efivars_tail(&path) {
+            let r = crate::walk::Redirect { svc: crate::proto::LXS_LINUX, obj: crate::proto::LX_VFS_PSEUDO_SYS, tail: Some(tail), text: alloc::vec::Vec::new() };
+            return Err(super::pseudo_redirect(&r));
+        }
+        return Err(KERNEL);
     }
     // wave11 GF: in a FUSE mount: the daemon's UNLINK or RMDIR (the types checked here, as
     // Linux's VFS does before asking any file system)

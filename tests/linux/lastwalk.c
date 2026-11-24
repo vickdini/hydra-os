@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -92,7 +94,19 @@ static void efivars(void) {
     int status = -1;
     waitpid(p, &status, 0);
     check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "a user may neither write nor delete it");
+    check(open(var, O_WRONLY | O_CREAT | O_EXCL, 0644) < 0 && errno == EEXIST, "O_CREAT|O_EXCL of an existing variable: EEXIST");
     check(unlink(var) == 0, "unlink deletes the variable");
+    // Linux's efivarfs rules: a global variable it does not know as removable is immutable;
+    // BootOrder's value is checked (nothing reaches the firmware in these two)
+    unsigned int fl = 0;
+    f = open("/sys/firmware/efi/efivars/SecureBoot-" GUID, O_RDONLY);
+    check(f < 0 || (ioctl(f, FS_IOC_GETFLAGS, &fl) == 0 && (fl & FS_IMMUTABLE_FL)), "SecureBoot is immutable");
+    if (f >= 0) close(f);
+    check(f < 0 || (unlink("/sys/firmware/efi/efivars/SecureBoot-" GUID) < 0 && errno == EPERM), "an immutable variable is not deleted: EPERM");
+    f = open("/sys/firmware/efi/efivars/BootOrder-" GUID, O_WRONLY);
+    char odd[] = {7, 0, 0, 0, 1, 0, 2};
+    check(f >= 0 && write(f, odd, sizeof odd) < 0 && errno == EINVAL, "a BootOrder of odd length: EINVAL");
+    if (f >= 0) close(f);
     check(open(var, O_RDONLY) < 0 && errno == ENOENT, "gone");
     check(listed("/sys/firmware/efi/efivars", strrchr(var, '/') + 1, NULL) == 0, "and from the list");
     f = open("/sys/firmware/efi/efivars/BootOrder-" GUID, O_RDONLY);
@@ -131,18 +145,26 @@ static void bwrap(void) {
         return;
     }
     static char out[8192];
-    int rc = run_as_user("bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp sh -c '"
-                         "ls -l /dev/null /dev/zero /dev/full /dev/random /dev/urandom /dev/tty; "
-                         "head -c 4 /dev/zero | od -An -tx1; echo hi > /dev/null && echo NULL-OK; "
-                         "ls -a /dev/pts; readlink /proc/self/fd/1 >/dev/null && echo FD-OK; "
-                         "grep -c Name /proc/self/status'",
-                         out, sizeof out);
+    // A terminal of the system while the sandbox runs: its own devpts must not show it
+    int m = posix_openpt(O_RDWR | O_NOCTTY);
+    grantpt(m);
+    unlockpt(m);
+    const char *host = m >= 0 ? strrchr(ptsname(m), '/') + 1 : "999";
+    char cmd[1024];
+    snprintf(cmd, sizeof cmd, "bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp sh -c '"
+             "ls -l /dev/null /dev/zero /dev/full /dev/random /dev/urandom /dev/tty; "
+             "head -c 4 /dev/zero | od -An -tx1; echo hi > /dev/null && echo NULL-OK; "
+             "test -e /dev/pts/ptmx && echo PTMX-OK; test -e /dev/pts/%s || echo NOHOST-OK; "
+             "readlink /proc/self/fd/1 >/dev/null && echo FD-OK; "
+             "grep -c Name /proc/self/status'", host);
+    int rc = run_as_user(cmd, out, sizeof out);
+    if (m >= 0) close(m);
     printf("%s", out);
     check(rc == 0, "bwrap --dev --proc ran");
     check(strstr(out, "crw-rw-rw-") && strstr(out, "/dev/null"), "its /dev/null is a character device");
     check(strstr(out, "00 00 00 00") != NULL, "/dev/zero reads zeros");
     check(strstr(out, "NULL-OK") != NULL, "/dev/null takes writes");
-    check(strstr(out, "ptmx") != NULL, "its own /dev/pts (devpts) lists ptmx");
+    check(strstr(out, "PTMX-OK") && strstr(out, "NOHOST-OK"), "its own /dev/pts (devpts): ptmx, and not the system's terminals");
     check(strstr(out, "FD-OK") != NULL, "proc in the sandbox: /proc/self/fd/1");
     rc = run_as_user("bwrap --dev-bind / / --unshare-pid --proc /proc sh -c 'ls /proc | grep -c ^1$; head -c 2 /dev/urandom > /dev/null && echo URANDOM-OK'", out, sizeof out);
     printf("%s", out);

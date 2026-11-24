@@ -42,6 +42,9 @@ fn is_number(name: &[u8]) -> bool {
 /// [`LX_VFS_PSEUDO_DEVPTS`] with this bit: the redirect's rest starts below `pts` (a walk that
 /// started in the `/dev/pts` directory) instead of at `pts`.
 pub const PTS_BELOW: u64 = 0x100;
+/// wave11 GF (review 4): with [`LX_VFS_PSEUDO_DEVPTS`]: the mount is a devpts of its own (a
+/// sandbox's newinstance mount), not the system's.
+pub const PTS_NEWINST: u64 = 0x200;
 
 /// The tree a served name starting at `name` is in (`name` passed [`may_serve`]).
 pub fn tree_of(name: &[u8]) -> Tree {

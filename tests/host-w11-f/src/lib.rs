@@ -66,3 +66,9 @@ pub mod fuse {
     #[path = "../../../../userland/drivers/vfs-server/src/fuse/wire.rs"]
     pub mod wire;
 }
+
+/// wave11 GF (review 7): linux-server's efivarfs rules (`pseudo/sys.rs`).
+pub mod pseudo {
+    #[path = "../../../../userland/drivers/linux-server/src/pseudo/sys.rs"]
+    pub mod sys;
+}

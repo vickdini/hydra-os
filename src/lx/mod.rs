@@ -2849,6 +2849,9 @@ fn server_gone(h: SvcId) {
                 // wave6 G21: a Transparent restart's callers send their calls again (all
                 // that had no effect yet; one being served only if it is idempotent)
                 r.result = match (resend, r.state) {
+                    // wave11 GF: a call whose effect may have begun elsewhere (a FUSE change its
+                    // daemon may have made) answers the errno it was marked with, not resent
+                    (true, RState::Delivered | RState::Pending) if r.partial < 0 => r.partial,
                     (true, RState::Delivered) if partial[i].is_some() => partial[i].unwrap_or(EIO), // wave8 GX2
                     (true, RState::Delivered) if safe[i] => restart::LX_RESEND, // wave8 GX2
                     (true, RState::Pending) if r.partial > 0 => r.partial, // wave8 GX2: a waiting send's bytes already sent

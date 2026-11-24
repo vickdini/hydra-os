@@ -207,7 +207,8 @@ pub fn answer(cx: &Cx, r: Result<i64, i64>) -> Answer {
             }
             // (wave9 G6b-3: a landlocked caller's open there is the kernel's: its lexical chain)
             // (wave11 GF: and an efivars unlink, linux-server's)
-            let efi_unlink = svc == crate::proto::LXS_LINUX && obj == crate::proto::LX_VFS_PSEUDO_SYS && matches!(cx.nr, 87 | 263);
+            // (review 2: not for a landlocked caller, as its opens there)
+            let efi_unlink = svc == crate::proto::LXS_LINUX && obj == crate::proto::LX_VFS_PSEUDO_SYS && matches!(cx.nr, 87 | 263) && cx.c.ll_dom == 0;
             if (pseudo_served(cx.nr) || (pts && pts_served(cx.nr)) || efi_unlink) && !(cx.c.ll_dom != 0 && matches!(cx.nr, 2 | 257)) {
                 let n = TO_PSEUDO.fetch_add(1, Ordering::Relaxed) + 1;
                 if n == 1 || (n >= 1024 && n.is_power_of_two()) {

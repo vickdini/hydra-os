@@ -226,6 +226,15 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
         *fifo = n.ino | (n.mnt as u64) << 45 | (attr.is_dir() as u64) << 61;
         return Err(FHANSWER);
     }
+    // wave11 GF: a truncating open of a FUSE file: the daemon's SETATTR first; its reply
+    // installs the handle (review 5: a failed truncation leaves no descriptor; review 1: the
+    // set-ID bits go as for any truncation)
+    if trunc && crate::fuse::wire::split(n.ino).is_some() {
+        let mode = crate::fuse::wire::setid_mode(attr.mode, false, None, true, false, who.cap(4), who.uid == 0 || who.in_group(attr.gid));
+        let set = crate::fs::fsproto::SetAttr { size: Some(0), mode, ..Default::default() };
+        let then = crate::fuse::Then { how: crate::fuse::How::Install { desc: d }, tell: Some((n.ino, crate::proto::LX_FHC_ATTR | crate::proto::LX_FHC_TRUNC, 0)) };
+        return crate::fuse::start(c, n.ino, crate::fuse::Req::Setattr(set), then);
+    }
     // wave9 G6b-2: a FUSE file: the open counts here (the daemon's handles live while it is open)
     let fuse = crate::fuse::local_open_ref(n.ino);
     let fd = match sys::lx_obj(LX_FH_INSTALL, cx.id, &d as *const LxFhDesc as u64, 0) {
@@ -242,12 +251,6 @@ fn open_or_fifo(cx: &Cx, fifo: &mut u64) -> Result<i64, i64> {
     };
     // (a truncation that fails after the install answers its error; the descriptor stays
     // open: there is no way to close it from here, and it is rare — EIO)
-    // wave11 GF: a FUSE file: the daemon's SETATTR; its reply answers with the descriptor
-    if trunc && fuse {
-        let set = crate::fs::fsproto::SetAttr { size: Some(0), ..Default::default() };
-        let then = crate::fuse::Then { how: crate::fuse::How::Value(fd as i64), tell: Some((n.ino, crate::proto::LX_FHC_ATTR | crate::proto::LX_FHC_TRUNC, 0)) };
-        return crate::fuse::start(c, n.ino, crate::fuse::Req::Setattr(set), then);
-    }
     if trunc {
         super::change::truncate_for_open(who, n, &attr)?;
     }

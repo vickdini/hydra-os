@@ -151,3 +151,56 @@ fn an_open_of_dev_pts_itself_is_the_pools_directory() {
     assert_eq!(served::served(Tree::Dev, b"pts", &[], false), Some((LXS_TTY, LX_VFS_PSEUDO_DEVPTS)));
     assert_eq!(served::served(Tree::Dev, b"pts", &[b"3"], true), Some((LXS_TTY, LX_VFS_PSEUDO_DEVPTS)));
 }
+
+// ----------------------------------------------------------------------
+// Review fixes (wave 11, pre-merge review of Group F)
+// ----------------------------------------------------------------------
+
+#[test]
+fn fuse_setattr_drops_set_id_bits_as_linux() {
+    use hydra_hosttests_w11_f::fuse::wire::setid_mode;
+    // chown of a setuid + setgid group-executable file: both go
+    assert_eq!(setid_mode(0o106755, false, None, false, true, true, true), Some(0o755));
+    // chown of setgid without group execute (mandatory locking): S_ISGID stays
+    assert_eq!(setid_mode(0o102745, false, None, false, true, false, true), None);
+    // a truncation without CAP_FSETID: S_ISUID goes; with it nothing
+    assert_eq!(setid_mode(0o104755, false, None, true, false, false, true), Some(0o755));
+    assert_eq!(setid_mode(0o104755, false, None, true, false, true, true), None);
+    // chmod by a caller outside the group without CAP_FSETID: no S_ISGID
+    assert_eq!(setid_mode(0o100644, false, Some(0o2755), false, false, false, false), Some(0o755));
+    assert_eq!(setid_mode(0o100644, false, Some(0o2755), false, false, false, true), Some(0o2755));
+    // a directory keeps its bits on chown
+    assert_eq!(setid_mode(0o042755, true, None, false, true, false, true), None);
+}
+
+#[test]
+fn fuse_mknod_types_and_device_numbers() {
+    use hydra_hosttests_w11_f::fuse::wire::{mknod_type, new_encode_dev};
+    assert_eq!(mknod_type(0), Ok(0o100000));
+    assert_eq!(mknod_type(0o010000), Ok(0o010000));
+    assert_eq!(mknod_type(0o040000), Err(-1));
+    assert_eq!(mknod_type(0o170000), Err(-22));
+    // makedev(8, 1) and a minor beyond 255: makedev(259, 300)
+    assert_eq!(new_encode_dev((8 << 8) | 1), (8 << 8) | 1);
+    let dev = ((259u64 & 0xFFF) << 8) | (300 & 0xFF) | ((300u64 & !0xFF) << 12);
+    assert_eq!(new_encode_dev(dev), (300 & 0xFF) | (259 << 8) | ((300 & !0xFF) << 12));
+}
+
+#[test]
+fn efivar_rules_follow_linux() {
+    use hydra_hosttests_w11_f::pseudo::sys;
+    let g = sys::GLOBAL_GUID;
+    assert_eq!(sys::split_name(&format!("BootOrder-{g}")), Some(("BootOrder", g)));
+    assert!(sys::validate("BootOrder", g, &[1, 0, 2, 0]));
+    assert!(!sys::validate("BootOrder", g, &[1, 0, 2]));
+    assert!(sys::validate("BootNext", g, &[1, 0]) && !sys::validate("BootNext", g, &[1]));
+    // Boot####: attributes, path length 4, description "A\0", then 4 bytes of path
+    let opt = [1, 0, 0, 0, 4, 0, b'A', 0, 0, 0, 1, 2, 3, 4];
+    assert!(sys::validate("Boot0001", g, &opt));
+    assert!(!sys::validate("Boot0001", g, &opt[..12]));
+    assert!(sys::validate("Anything", "12345678-1234-4234-8234-123456789abc", &[1]));
+    assert!(sys::removable("Boot0003", g) && sys::removable("BootOrder", g));
+    assert!(sys::removable("PlatformLang", g) && !sys::removable("SecureBoot", g) && !sys::removable("PK", g));
+    assert!(sys::removable("SecureBoot", "12345678-1234-4234-8234-123456789abc"));
+    assert!(sys::secure_boot_key("PK") && sys::secure_boot_key("dbx") && !sys::secure_boot_key("Boot0001"));
+}

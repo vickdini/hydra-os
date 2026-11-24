@@ -470,7 +470,8 @@ fn initial_table(root: u64) -> MountNs {
             mountpoint,
             // wave11 GF: the pool's `/dev` (its devices are pool nodes since wave 10): the
             // file service walks it wherever a pivot_root puts it (`vfs_mount`)
-            root: if fstype == "devtmpfs" { mountpoint } else { 0 },
+            // (review 4: and the system's devpts is told from a sandbox's own: root not 0)
+            root: if fstype == "devtmpfs" || fstype == "devpts" { mountpoint.max(1) } else { 0 },
             kind: Kind::Named,
             flags: MS_NOSUID | MS_NOEXEC | MS_RELATIME,
             propagation: MS_SHARED,

@@ -148,6 +148,7 @@ static void serve(void) {
             uint32_t valid = *(uint32_t *)arg;
             uint64_t size = *(uint64_t *)(arg + 16), mtime = *(uint64_t *)(arg + 40);
             uint32_t mode = *(uint32_t *)(arg + 68), uid = *(uint32_t *)(arg + 76), gid = *(uint32_t *)(arg + 80);
+            if (!strcmp(nodes[nodes[me].target].name, "nosetattr")) { reply(h->unique, -EACCES, 0, 0); break; }
             struct node *t = &nodes[nodes[me].target];
             if (valid & 8) {
                 t->data = realloc(t->data, size + 1);
@@ -427,6 +428,20 @@ static void checks(void) {
     close(f);
     check(truncate(at("d/f"), 10) == 0 && stat(at("d/f"), &st) == 0 && st.st_size == 10, "truncate (longer)");
     check(chown(at("d/f"), 0, 0) == 0 && stat(at("d/f"), &st) == 0 && st.st_uid == 0, "chown");
+    check(chmod(at("d/f"), 06755) == 0 && chown(at("d/f"), 1000, 1000) == 0 && stat(at("d/f"), &st) == 0 && (st.st_mode & 06000) == 0, "chown clears set-user-ID and set-group-ID (group-executable)");
+    check(chown(at("d/f"), 0, 0) == 0 && chmod(at("d/f"), 0640) == 0, "back to root 0640");
+    check(mknod(at("d/md"), S_IFDIR | 0755, 0) < 0 && errno == EPERM, "mknod of a directory: EPERM");
+    check(mknod(at("d/mx"), 0170000 | 0644, 0) < 0 && errno == EINVAL, "mknod of a bad type: EINVAL");
+    {
+        check(write_file(at("d/nosetattr"), "x", O_CREAT) == 1, "a file whose daemon refuses SETATTR");
+        int probe = open("/dev/null", O_RDONLY);
+        close(probe);
+        int t = open(at("d/nosetattr"), O_WRONLY | O_TRUNC);
+        int e = errno, again = open("/dev/null", O_RDONLY);
+        close(again);
+        check(t < 0 && e == EACCES && again == probe, "O_TRUNC refused by the daemon: the error, and no descriptor left behind");
+        unlink(at("d/nosetattr"));
+    }
     struct timespec ts[2] = {{1000, 0}, {123456789, 0}};
     check(utimensat(AT_FDCWD, at("d/f"), ts, 0) == 0 && stat(at("d/f"), &st) == 0 && st.st_mtime == 123456789, "utimensat");
     check(statfs(at("d/f"), &sf) == 0 && sf.f_type == 0x65735546 && sf.f_bfree == 500, "statfs of a path");
@@ -515,6 +530,16 @@ static void checks(void) {
     waitpid(p, &status, 0);
     if (!WIFEXITED(status) || WEXITSTATUS(status)) printf("     (user: status %#x)\n", status);
     check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "a user: EACCES without write right, EPERM in a sticky directory and for chmod, own files fine");
+    p = fork();
+    if (p == 0) {
+        setgid(1000);
+        setuid(1000);
+        int ok = write_file(at("t/suid"), "abc", O_CREAT) == 3 && chmod(at("t/suid"), 04755) == 0 && truncate(at("t/suid"), 1) == 0;
+        _exit(!ok);
+    }
+    waitpid(p, &status, 0);
+    check(WIFEXITED(status) && WEXITSTATUS(status) == 0 && stat(at("t/suid"), &st) == 0 && (st.st_mode & 04000) == 0, "a truncation by a user without CAP_FSETID clears set-user-ID");
+    unlink(at("t/suid"));
     unlink(at("t/rootf"));
     rmdir(at("t"));
 }

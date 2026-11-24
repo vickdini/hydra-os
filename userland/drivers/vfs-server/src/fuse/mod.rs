@@ -1245,7 +1245,7 @@ pub fn fix_stat(attr: &Attr, b: &mut [u8], statx: bool) {
 }
 
 /// The connection of FUSE node `n` for a walk by `euid`.
-fn walk_conn(st: &mut State, conn: u16, euid: u32) -> Result<&mut Conn, i64> {
+fn walk_conn(st: &mut State, conn: u16, euid: u64) -> Result<&mut Conn, i64> {
     let c = st.conns.get_mut(&conn).ok_or(ENOTCONN)?;
     if c.aborted {
         return Err(ENOTCONN);
@@ -1254,15 +1254,28 @@ fn walk_conn(st: &mut State, conn: u16, euid: u32) -> Result<&mut Conn, i64> {
     if !c.initialized {
         return Err(miss(conn, 0, MissKind::Init));
     }
-    let (uid, _, other) = c.owner;
-    if !other && euid != uid {
+    // (review 8: all the caller's ids the mount owner's, as Linux's
+    // `fuse_allow_current_process`: `caller_ids`)
+    let (uid, gid, other) = c.owner;
+    if !other && euid != (uid as u64 | (gid as u64) << 32) {
         return Err(EACCES);
     }
     Ok(c)
 }
 
+/// The caller as a FUSE mount without `allow_other` lets it in (review 8): `uid | gid << 32`
+/// when its real, effective and saved user ids are one and its group ids are one; else a
+/// value no owner has.
+pub fn caller_ids(c: &LxCall) -> u64 {
+    if c.uid == c.euid && c.euid == c.suid && c.gid == c.egid && c.egid == c.sgid {
+        c.euid as u64 | (c.egid as u64) << 32
+    } else {
+        u64::MAX
+    }
+}
+
 /// `name` in FUSE directory `dir`, as the walk asks: known, or a miss.
-pub fn be_lookup(dir: Node, name: &[u8], euid: u32) -> Result<Node, i64> {
+pub fn be_lookup(dir: Node, name: &[u8], euid: u64) -> Result<Node, i64> {
     let (conn, local) = split(dir.ino).ok_or(EINVAL)?;
     let mut st = ST.lock();
     let c = walk_conn(&mut st, conn, euid)?;
@@ -1289,7 +1302,7 @@ pub fn be_lookup(dir: Node, name: &[u8], euid: u32) -> Result<Node, i64> {
 }
 
 /// The attributes of FUSE node `n`, as the walk asks: known, or a miss.
-pub fn be_getattr(n: Node, euid: u32) -> Result<Attr, i64> {
+pub fn be_getattr(n: Node, euid: u64) -> Result<Attr, i64> {
     let (conn, local) = split(n.ino).ok_or(EINVAL)?;
     let mut st = ST.lock();
     let c = walk_conn(&mut st, conn, euid)?;
@@ -1309,7 +1322,7 @@ pub fn be_getattr(n: Node, euid: u32) -> Result<Attr, i64> {
 }
 
 /// The target of FUSE link `n`, as the walk asks: fetched for this call, or a miss.
-pub fn be_readlink(n: Node, euid: u32) -> Result<Vec<u8>, i64> {
+pub fn be_readlink(n: Node, euid: u64) -> Result<Vec<u8>, i64> {
     let (conn, local) = split(n.ino).ok_or(EINVAL)?;
     let mut st = ST.lock();
     let c = walk_conn(&mut st, conn, euid)?;
@@ -1324,7 +1337,7 @@ pub fn be_readlink(n: Node, euid: u32) -> Result<Vec<u8>, i64> {
 // wave10 GV2 begin: statfs of a FUSE file system
 /// The figures of the file system FUSE node `n` is in, as `statfs` asks: the daemon's
 /// `fuse_kstatfs` fetched for this call, or a miss.
-pub fn be_statfs(n: Node, euid: u32) -> Result<Vec<u8>, i64> {
+pub fn be_statfs(n: Node, euid: u64) -> Result<Vec<u8>, i64> {
     let (conn, local) = split(n.ino).ok_or(EINVAL)?;
     let mut st = ST.lock();
     let c = walk_conn(&mut st, conn, euid)?;
@@ -1691,6 +1704,9 @@ pub enum How {
     /// remove it again if the handle cannot be installed; `again`: the call runs again if the
     /// daemon says the name exists (another caller made it first; not `O_EXCL`).
     Fd { desc: LxFhDesc, dir: u64, name: Vec<u8>, again: Option<Box<LxCall>> },
+    /// review 5: an existing file's handle `desc`, installed only once the operation (an
+    /// `O_TRUNC` open's truncation) succeeded: a failed truncation leaves no descriptor.
+    Install { desc: LxFhDesc },
     /// The reply's bytes to the caller's buffer `ptr` of `size` bytes, as the xattr calls
     /// answer (`size` 0: the length; too small: `ERANGE`); `list`: names shown to a caller
     /// with (`Some(true)`) or without `CAP_SYS_ADMIN`.
@@ -1778,6 +1794,16 @@ fn kind_of(c: &Conn, conn: u16, req: Req) -> Result<Kind, i64> {
 /// error: no connection, not the mount's owner, a stale node...).
 pub fn start(call: &LxCall, node: u64, req: Req, then: Then) -> Result<i64, i64> {
     let (conn, local) = split(node).ok_or(crate::calls::KERNEL)?;
+    // (review 3: a change the daemon may have made is not resent after a crash of this
+    // service: its caller gets EIO; reads and plain attribute sets may be resent)
+    let resendable = match &req {
+        Req::Getxattr { .. } | Req::Listxattr => true,
+        Req::Setattr(s) => s.size.is_none(),
+        _ => false,
+    };
+    if !resendable {
+        let _ = sys::lx_obj(LX_OBJ_PARTIAL, call.id, EIO as u64, 0);
+    }
     let who = Who { uid: call.euid, gid: call.egid, pid: call.tgid as u32 };
     let mut fin = Vec::new();
     let now = (|| -> Result<Option<(i64, Vec<u8>, Option<Then>)>, i64> {
@@ -1786,8 +1812,8 @@ pub fn start(call: &LxCall, node: u64, req: Req, then: Then) -> Result<i64, i64>
         if c.aborted {
             return Err(ENOTCONN);
         }
-        let (uid, _, other) = c.owner;
-        if !other && call.euid != uid {
+        let (uid, gid, other) = c.owner;
+        if !other && caller_ids(call) != (uid as u64 | (gid as u64) << 32) {
             return Err(EACCES);
         }
         c.nodes.nodeid(local).ok_or(ESTALE)?;
@@ -1802,10 +1828,8 @@ pub fn start(call: &LxCall, node: u64, req: Req, then: Then) -> Result<i64, i64>
         let step = begin(c, op);
         Ok(drive(c, step, &mut fin).map(|(_, r, out, to)| {
             // (answered without the daemon: counted as `fin_of` would)
-            if let (Some(Then { how: How::Fd { .. }, .. }), true) = (&to, r >= 0) {
-                if let Some((_, l)) = split(u64_at(&out, 0)) {
-                    c.handles.entry(l).or_default().refs += 1;
-                }
+            if let (Some(t), true) = (&to, r >= 0) {
+                count_open(c, &t.how, &out);
             }
             (r, out, to)
         }))
@@ -1832,13 +1856,24 @@ fn fin_of(c: &mut Conn, id: u64, r: i64, out: Vec<u8>, to: Option<Then>) -> Fini
     match to {
         None => Finish::kout(id, r, out),
         Some(t) => {
-            if let (How::Fd { .. }, true) = (&t.how, r >= 0) {
-                if let Some((_, l)) = split(u64_at(&out, 0)) {
-                    c.handles.entry(l).or_default().refs += 1;
-                }
+            if r >= 0 {
+                count_open(c, &t.how, &out);
             }
             Finish { id, parts: Vec::new(), out, r, rerun: None, requeue: None, then: Some(Box::new(t)) }
         }
+    }
+}
+
+/// The open a handle answer makes, counted (as `local_open_ref`): a created file's (`out`
+/// holds its inode) or an existing one's.
+fn count_open(c: &mut Conn, how: &How, out: &[u8]) {
+    let ino = match how {
+        How::Fd { .. } => u64_at(out, 0),
+        How::Install { desc } => desc.ino,
+        _ => return,
+    };
+    if let Some((_, l)) = split(ino) {
+        c.handles.entry(l).or_default().refs += 1;
     }
 }
 
@@ -1847,8 +1882,23 @@ fn fin_of(c: &mut Conn, id: u64, r: i64, out: Vec<u8>, to: Option<Then>) -> Fini
 fn then_result(id: u64, r: i64, out: &[u8], t: Then) -> Option<i64> {
     if r < 0 {
         if let (How::Fd { again: Some(call), .. }, -17) = (&t.how, r) {
-            crate::rerun(call);
-            return None;
+            // (review 12: a daemon that says EEXIST to CREATE and ENOENT to LOOKUP: EIO after
+            // a few runs)
+            let n = {
+                let mut a = AGAIN.lock();
+                if a.len() > 256 {
+                    a.clear();
+                }
+                let n = a.entry(call.id).or_insert(0);
+                *n += 1;
+                *n
+            };
+            if n <= 4 {
+                crate::rerun(call);
+                return None;
+            }
+            AGAIN.lock().remove(&call.id);
+            return Some(EIO);
         }
         return Some(r);
     }
@@ -1858,7 +1908,10 @@ fn then_result(id: u64, r: i64, out: &[u8], t: Then) -> Option<i64> {
     Some(match t.how {
         How::Zero => 0,
         How::Value(v) => v,
-        How::Fd { mut desc, dir, name, .. } => {
+        How::Fd { mut desc, dir, name, again } => {
+            if let Some(c) = again {
+                AGAIN.lock().remove(&c.id);
+            }
             let ino = u64_at(out, 0);
             desc.ino = ino;
             match sys::lx_obj(LX_FH_INSTALL, id, &desc as *const LxFhDesc as u64, 0) {
@@ -1870,6 +1923,13 @@ fn then_result(id: u64, r: i64, out: &[u8], t: Then) -> Option<i64> {
                 }
             }
         }
+        How::Install { desc } => match sys::lx_obj(LX_FH_INSTALL, id, &desc as *const LxFhDesc as u64, 0) {
+            Ok(fd) => fd as i64,
+            Err(e) => {
+                local_release(desc.ino);
+                e
+            }
+        },
         How::Bytes { ptr, size, list } => {
             let shown;
             let data = match list {
@@ -1914,6 +1974,9 @@ pub fn descends(dir: u64, anc: u64) -> bool {
     }
     false
 }
+
+/// Creating opens run again after the daemon said EEXIST, by call (review 12).
+static AGAIN: YLock<BTreeMap<u64, u32>> = YLock::new(BTreeMap::new());
 
 /// Removes `name` from FUSE directory `dir` again (a created file whose handle could not be
 /// installed); nothing waits for the reply.

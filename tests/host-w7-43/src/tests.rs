@@ -422,9 +422,17 @@ fn proc_and_devpts_mounted_elsewhere_go_to_their_services() {
     }
     match walk::walk(&be, &cx, Start::Root, b"/etc/pts/3", 0) {
         Ok(Walked::Redirect(r)) => {
-            assert_eq!((r.svc, r.obj), (LXS_TTY, LX_VFS_PSEUDO_DEVPTS | 0x100));
+            assert_eq!((r.svc, r.obj), (LXS_TTY, LX_VFS_PSEUDO_DEVPTS | 0x100 | 0x200), "a devpts of its own (root 0)");
             assert_eq!(r.tail, Some(9));
         }
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+    // (review 4) The system's devpts (its root the pool's /dev/pts): the system's view
+    let recs2 = alloc::vec![rec(LX_MNT_TREE, 0, 0, 0, ROOT), rec(LX_MNT_DEVPTS, 0, 1, pts, pts)];
+    let v2 = kmounts::parse(5, &LxMntHead { gen: 3, root: 1, n: 2 }, &recs2).unwrap();
+    let be2 = WithView { fs: &t.fs, view: &v2 };
+    match walk::walk(&be2, &cx, Start::Root, b"/etc/pts/3", 0) {
+        Ok(Walked::Redirect(r)) => assert_eq!(r.obj, LX_VFS_PSEUDO_DEVPTS | 0x100),
         other => panic!("{:?}", other.map(|_| ())),
     }
     // The mount points' own directories are not walked from (nothing of the pool there)

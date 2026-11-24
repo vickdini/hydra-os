@@ -42,6 +42,9 @@ use sys::File;
 const ENXIO: i64 = -6;
 const EACCES: i64 = -13; // wave11 GF
 const ENOENT: i64 = -2; // wave11 GF
+const EPERM: i64 = -1; // wave11 GF
+const EEXIST: i64 = -17; // wave11 GF
+const O_EXCL: u64 = 0o200; // wave11 GF
 /// `CAP_SYS_ADMIN` (wave11 GF: changing UEFI variables needs it).
 const CAP_SYS_ADMIN: u64 = 1 << 21;
 const EBADF: i64 = -9;
@@ -252,6 +255,8 @@ fn open(cx: &Cx, obj: u64, tail: &[u8], file: File) -> Option<i64> {
     }
     // (errors: the kernel answers; wave11 GF: a variable an O_CREAT open makes is empty)
     let text = match make(file, tail) {
+        // (review 7: O_CREAT|O_EXCL of an existing variable)
+        Ok(_) if efi_write && flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL => return Some(EEXIST),
         Ok(t) => t,
         Err(ENOENT) if efi_write && flags & O_CREAT != 0 => Vec::new(),
         Err(ENOENT) if file == File::Efivar => return Some(ENOENT),
@@ -385,9 +390,9 @@ pub fn io(cx: &Cx) -> (i64, u64) {
         }
         // wave11 GF: a write of an efivars file opened for it: one variable, whole
         1 | 20 => efivar_write(cx, slot),
-        // (wave11 GF: FS_IOC_GETFLAGS / FS_IOC_SETFLAGS of an efivars file: no immutable flag)
-        16 if cx.args[1] == 0x8008_6601 && OPENS.lock().get(&slot).is_some_and(|o| o.file == File::Efivar) => cx.copy_out(cx.args[2], &0u32.to_le_bytes()).err().unwrap_or(0),
-        16 if cx.args[1] == 0x4008_6602 && OPENS.lock().get(&slot).is_some_and(|o| o.file == File::Efivar) => 0,
+        // (wave11 GF, review 7: FS_IOC_GETFLAGS / FS_IOC_SETFLAGS of an efivars file: its
+        // immutable flag, as efivarfs keeps it)
+        16 if matches!(cx.args[1], 0x8008_6601 | 0x4008_6602) && OPENS.lock().get(&slot).is_some_and(|o| o.file == File::Efivar) => efivar_flags(cx, slot),
         16 => ENOTTY,
         LX_KCALL_REOPEN => ENXIO,
         _ => EINVAL,
@@ -422,6 +427,9 @@ fn efivar_write(cx: &Cx, slot: u32) -> i64 {
         Err(e) => return e,
     };
     let name = efivar_name(&tail);
+    if let Err(e) = efivar_may_change(name, Some(&data[4..])) {
+        return e;
+    }
     match hydra_rt::sys::lx_obj(LX_INFO_EFIVAR_SET, name.as_ptr() as u64, name.len() as u64 | (data.len() as u64) << 32, data.as_ptr() as u64) {
         Ok(_) => data.len() as i64,
         Err(e) => e,
@@ -434,8 +442,78 @@ fn efivar_unlink(cx: &Cx, tail: &[u8]) -> i64 {
         return EACCES;
     }
     let name = efivar_name(tail);
+    if let Err(e) = efivar_may_change(name, None) {
+        return e;
+    }
     hydra_rt::sys::lx_obj(LX_INFO_EFIVAR_SET, name.as_ptr() as u64, name.len() as u64, 0).err().unwrap_or(0)
 }
+
+// review 7 begin: Linux efivarfs's rules
+/// Immutable flags set or cleared with `FS_IOC_SETFLAGS`, by variable file name (the others
+/// have efivarfs's default: immutable unless removable).
+static IMMUTABLE: YLock<BTreeMap<Vec<u8>, bool>> = YLock::new(BTreeMap::new());
+/// `FS_IMMUTABLE_FL`.
+const FS_IMMUTABLE_FL: u32 = 0x10;
+/// `CAP_LINUX_IMMUTABLE`.
+const CAP_LINUX_IMMUTABLE: u64 = 1 << 9;
+
+/// Whether variable file `name` is immutable now.
+fn immutable(name: &[u8]) -> bool {
+    if let Some(&v) = IMMUTABLE.lock().get(name) {
+        return v;
+    }
+    match core::str::from_utf8(name).ok().and_then(sys::split_name) {
+        Some((n, g)) => !sys::removable(n, g),
+        None => true,
+    }
+}
+
+/// Whether the firmware is in setup mode (Secure Boot keys may be changed).
+fn setup_mode() -> bool {
+    let name = alloc::format!("SetupMode-{}", sys::GLOBAL_GUID);
+    let mut v = [0u8; 16];
+    matches!(hydra_rt::sys::lx_obj(LX_INFO_EFIVAR, name.as_ptr() as u64, name.len() as u64 | 16 << 32, v.as_mut_ptr() as u64), Ok(5..=16)) && v[4] == 1
+}
+
+/// Whether variable file `name` may be written with `data` (the value after the attributes)
+/// or deleted (`None`): not immutable, a Secure Boot key only in setup mode, a valid value.
+fn efivar_may_change(name: &[u8], data: Option<&[u8]>) -> Result<(), i64> {
+    let file = core::str::from_utf8(name).map_err(|_| EINVAL)?;
+    let (n, g) = sys::split_name(file).ok_or(EINVAL)?;
+    if immutable(name) {
+        return Err(EPERM);
+    }
+    if sys::secure_boot_key(n) && !setup_mode() {
+        return Err(EPERM);
+    }
+    match data {
+        Some(d) if !sys::validate(n, g, d) => Err(EINVAL),
+        _ => Ok(()),
+    }
+}
+
+/// `FS_IOC_GETFLAGS` / `FS_IOC_SETFLAGS` of efivars file `slot` (changing the flag needs
+/// `CAP_LINUX_IMMUTABLE`).
+fn efivar_flags(cx: &Cx, slot: u32) -> i64 {
+    let Some(tail) = OPENS.lock().get(&slot).map(|o| o.tail.clone()) else { return EBADF };
+    let name = efivar_name(&tail).to_vec();
+    if cx.args[1] == 0x8008_6601 {
+        let f = if immutable(&name) { FS_IMMUTABLE_FL } else { 0 };
+        return cx.copy_out(cx.args[2], &f.to_le_bytes()).err().unwrap_or(0);
+    }
+    let new = match cx.copy_in(cx.args[2], 4) {
+        Ok(b) => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & FS_IMMUTABLE_FL != 0,
+        Err(e) => return e,
+    };
+    if new != immutable(&name) {
+        if cx.c.caps & CAP_LINUX_IMMUTABLE == 0 {
+            return EPERM;
+        }
+        IMMUTABLE.lock().insert(name, new);
+    }
+    0
+}
+// review 7 end
 // wave11 GF end
 
 /// The last descriptor of pseudo file `slot` went away.

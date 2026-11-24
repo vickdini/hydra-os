@@ -61,6 +61,8 @@ const O_CLOEXEC: u64 = 0o2000000;
 
 /// Every terminal.
 static TTYS: YLock<Ttys> = YLock::new(Ttys::new());
+/// wave11 GF (review 4): [`open`]'s device bit for `ptmx` of a sandbox's own devpts.
+const NEWINST_DEV: u64 = 1 << 40;
 
 /// The object area (readiness words) and whether a watched word changed since the doorbell.
 static AREA: AtomicU64 = AtomicU64::new(0);
@@ -310,6 +312,9 @@ fn pts_call(cx: &Cx) -> Answer {
     let Ok(p) = cx.user_cstr(path_ptr) else { return kernel() };
     let Some(tail) = p.get(cx.c.redir_tail as usize..) else { return kernel() };
     // (review 3: a walk that started in /dev/pts: the rest is below `pts`)
+    // (wave11 GF, review 4: a sandbox's own devpts — a newinstance mount — sees only the
+    // terminals made through it, the system's `/dev/pts` none of those)
+    let inst = cx.c.redir_obj & devpts::PTS_NEWINST != 0;
     let target = if cx.c.redir_obj & devpts::PTS_BELOW != 0 {
         let mut t = b"pts/".to_vec();
         t.extend_from_slice(tail);
@@ -347,7 +352,7 @@ fn pts_call(cx: &Cx) -> Answer {
                     if cx.c.euid != 0 {
                         return (EACCES, 0);
                     }
-                    (open(cx, (5 << 8) | 2, flags, &caller(cx, true)), 0)
+                    (open(cx, (5 << 8) | 2 | if inst { NEWINST_DEV } else { 0 }, flags, &caller(cx, true)), 0)
                 }
                 21 | 269 | 439 => (if cx.c.euid == 0 { 0 } else { EACCES }, 0),
                 89 | 267 => (-22, 0),
@@ -355,6 +360,7 @@ fn pts_call(cx: &Cx) -> Answer {
                 _ => (EPERM, 0),
             };
         }
+        Pts::Node(i) if TTYS.lock().inst_of(i) != Some(inst) => return (ENOENT, 0),
         Pts::Node(i) => match TTYS.lock().stat(i) {
             Some(n) => Some((i, n)),
             // (review 5: devpts makes no names: O_CREAT of a missing one is EPERM)
@@ -600,7 +606,7 @@ fn kcall(cx: &Cx) -> Answer {
         // wave11 GF: `getdents64` of a `/dev/pts` directory handle (the kernel's, for the
         // program): the entries from index a[3] into its buffer
         LX_TTY_K_LIST => {
-            let live = TTYS.lock().live_indexes();
+            let live = TTYS.lock().live_indexes(false);
             let all = devpts::entries(&live);
             let (out, next) = devpts::dirents64(&all, a[3] as usize, (a[2] as usize).min(1 << 16));
             if out.is_empty() && next < all.len() {
@@ -629,13 +635,16 @@ fn pack_stat(mode: u32, uid: u32, gid: u32) -> i64 {
 
 /// `LX_TTY_K_OPEN` of device `rdev` with open flags `flags`.
 fn open(cx: &Cx, rdev: u64, flags: u64, who: &Caller) -> i64 {
+    // (wave11 GF, review 4: `/dev/ptmx` of a sandbox's own devpts)
+    let inst = rdev & NEWINST_DEV != 0;
+    let rdev = rdev & !NEWINST_DEV;
     let (major, minor) = ((rdev >> 8) & 0xFFF, (rdev & 0xFF) | ((rdev >> 12) & 0xFFF00));
     let slot = match svcrt::objs::alloc() {
         Ok(s) => s,
         Err(e) => return e,
     };
     match (major, minor) {
-        (5, 2) => match with(|t, g| t.open_master(slot, cx.c.euid, g)) {
+        (5, 2) => match with(|t, g| t.open_master(slot, cx.c.euid, g).map(|i| t.set_inst(i, inst))) {
             Ok(_) => install(cx, slot, LX_OBJ_KIND_PTY_M, flags, (0o020666, 0, 0), b"/dev/ptmx", 2, rdev),
             Err(e) => {
                 svcrt::objs::free(slot);

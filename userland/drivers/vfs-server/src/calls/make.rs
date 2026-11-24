@@ -37,6 +37,8 @@ const EACCES: i64 = -13;
 /// What only the kernel has for a change (as `change.rs`).
 const NEED: u32 = LX_FS_INOTIFY | LX_FS_FANOTIFY;
 const AT_SYMLINK_FOLLOW: u64 = 0x400;
+/// `CAP_MKNOD` (wave11 GF, review 6).
+const CAP_MKNOD: u32 = 27;
 
 /// The mark of an `O_TMPFILE` object without a name that may get one (not `O_EXCL`): an
 /// extended attribute on the object itself, so it survives a vfs-server restart, goes with
@@ -89,12 +91,18 @@ pub fn mknod(cx: &Cx) -> Result<i64, i64> {
     }
     // wave11 GF: in a FUSE mount: the daemon's MKNOD (the umask applied here)
     if ctxt::is_fuse(p.dir) {
+        // (review 6: the types Linux's `may_mknod` takes, CAP_MKNOD for devices, the number
+        // as the kernel's `new_encode_dev`)
+        let ftype = crate::fuse::wire::mknod_type(ftype)?;
+        if devnode && !who.cap(CAP_MKNOD) {
+            return Err(EPERM);
+        }
         if let Some(d) = policy::domain(c)? {
             policy::check_dir(&d, p.dir, ll::make_right(ftype))?;
         }
-        let ftype = if ftype == 0 { rules::S_IFREG } else { ftype };
         let perm = mode & 0o7777 & !(c.umask as u32);
-        return super::change::fuse_names(c, p.dir, crate::fuse::Req::Mknod { name: p.name, mode: ftype | perm, rdev: dev });
+        let rdev = if devnode { crate::fuse::wire::new_encode_dev(dev) } else { 0 };
+        return super::change::fuse_names(c, p.dir, crate::fuse::Req::Mknod { name: p.name, mode: ftype | perm, rdev });
     }
     let (perm, plan) = super::xattr::new_mode(p.dir, &p.dir_attr, mode & 0o7777, c.umask as u32, false)?;
     let mode = ftype | perm;

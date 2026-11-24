@@ -159,7 +159,7 @@ fn statfs_of(cx: &Cx, n: crate::ctx::Node, out: u64) -> Result<i64, i64> {
     // (a FUSE file system: the daemon's figures; wave10 GV2: asked here, the call waits for
     // the daemon and runs again, `fuse::be_statfs`)
     if crate::fuse::wire::split(n.ino).is_some() {
-        let r = crate::fuse::be_statfs(n, c.euid)?;
+        let r = crate::fuse::be_statfs(n, crate::fuse::caller_ids(c))?;
         cx.copy_out(out, &crate::fuse::statfs_bytes(n.ino, &r))?;
         return Ok(0);
     }

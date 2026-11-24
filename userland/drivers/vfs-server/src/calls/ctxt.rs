@@ -38,7 +38,7 @@ pub struct Walker {
     /// The call may wait for a FUSE daemon (and run again from its reply).
     pub fuse: bool,
     /// The caller's effective user (FUSE mounts without `allow_other` are their owner's).
-    pub euid: u32,
+    pub euid: u64,
     // wave9 G6b-2 end
     /// wave9 G6b-3: the caller is landlocked (its walks leave parent hints).
     pub ll: bool,
@@ -115,7 +115,7 @@ impl Backend for Walker {
 /// The walker of call `c`: the copy of its caller's mount table at least as new as the
 /// call (`LxCall::mnt_gen`).
 pub fn walker(c: &LxCall) -> Result<Walker, i64> {
-    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)?, fuse: crate::fuse::rerunnable(c.nr) && !(c.ll_dom != 0 && matches!(c.nr, 2 | 257)), euid: c.euid, ll: c.ll_dom != 0, req: c.id, nr: c.nr })
+    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)?, fuse: crate::fuse::rerunnable(c.nr) && !(c.ll_dom != 0 && matches!(c.nr, 2 | 257)), euid: crate::fuse::caller_ids(c), ll: c.ll_dom != 0, req: c.id, nr: c.nr })
 }
 
 /// The caller's root in table `v`: inode `c.root` (0: the pool's root, or in another
@@ -234,7 +234,7 @@ pub fn attr_of(c: &LxCall, n: Node) -> Result<Attr, i64> {
         if !crate::fuse::rerunnable(c.nr) {
             return Err(KERNEL);
         }
-        return crate::fuse::be_getattr(n, c.euid);
+        return crate::fuse::be_getattr(n, crate::fuse::caller_ids(c));
     }
     BE.getattr(n)
 }

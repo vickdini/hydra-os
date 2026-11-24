@@ -42,6 +42,7 @@ pub mod calls {
     // wave11 GF: the "below `pts`" bit of the devpts redirect (`calls/served.rs`)
     pub mod served {
         pub const PTS_BELOW: u64 = 0x100;
+        pub const PTS_NEWINST: u64 = 0x200;
     }
 }
 

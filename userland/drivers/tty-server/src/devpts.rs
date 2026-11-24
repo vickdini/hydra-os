@@ -12,6 +12,9 @@
 
 /// vfs-server's redirect object bit: the tail starts below `pts` (`calls/served.rs`).
 pub const PTS_BELOW: u64 = 0x100;
+/// wave11 GF (review 4): the redirect's mount is a devpts of its own (a newinstance mount in a
+/// sandbox's table), not the system's.
+pub const PTS_NEWINST: u64 = 0x200;
 
 /// `st_dev` of devpts (the kernel's `pty::PTS_DEV`).
 pub const PTS_DEV: u64 = 0x18;

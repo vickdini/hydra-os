@@ -109,6 +109,10 @@ pub fn serve(cx: &Cx) -> Result<i64, i64> {
     }
     // wave11 GF begin: a FUSE file: the daemon's GETXATTR, SETXATTR, REMOVEXATTR
     if fuse {
+        // (review 9: an ACL is changed by the owner or with CAP_FOWNER, as the pool's)
+        if write && matches!(ns, XattrNs::Acl(_)) && who.uid != attr.uid && !who.cap(CAP_FOWNER) {
+            return Err(EPERM);
+        }
         let zero = crate::fuse::Then { how: crate::fuse::How::Zero, tell: None };
         return match kind {
             1 => crate::fuse::start(c, n.ino, crate::fuse::Req::Getxattr { name }, crate::fuse::Then { how: crate::fuse::How::Bytes { ptr: a[2], size: a[3], list: None }, tell: None }),

@@ -454,6 +454,9 @@ fn change_once(cx: &Cx) -> Result<i64, i64> {
         return ns_fuse_mount(cx, &mut t, &who, fs.as_deref().unwrap_or("fuse"));
     }
     let mut env = SysEnv { made: None };
+    // (wave11 GF: the FUSE connections mounted in this table before the change: one with no
+    // mount left after an umount2 ends, as Linux ends it with its last mount)
+    let fuse_before: alloc::vec::Vec<u16> = t.slots.iter().flatten().filter_map(|m| crate::fuse::wire::split(m.root).map(|s| s.0)).collect();
     let r = match cx.nr {
         165 => {
             let flags = a[3];
@@ -494,6 +497,14 @@ fn change_once(cx: &Cx) -> Result<i64, i64> {
         env.undo();
         return Err(e);
     }
+    if cx.nr == 166 {
+        for conn in fuse_before {
+            if !t.slots.iter().flatten().any(|m| crate::fuse::wire::split(m.root).is_some_and(|s| s.0 == conn)) {
+                crate::fuse::abort_conn(conn);
+                hydra_rt::println!("[vfs-server] FUSE connection {} unmounted (namespace {})", conn, c.mnt_ns);
+            }
+        }
+    }
     if let Some((old, new, mnt)) = done.pivot {
         let w: [u64; 4] = [old, 0, new, mnt as u64];
         let _ = sys::lx_obj(LX_FH_REROOT, c.mnt_ns as u64, w.as_ptr() as u64, 0);
@@ -531,7 +542,9 @@ fn ns_fuse_mount(cx: &Cx, t: &mut MntTable, who: &Ctx, fstype: &str) -> Result<i
         tmpfs: 0,
         mountpoint: target.ino,
         root: crate::fuse::wire::ino(conn, 1),
-        flags: a[3] & ktab::PER_MOUNT,
+        // (review 10: a mount made in a user namespace of the caller's own is nosuid,nodev, as
+        // Linux forces for such mounts)
+        flags: a[3] & ktab::PER_MOUNT | if c.user_ns != 0 { ktab::MS_NOSUID | ktab::MS_NODEV } else { 0 },
         propagation: 0,
         fstype: String::from(fstype),
         source,

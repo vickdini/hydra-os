@@ -152,7 +152,9 @@ impl Mounts for View {
             // wave11 GF: proc and devpts mounted elsewhere (bubblewrap's `/oldroot/proc`,
             // `/newroot/dev/pts`): their services, with the rest below the mount
             crate::proto::LX_MNT_PROC => MountKind::Redirect { svc: crate::proto::LXS_PROC, obj: crate::proto::LX_VFS_PSEUDO_PROC },
-            crate::proto::LX_MNT_DEVPTS => MountKind::Redirect { svc: crate::proto::LXS_TTY, obj: crate::proto::LX_VFS_PSEUDO_DEVPTS | crate::calls::served::PTS_BELOW },
+            // (review 4: a devpts of its own — root 0, a sandbox's newinstance mount — sees only
+            // the terminals made through it)
+            crate::proto::LX_MNT_DEVPTS => MountKind::Redirect { svc: crate::proto::LXS_TTY, obj: crate::proto::LX_VFS_PSEUDO_DEVPTS | crate::calls::served::PTS_BELOW | if r.root == 0 { crate::calls::served::PTS_NEWINST } else { 0 } },
             _ => MountKind::Zfs,
         };
         // A mount with nothing below it (a namespace's root): its mount point is itself,

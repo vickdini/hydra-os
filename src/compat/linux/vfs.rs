@@ -1782,9 +1782,13 @@ fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
     };
     // wave11 GF: a `/dev/pts` directory: tty-server lists its slaves (the pool's directory is
     // empty); the offset is the entry index
+    // (review 11: the caller's root's own `/dev/pts` object, not any directory of that name)
     let pts = {
         let f = file.lock();
-        f.is_dir && f.path.trim_end_matches('/') == "/dev/pts"
+        f.is_dir && f.mnt == 0 && f.path.trim_end_matches('/') == "/dev/pts"
+    } && {
+        let r = proc_root();
+        ZfsClient::resolve_in(r, r, b"/dev/pts", true).is_ok_and(|i| i == ino)
     };
     if pts {
         return match crate::lx::console::pts_list(buf, count as u64, cookie) {
