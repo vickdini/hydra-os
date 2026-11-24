@@ -141,3 +141,13 @@ fn the_efivars_directory_is_found_from_the_root() {
     let cx2 = Ctx::new(0, 0, 0, Node::new(0, other));
     assert!(!served::is_efivars_dir(&fs, &cx2, Node::new(0, vars)));
 }
+
+#[test]
+fn an_open_of_dev_pts_itself_is_the_pools_directory() {
+    use hydra_hosttests_w11_f::calls::served::Tree;
+    use hydra_hosttests_w11_f::proto::{LXS_TTY, LX_VFS_PSEUDO_DEVPTS};
+    // (the directory a program lists and walks from; its slaves are tty-server's)
+    assert_eq!(served::served(Tree::Dev, b"pts", &[], true), None);
+    assert_eq!(served::served(Tree::Dev, b"pts", &[], false), Some((LXS_TTY, LX_VFS_PSEUDO_DEVPTS)));
+    assert_eq!(served::served(Tree::Dev, b"pts", &[b"3"], true), Some((LXS_TTY, LX_VFS_PSEUDO_DEVPTS)));
+}

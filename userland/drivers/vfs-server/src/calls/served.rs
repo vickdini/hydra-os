@@ -98,6 +98,9 @@ pub fn served(tree: Tree, name: &[u8], rest: &[&[u8]], open: bool) -> Option<(Sv
         (Tree::Sys, b"devices", [b"system", b"cpu", b"online" | b"possible" | b"present"]) => Some((LXS_LINUX, LX_VFS_PSEUDO_SYS)),
         (Tree::Sys, b"firmware", [b"efi", b"efivars", n]) if open && !n.is_empty() => Some((LXS_LINUX, LX_VFS_PSEUDO_SYS)),
         (Tree::Sys, b"fs", [b"cgroup", .., last]) if *last == b"cgroup.procs" => Some((0, 0)),
+        // (wave11 GF: an open of the directory itself is the pool's `/dev/pts`: a handle that
+        // `*at` calls start from and that the kernel lists through tty-server)
+        (Tree::Dev, b"pts", []) if open => None,
         (Tree::Dev, b"pts", _) => Some((LXS_TTY, LX_VFS_PSEUDO_DEVPTS)),
         _ => None,
     }

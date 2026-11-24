@@ -53,7 +53,8 @@ static void pts(void) {
     while (d && readdir(d)) k2++;
     check(d && k == n && k2 == k, "rewinddir lists it again");
     struct stat st;
-    check(d && fstat(dirfd(d), &st) == 0 && S_ISDIR(st.st_mode) && st.st_ino == 1, "fstat of the directory: devpts' root");
+    check(d && fstat(dirfd(d), &st) == 0 && S_ISDIR(st.st_mode), "fstat of the directory");
+    check(d && fstatat(dirfd(d), na, &st, 0) == 0 && S_ISCHR(st.st_mode), "fstatat of a slave relative to it");
     char buf[8];
     check(d && read(dirfd(d), buf, sizeof buf) < 0 && errno == EISDIR, "read of the directory: EISDIR");
     if (d) closedir(d);

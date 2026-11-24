@@ -3184,4 +3184,8 @@ pub const LX_MNT_DEVPTS: u32 = 6;
 /// deletes it. The pool's efivars files are written again afterwards. The caller decided
 /// the permission (`CAP_SYS_ADMIN`).
 pub const LX_INFO_EFIVAR_SET: u64 = 83;
+/// `LX_KCALL_TTY` op `(op, buf, count, from)`: `getdents64` of a `/dev/pts` directory handle:
+/// `.`, `..`, `ptmx` and the live slaves from entry index `from` into the caller's `buf` (at
+/// most `count` bytes); answers the length `| next index << 32` (`-EINVAL`: no room for one).
+pub const LX_TTY_K_LIST: u64 = 8;
 // wave11 GF end

@@ -61,8 +61,6 @@ const O_CLOEXEC: u64 = 0o2000000;
 
 /// Every terminal.
 static TTYS: YLock<Ttys> = YLock::new(Ttys::new());
-/// wave11 GF: the open `/dev/pts` directory objects: slot -> the next entry's index.
-static PTS_DIRS: YLock<alloc::collections::BTreeMap<u32, usize>> = YLock::new(alloc::collections::BTreeMap::new());
 
 /// The object area (readiness words) and whether a watched word changed since the doorbell.
 static AREA: AtomicU64 = AtomicU64::new(0);
@@ -277,8 +275,6 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
     let r = match c.nr {
         // wave10 GV2: a path call vfs-server redirected here (`/dev/pts`)
         _ if c.redirs > 0 && c.redir_obj & 0xFF == LX_VFS_PSEUDO_DEVPTS => pts_call(&cx),
-        // wave11 GF: a `/dev/pts` directory object
-        _ if c.obj != LX_OBJ_NONE && PTS_DIRS.lock().contains_key(&(c.obj as u32)) => pts_dir_call(&cx),
         LX_KCALL_TTY => kcall(&cx),
         0 | 19 if c.obj != LX_OBJ_NONE => obj_read(&cx),
         1 | 20 if c.obj != LX_OBJ_NONE => obj_write(&cx),
@@ -396,11 +392,9 @@ fn pts_call(cx: &Cx) -> Answer {
         2 | 257 => {
             let flags = if cx.nr == 2 { a[1] } else { a[2] };
             match node {
-                // (an O_PATH handle: the kernel's; wave11 GF: a directory to list is an object
-                // of this service's, `pts_dir_call`)
-                None if flags & O_PATH != 0 => return kernel(),
-                None if flags & 3 != 0 || flags & 0o20000000 != 0 => -21, // EISDIR
-                None => pts_dir_open(cx, flags),
+                // (a directory handle to list, an O_PATH handle: the kernel's; wave11 GF:
+                // vfs-server opens the directory itself, `LX_TTY_K_LIST` lists it)
+                None => return kernel(),
                 Some(_) if flags & O_PATH != 0 => return kernel(),
                 Some(_) if flags & O_DIRECTORY != 0 => ENOTDIR,
                 // (review 5: O_CREAT|O_EXCL of an existing slave)
@@ -426,73 +420,6 @@ fn pts_call(cx: &Cx) -> Answer {
     (r, 0)
 }
 // wave10 GV2 end
-
-// wave11 GF begin: `/dev/pts` listed
-/// `open("/dev/pts", O_RDONLY [| O_DIRECTORY])`: a directory object of this service's (kind
-/// `LX_OBJ_KIND_PSEUDO`, mode 040755, devpts' device and inode 1), listed by `getdents64`.
-fn pts_dir_open(cx: &Cx, flags: u64) -> i64 {
-    let slot = match svcrt::objs::alloc() {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    PTS_DIRS.lock().insert(slot, 0);
-    let fd = install(cx, slot, LX_OBJ_KIND_PSEUDO, flags, (0o040755, 0, 0), b"/dev/pts", 1, devpts::PTS_DEV);
-    if fd < 0 {
-        PTS_DIRS.lock().remove(&slot);
-    }
-    fd
-}
-
-/// A call on a `/dev/pts` directory object: `getdents64` (the slaves now), the kernel's
-/// `lseek` (by entry index) and `pread64`; reads are `EISDIR`.
-fn pts_dir_call(cx: &Cx) -> Answer {
-    const EISDIR: i64 = -21;
-    let slot = cx.c.obj as u32;
-    let r = match cx.nr {
-        217 => {
-            let live = TTYS.lock().live_indexes();
-            let all = devpts::entries(&live);
-            let from = PTS_DIRS.lock().get(&slot).copied().unwrap_or(0);
-            let count = (cx.args[2] as usize).min(1 << 16);
-            let (out, next) = devpts::dirents64(&all, from, count);
-            if out.is_empty() && next < all.len() {
-                EINVAL
-            } else if out.is_empty() {
-                0
-            } else {
-                match cx.copy_out(cx.args[1], &out) {
-                    Ok(()) => {
-                        PTS_DIRS.lock().insert(slot, next);
-                        out.len() as i64
-                    }
-                    Err(e) => e,
-                }
-            }
-        }
-        LX_KCALL_PSEEK => {
-            let (off, whence) = (cx.args[3] as i64, cx.args[4]);
-            let mut g = PTS_DIRS.lock();
-            let cur = g.get(&slot).copied().unwrap_or(0) as i64;
-            let new = match whence {
-                0 => off,
-                1 => cur.saturating_add(off),
-                _ => -1,
-            };
-            if new < 0 {
-                EINVAL
-            } else {
-                g.insert(slot, new as usize);
-                new
-            }
-        }
-        0 | 19 | LX_KCALL_PREAD => EISDIR,
-        1 | 20 => -9, // EBADF
-        16 => -25,    // ENOTTY
-        _ => EINVAL,
-    };
-    (r, 0)
-}
-// wave11 GF end
 
 /// An [`Ans`] as the worker's answer.
 fn answer(a: Ans) -> Answer {
@@ -670,6 +597,23 @@ fn kcall(cx: &Cx) -> Answer {
             let opt = |v: u64| if v == u64::MAX { None } else { Some(v as u32) };
             (TTYS.lock().setattr(a[1] as u32, cx.c.euid, opt(a[2]), opt(a[3]), opt(a[4]), &|g| cx.in_group(g)), 0)
         }
+        // wave11 GF: `getdents64` of a `/dev/pts` directory handle (the kernel's, for the
+        // program): the entries from index a[3] into its buffer
+        LX_TTY_K_LIST => {
+            let live = TTYS.lock().live_indexes();
+            let all = devpts::entries(&live);
+            let (out, next) = devpts::dirents64(&all, a[3] as usize, (a[2] as usize).min(1 << 16));
+            if out.is_empty() && next < all.len() {
+                (EINVAL, 0)
+            } else if out.is_empty() {
+                ((next as i64) << 32, 0)
+            } else {
+                match cx.copy_out(a[1], &out) {
+                    Ok(()) => (out.len() as i64 | (next as i64) << 32, 0),
+                    Err(e) => (e, 0),
+                }
+            }
+        }
         LX_TTY_K_HANGUP => match with(|t, g| t.hangup(a[1], g)) {
             Some((fg, leader)) => (((fg & 0xFFFF_FFFF) | leader << 32) as i64, 0),
             None => (ttys::ESRCH, 0),
@@ -739,11 +683,6 @@ fn open(cx: &Cx, rdev: u64, flags: u64, who: &Caller) -> i64 {
 /// A notification from the kernel.
 fn on_note(kind: u64, a: u64, b: u64, _c: u64) {
     match kind {
-        // wave11 GF: a `/dev/pts` directory object closed
-        LX_NOTE_CLOSE if b == LX_OBJ_KIND_PSEUDO as u64 && PTS_DIRS.lock().remove(&(a as u32)).is_some() => {
-            set_ready(a as u32, 0, false);
-            svcrt::objs::free(a as u32);
-        }
         LX_NOTE_CLOSE if b == LX_OBJ_KIND_PTY_M as u64 || b == LX_OBJ_KIND_PTY_S as u64 => {
             with(|t, g| t.closed(a as u32, g));
             set_ready(a as u32, 0, false);

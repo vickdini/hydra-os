@@ -380,6 +380,17 @@ mod kernel {
         }
     }
 
+    /// wave11 GF: `getdents64` of a `/dev/pts` directory from entry `from` into the caller's
+    /// `buf` (`count` bytes): `(length, next entry)`.
+    pub fn pts_list(buf: u64, count: u64, from: u64) -> Result<(usize, u64), i64> {
+        let r = kcall([LX_TTY_K_LIST, buf, count, from, 0, 0], 0);
+        if r < 0 {
+            Err(r)
+        } else {
+            Ok(((r as u64 & 0xFFFF_FFFF) as usize, r as u64 >> 32))
+        }
+    }
+
     /// `chmod`/`chown` of `/dev/pts/index` by the caller.
     pub fn pty_setattr(index: u64, mode: Option<u32>, uid: Option<u32>, gid: Option<u32>) -> i64 {
         let w = |v: Option<u32>| v.map_or(u64::MAX, |v| v as u64);
