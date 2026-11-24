@@ -63,7 +63,7 @@ Groups by the high nibble. `R` marks report operations.
 | **0x4_ services** | | | |
 | 0x40 | `ADMIN_SERVICE_LIST` | | `ServiceRecord`s |
 | 0x41 | `ADMIN_IRQ_LIST` | | `IrqRecord`s |
-| 0x42 | `ADMIN_SERVICE_CTL` | `SVCCTL_*` (restart, kill, start, tick); name | pid `u64` |
+| 0x42 | `ADMIN_SERVICE_CTL` | `SVCCTL_*` (restart, kill, start, tick); name; wave 11: args[1] = seconds for a delayed kill (`service kill NAME after S`, done by a kernel task; answers 0) | pid `u64` |
 | 0x43 | `ADMIN_IOMMU` R | status, faults, rogue-DMA test | |
 | **0x5_ storage** (wrappers over the ZFS file server) | | | |
 | 0x50 | `ADMIN_POOL_STATUS` | | `PoolStatus` |

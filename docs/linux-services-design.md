@@ -478,6 +478,7 @@ Not in these tables: the forwarding cost itself (Group 16's section 9, Group 15'
 - If a service dies again within 30 s of a restart, its kept state is suspect: the supervisor resets it (drops the kept object) and the service drops one class. Transparent becomes FailObjects; FailObjects stays.
 - A third crash within 30 s stops restarting it (the supervisor's limit), and its calls fail with `EIO`.
 - EndLinux is never reached by the ladder alone. A crash loop costs that service's objects, not every program.
+- **Wave 11 (Group R): objects that outlive the ladder step.** A service that can take back objects it has no kept records for (`restart::takes_back_unkept`: today vfs-server) keeps its objects through the step from Transparent to FailObjects (`restart_policy::objects_outlive`): calls in flight still fail with `EIO` and the kept state is still reset, but the new instance adopts the old objects and rebuilds what it can (an inotify instance comes back empty, with an overflow event) or fails the rest itself (`LX_SVC_DEAD`: FUSE connections, fanotify groups). Before, every inotify descriptor went stale at that step (`read`/`FIONREAD`: `ENODEV`) and programs that read them crashed (Firefox's MOZ_CRASH, SIGSEGV at 0x0 in libxul).
 
 ### 5.3 Effort and tests
 
