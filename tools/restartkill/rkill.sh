@@ -20,8 +20,8 @@ C=( "cp /bin/ptperm.elf /ubuntu/tmp/ptperm.elf" "~2" "cp /bin/lxsec.elf /ubuntu/
     "service kill lx_sec" "~5" "service kill lx_sec" "~6"
     "linux chroot /ubuntu /usr/bin/bash -c 'cd /tmp; echo hydra | sudo -S ./lxsec devcheck'" "~6"
     "service kill tty_server after 8" "~1" "service kill tty_server after 40" "~1"
-    "linux chroot /ubuntu /usr/bin/bash -c 'n=0; while read l; do n=\$((n+1)); echo GOT \$l; done; echo READ\"\"END rc=\$? n=\$n'"
-    "~14" "@one" "%ret" "~4" "@two" "%ret" "~34" "@three" "%ret" "~3" "%ctrl-d" "~4"
+    "linux chroot /ubuntu /usr/bin/bash -c 'n=0; while read l; do [ \"\$l\" = end ] && break; [ -n \"\$l\" ] && n=\$((n+1)) && echo GOT \$l; done; echo READ\"\"END rc=\$? n=\$n'"
+    "~14" "@one" "~4" "@two" "~34" "@three" "~3" "@end" "~4"
     "linux chroot /ubuntu /usr/bin/bash -c 'cd /tmp; ok=0; for i in 1 2 3 4 5; do echo hydra | sudo -S timeout 60 ./p bench 50 >/dev/null 2>&1 && ok=\$((ok+1)); done; echo PTBENCH \$ok/5; echo RK\"\"DONE'" )
 timeout 1500 chroot $R /usr/local/bin/vmslot /bin/bash -c "rm -f /root/pool/$T-rkill-$NAME.qcow2 && qemu-img create -q -f qcow2 -F qcow2 -b /root/pool/hydrapool.qcow2 /root/pool/$T-rkill-$NAME.qcow2 && cd /tmp/rkill-$T/tree && HYDRA_ISO=/tmp/rkill-$T/kernel-$NAME.iso timeout 1400 python3 tools/hydra_run.py --accel kvm --smp 2 --shared-host --disk /root/pool/$T-rkill-$NAME.qcow2 --log /tmp/rkill-$T/$NAME.log --boot-wait 240 --wait 900 --until 'RKDONE|CPU EXCEPTION|KERNEL PANIC' $(printf '%q ' "${C[@]}") > /tmp/rkill-$T/$NAME.harness.txt 2>&1; rm -f /root/pool/$T-rkill-$NAME.qcow2"
 rm -f $D/kernel-$NAME.iso
