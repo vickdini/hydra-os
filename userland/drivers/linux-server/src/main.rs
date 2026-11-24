@@ -29,90 +29,39 @@
 
 extern crate alloc;
 
-// wave6 G24: keys and bpf live in lx-sec (their own service); linux-server builds the same
-// files and serves them when `lx.sec=linux` co-locates them back here (no kept state here)
-#[path = "../../lx-sec/src/bpf.rs"]
-mod bpf;
+// (client, fdio, obj, timeout: shared with lx-net and lx-ipc, which use more of them)
+#[allow(unused_imports)]
 mod client;
 mod exec; // wave7 G7-5
 mod execplan; // wave7 G7-5
-mod fdio;
-#[path = "../../lx-sec/src/kept.rs"]
 #[allow(dead_code)]
-mod kept;
-#[path = "../../lx-sec/src/keys.rs"]
-mod keys;
+mod fdio;
 mod lock;
+// wave6 G20: linux-server's client of net-server, for the direct-call probe
+// (`LX_NULL_SVC_RTT`). (wave10 G10-C: the network, IPC, keys and bpf pieces are lx-net's,
+// lx-ipc's and lx-sec's alone: no switch back co-locates them here any more)
+#[path = "../../lx-net/src/netc.rs"]
+#[allow(dead_code)]
+mod netc;
 mod notes;
+#[allow(dead_code)]
 mod obj;
-// wave7 G7-4 begin: /proc and /sys (the pseudo file systems), on the kernel's protocol
+// wave7 G7-4 begin: /sys (the pseudo file system), on the kernel's protocol
 mod pseudo;
 pub(crate) use hydra_rt::protocol as proto;
 // wave7 G7-4 end
+#[allow(dead_code)]
 mod timeout;
-// wave8 GX2 begin: the network and IPC pieces live in lx-net and lx-ipc (their own
-// services); linux-server builds the same files and serves them when `lx.net=linux` /
-// `lx.ipc=linux` co-locate them back here (no kept state here)
-#[path = "../../lx-net/src/inet.rs"]
-#[allow(dead_code)] // (restart support: lx-net's alone)
-mod inet;
-#[path = "../../lx-net/src/netc.rs"]
-#[allow(dead_code)] // (restart support: lx-net's alone)
-mod netc;
-#[path = "../../lx-net/src/netlink.rs"]
-#[allow(dead_code)] // (restart support: lx-net's alone)
-mod netlink;
-#[path = "../../lx-net/src/netsvc.rs"]
-mod netsvc;
-#[path = "../../lx-net/src/socket.rs"]
-mod socket;
-#[path = "../../lx-net/src/sockkept.rs"]
-#[allow(dead_code)]
-mod sockkept;
-#[path = "../../lx-net/src/sockopt.rs"]
-#[allow(dead_code)] // (restart support: lx-net's alone)
-mod sockopt;
-#[path = "../../lx-ipc/src/eventfd.rs"]
-mod eventfd;
-#[path = "../../lx-ipc/src/ipcsvc.rs"]
-mod ipcsvc;
-#[path = "../../lx-ipc/src/mqueue.rs"]
-mod mqueue;
-#[path = "../../lx-ipc/src/pidfd.rs"]
-mod pidfd;
-#[path = "../../lx-ipc/src/pipe.rs"]
-mod pipe;
-#[path = "../../lx-ipc/src/signalfd.rs"]
-mod signalfd;
-#[path = "../../lx-ipc/src/sysv.rs"]
-mod sysv;
-#[path = "../../lx-ipc/src/timerfd.rs"]
-mod timerfd;
-#[path = "../../lx-ipc/src/unix.rs"]
-mod unix;
-// wave9 GX3 begin: lx-ipc's data arena and records (here: an anonymous arena, nothing kept)
-#[path = "../../lx-ipc/src/arena.rs"]
-#[allow(dead_code)]
-mod arena;
-#[path = "../../lx-ipc/src/kstore.rs"]
-#[allow(dead_code)]
-mod kstore;
-// wave9 GX3 end
 
 /// This program's name (log lines of the shared files).
 pub const NAME: &str = "linux-server";
 
 /// The close hook of `obj.rs` (wave 8): the last descriptor of an object of `kind` went.
 pub fn on_closed(slot: u32, kind: u32) {
-    match kind {
-        LX_OBJ_KIND_BPF_MAP | LX_OBJ_KIND_BPF_PROG | LX_OBJ_KIND_BPF_LINK | LX_OBJ_KIND_BPF_BTF => bpf::closed(slot),
-        LX_OBJ_KIND_PSEUDO => pseudo::closed(slot), // wave7 G7-4
-        _ => {
-            let _ = netsvc::closed(slot, kind) || ipcsvc::closed(slot, kind);
-        }
+    if kind == LX_OBJ_KIND_PSEUDO {
+        pseudo::closed(slot); // wave7 G7-4
     }
 }
-// wave8 GX2 end
 
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
@@ -120,7 +69,7 @@ use core::sync::atomic::Ordering;
 use hydra_rt::protocol::*;
 use hydra_rt::{println, svcrt, sys, Message, Server};
 
-use crate::client::{Caller, Cx};
+use crate::client::Cx;
 use crate::lock::YLock;
 
 hydra_rt::entry!(main);
@@ -146,8 +95,6 @@ fn main(args: &[&str]) {
     notes::init(svc.window().as_mut_ptr());
     pseudo::init(args); // wave7 G7-4
     obj::init(svc.area, ENDPOINT_LINUX_SERVER); // (wave 8: the doorbell's endpoint)
-    // What a previous linux-server left in net-server (its sockets) goes (wave 5)
-    netc::reset();
     if let Err(e) = svc.online() {
         println!("[linux-server] cannot go online: {}", e);
         sys::exit_group(1);
@@ -164,16 +111,11 @@ fn serve_endpoint(srv: &mut Server) -> ! {
             Some(d) => d.saturating_sub(now).clamp(1, 100),
             None => 100,
         };
-        let mut bits = 0;
         match sys::svc_recv_notify(srv.endpoint, timeout) {
-            Ok((0, m)) => bits = m.args[0],
+            Ok((0, _)) => {}
             Ok((id, req)) => {
                 let reply = match req.label as u32 {
                     MSG_SUPERVISOR_PING => Message::new(MSG_SUPERVISOR_PONG as u64, [req.args[0], 1, 0, 0]),
-                    MSG_LX_PROC_KEYS => proc_keys(srv, &req),
-                    MSG_LX_PROC_NET_UNIX => proc_net_unix(srv),
-                    MSG_LX_PROC_NET => proc_net(srv, &req),
-                    MSG_LX_UEVENT => uevent(srv, &req), // wave8 GH (lx.net=linux)
                     _ => Message::new(MSG_LX_REPLY as u64, [ENOSYS as u64, 0, 0, 0]),
                 };
                 let _ = sys::svc_reply(srv.endpoint, id, &reply);
@@ -181,11 +123,7 @@ fn serve_endpoint(srv: &mut Server) -> ! {
             Err(_) => {}
         }
         notes::drain_all();
-        // Sockets (wave 5): net-server's readiness relayed, blocked calls tried again
-        netsvc::main_work(bits); // wave8 GX2
         complete_due();
-        // Group 13: sockets alive only in unreadable queues, about once a second
-        ipcsvc::main_work(now); // wave8 GX2
         obj::flush();
     }
 }
@@ -193,66 +131,11 @@ fn serve_endpoint(srv: &mut Server) -> ! {
 /// Answers the blocked calls whose timeout passed and returns the earliest deadline still
 /// waiting (the main thread sleeps until then).
 pub fn next_deadline(now: u64) -> Option<u64> {
-    let null = if PENDING.lock().is_empty() { None } else { Some(now + 1) };
-    // wave8 GX2: the IPC and network pieces' deadlines (when co-located here)
-    [null, ipcsvc::tick(now), netsvc::tick(now)].into_iter().flatten().min()
-}
-
-/// `/proc/net/tcp`, `tcp6`, `udp`, `udp6` (see [`MSG_LX_PROC_NET`]).
-fn proc_net(srv: &mut Server, req: &Message) -> Message {
-    notes::drain_all();
-    let text = inet::proc_net(req.args[0], req.args[1] != 0);
-    let win = srv.window();
-    let len = text.len().min(LX_PROC_KEYS_TEXT_MAX);
-    win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len].copy_from_slice(&text.as_bytes()[..len]);
-    Message::new(MSG_LX_REPLY as u64, [len as u64, 0, 0, 0])
-}
-
-// wave8 GH begin
-/// Device announcements for the uevent sockets when they are co-located here (see
-/// [`MSG_LX_UEVENT`]).
-fn uevent(srv: &mut Server, req: &Message) -> Message {
-    let len = (req.args[0] as usize).min(LX_PROC_KEYS_TEXT_MAX);
-    let win = srv.window();
-    let n = netlink::uevent_batch(&win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len]);
-    obj::flush();
-    Message::new(MSG_LX_REPLY as u64, [n as u64, 0, 0, 0])
-}
-// wave8 GH end
-
-/// `/proc/keys` for the caller the kernel describes (see [`MSG_LX_PROC_KEYS`]).
-fn proc_keys(srv: &mut Server, req: &Message) -> Message {
-    let win = srv.window();
-    let o = LX_PROC_KEYS_GROUPS_OFF;
-    let n = (u32::from_le_bytes([win[o], win[o + 1], win[o + 2], win[o + 3]]) as usize).min(LX_GROUPS);
-    let mut groups = [0u32; LX_GROUPS];
-    for (i, g) in groups[..n].iter_mut().enumerate() {
-        let p = o + 4 + i * 4;
-        *g = u32::from_le_bytes([win[p], win[p + 1], win[p + 2], win[p + 3]]);
+    if PENDING.lock().is_empty() {
+        None
+    } else {
+        Some(now + 1)
     }
-    let a = req.args;
-    let caller = Caller::new(a[0], a[1], a[2] as u32, (a[2] >> 32) as u32, a[3], &groups[..n]);
-    // The calls made before this request count (as for a forwarded call)
-    notes::drain_all();
-    let text = keys::proc_keys(&caller);
-    let len = text.len().min(LX_PROC_KEYS_TEXT_MAX);
-    win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len].copy_from_slice(&text.as_bytes()[..len]);
-    Message::new(MSG_LX_REPLY as u64, [len as u64, 0, 0, 0])
-}
-
-/// `/proc/net/unix` (Group 13), into the window like `/proc/keys`.
-fn proc_net_unix(srv: &mut Server) -> Message {
-    // Sockets closed before the reader asked are gone first (their ends may come in a
-    // second round: a socket let go from a closed socket's queue)
-    notes::drain_all();
-    unix::gc();
-    notes::drain_all();
-    notes::drain_all();
-    let text = unix::proc_net_unix();
-    let win = srv.window();
-    let len = text.len().min(LX_PROC_KEYS_TEXT_MAX);
-    win[LX_PROC_KEYS_TEXT_OFF..LX_PROC_KEYS_TEXT_OFF + len].copy_from_slice(&text.as_bytes()[..len]);
-    Message::new(MSG_LX_REPLY as u64, [len as u64, 0, 0, 0])
 }
 
 /// Answers the pending test calls whose time has come.
@@ -272,9 +155,6 @@ fn complete_due() {
 /// A signal arrived for the caller of pending request `id`: a pending test call is
 /// answered `-EINTR` at once.
 pub fn interrupted(id: u64) {
-    if ipcsvc::interrupted(id) || netsvc::interrupted(id) {
-        return; // (wave8 GX2)
-    }
     let found = {
         let mut p = PENDING.lock();
         let before = p.len();
@@ -290,13 +170,6 @@ pub fn interrupted(id: u64) {
 fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
     notes::drain_to(c.note_seq);
     let cx = Cx::from_call(c, page);
-    // wave8 GX2: the network and IPC pieces first (lx-net's and lx-ipc's own dispatch, when
-    // co-located here: `lx.net=linux`, `lx.ipc=linux`); their numbers, families and object
-    // kinds overlap none of the arms below
-    if let Some(r) = netsvc::dispatch(&cx).or_else(|| ipcsvc::dispatch(&cx)) {
-        obj::flush();
-        return r;
-    }
     let r = match c.nr {
         LX_NULL_NR => null_call(&cx),
         // wave6 G23: mmap of a server object (only the test object has memory so far)
@@ -320,8 +193,6 @@ fn serve(c: &LxCall, page: *mut u8) -> (i64, u64) {
         // System V went to `netsvc`/`ipcsvc` above)
         // wave7 G7-5: execve's front half (the kernel asks; vfs-server resolves the files)
         LX_KCALL_EXEC => exec::front(&cx),
-        248..=250 => (keys::dispatch(&cx).unwrap_or(ENOSYS), 0),
-        321 => (bpf::sys_bpf(&cx), 0),
         _ => (ENOSYS, 0),
     };
     obj::flush();
@@ -417,8 +288,6 @@ fn dcall_serve(cx: &Cx) -> (i64, u64) {
             }
         }
         LX_DCALL_OP_WHO => (cx.c.tgid as i64, 0),
-        // wave10 G8-2: the IPC service's info call when it is co-located here (`lx.ipc=linux`)
-        LX_IPC_OP_SYSVIPC => (crate::sysv::dcall(cx), 0),
         _ => (EINVAL, 0),
     }
 }

@@ -17,34 +17,17 @@ fn delta(before: (u64, u64)) -> (u64, u64) {
 /// The world with requests routed (the switch-back word off).
 fn routed_world() -> crate::world::Sim {
     let sim = world();
-    KERNEL.store(false, Ordering::Relaxed);
     sim
 }
 
 #[test]
-fn boot_word_is_only_uring_kernel() {
+fn the_old_uring_word_is_ignored() {
     let _sim = routed_world();
-    assert!(!boot_word(b"uring=linux"));
-    assert!(!boot_word(b"uring"));
-    assert!(!boot_word(b"net=kernel"));
-    assert!(!in_kernel());
-    assert!(boot_word(b"uring=kernel"));
-    assert!(in_kernel());
-    KERNEL.store(false, Ordering::Relaxed);
-}
-
-#[test]
-fn svc_init_takes_the_word_with_or_without_the_prefix() {
-    let _sim = routed_world();
+    // wave10 G10-C (decision 34): `lx.uring=kernel` no longer keeps requests in the kernel
     crate::lx::svc::init(b"lx.uring=kernel");
-    assert!(in_kernel());
-    KERNEL.store(false, Ordering::Relaxed);
-    crate::lx::svc::init(b"net=linux+uring=kernel");
-    assert!(in_kernel());
-    KERNEL.store(false, Ordering::Relaxed);
-    // Not "everything back": the word only keeps the requests in the kernel
-    assert!(!crate::lx::svc::init(b"uring=kernel"));
-    KERNEL.store(false, Ordering::Relaxed);
+    crate::lx::set_forwarding();
+    crate::world::bkl_enter();
+    assert!(crate::fake::logged("[lx] lx.uring=kernel: ignored"));
 }
 
 #[test]
@@ -75,28 +58,10 @@ fn a_request_nobody_claims_stays_in_the_kernel() {
 }
 
 #[test]
-fn uring_kernel_keeps_even_moved_calls_in_the_kernel() {
-    let sim = routed_world();
-    let n = StdArc::new(StdAtomicU64::new(0));
-    let n2 = n.clone();
-    start(&sim, LXS_TEST, 300, 1, true, handler(move |_| {
-        n2.fetch_add(1, Ordering::AcqRel);
-        (42, 0)
-    }));
-    crate::world::bkl_enter();
-    KERNEL.store(true, Ordering::Relaxed);
-    assert_eq!(route(&frame(LX_TEST_NR, [0; 6])), None);
-    KERNEL.store(false, Ordering::Relaxed);
-    assert_eq!(n.load(Ordering::Acquire), 0, "the service never saw it");
-    // ... and the program's own call is still forwarded
-    assert_eq!(crate::lx::forward(&frame(LX_TEST_NR, [0; 6])), Some(42));
-}
-
-#[test]
 fn with_forwarding_off_nothing_is_routed() {
     let _sim = routed_world();
-    crate::lx::set_forwarding(false);
+    crate::lx::tests::clear_forwarding();
     crate::world::bkl_enter();
     assert_eq!(route(&frame(LX_TEST_NR, [0; 6])), None);
-    crate::lx::set_forwarding(true);
+    crate::lx::set_forwarding();
 }

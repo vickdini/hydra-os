@@ -58,11 +58,8 @@ pub fn discover_with(fw: Option<&[u8]>, opts: Option<&[u8]>) {
     } else {
         None
     };
-    // The Linux calls moved to linux-server go back to the in-kernel code (`crate::lx`)
-    if say(b"lx=kernel") {
-        crate::lx::KERNEL_BY_BOOT_OPTION.store(true, Ordering::Release);
-    }
-    // wave6 G19: the per-service switch-back words (`lx.<name>=kernel|linux`)
+    // The boot entry's `lx` words (the old switch-back words are logged as ignored: wave 10
+    // 10-C; `lx.<name>.restart=...` sets a restart class)
     if let Some(text) = opts {
         crate::lx::set_boot_words(text);
     }

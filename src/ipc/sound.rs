@@ -106,10 +106,9 @@ pub fn status(dir: usize) -> Option<SndStatus> {
     Some(st)
 }
 
-/// Whether the sound service answers the ALSA devices now (not `lx.sound=kernel` nor
-/// `lx=kernel`): the in-kernel layer then keeps its hands off the card.
+/// Whether the sound service answers the ALSA devices now (always since wave 10 10-C).
 pub fn forwarded() -> bool {
-    !crate::lx::all_kernel() && crate::lx::svc::mode(LXS_SOUND) == crate::lx::svc::SvcMode::Forward
+    true
 }
 
 /// Fills `info` with the card and, through `give`, new handles of the service at

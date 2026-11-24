@@ -321,7 +321,7 @@ fn lx_ipc_args() -> Option<Vec<String>> {
 /// Whether Linux service `svc` runs in its own process on `ep`: not co-located in
 /// linux-server, not switched back to the kernel (`lx.<name>=kernel`, `lx=kernel`).
 fn split_out(svc: u8, ep: u32) -> bool {
-    crate::lx::svc::endpoint_of(svc) == ep && crate::lx::svc::mode(svc) == crate::lx::svc::SvcMode::Forward && !crate::lx::all_kernel()
+    crate::lx::svc::endpoint_of(svc) == ep
 }
 // wave8 GX2 end
 
@@ -344,9 +344,6 @@ fn input_server_args() -> Option<Vec<String>> {
 /// display-server (two workers): not started when the kernel's `drm.rs` serves the display
 /// (`lx.display=kernel`, `lx=kernel`); it would only exit again.
 fn display_server_args() -> Option<Vec<String>> {
-    if crate::lx::svc::mode(crate::ipc::protocol::LXS_DISPLAY) != crate::lx::svc::SvcMode::Forward || crate::lx::all_kernel() {
-        return None;
-    }
     Some(alloc::vec![String::from("workers=2")])
 }
 // wave8 GD end

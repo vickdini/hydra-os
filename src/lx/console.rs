@@ -177,11 +177,10 @@ mod kernel {
         x86_64::instructions::interrupts::without_interrupts(|| f(&mut STATE.lock()))
     }
 
-    /// Whether the terminals are tty-server's (not `lx=kernel`, `lx.tty=kernel` or
-    /// `lx.tty=linux`).
+    /// Whether the terminals are tty-server's (always since wave 10 10-C).
     #[inline]
     pub fn forwarded() -> bool {
-        !super::super::all_kernel() && svc::mode(LXS_TTY) == svc::SvcMode::Forward && svc::endpoint_of(LXS_TTY) == ENDPOINT_TTY_SERVER
+        true
     }
 
     /// Whether a Linux session holds the console (for the trap path: one load).

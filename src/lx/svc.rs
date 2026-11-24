@@ -16,9 +16,10 @@
 //!   process's first service (linux-server: [`LXS_LINUX`]), allocated when its first worker
 //!   attaches, and never freed (a restarted process gets the same one), so a `&'static Host`
 //!   is always valid. Request ids carry the host (`id = host << 56 | sequence`).
-//! - **Switching back** per service (decision 17): `lx.<name>=kernel` sends that service's
-//!   calls back to the in-kernel code, `lx.<name>=linux` co-locates a split service back in
-//!   linux-server; `lx=kernel` does it for every service.
+//! - **No switching back** (decision 32, wave 10 10-C): the in-kernel copies of the moved
+//!   pieces are gone, so `lx=kernel`, every `lx.<name>=kernel` and every `lx.<name>=linux`
+//!   (co-location in linux-server) are ignored with a line in the boot log. A crashed
+//!   service is restarted (the 30 s ladder); the emergency prompt stays for broken user space.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -43,28 +44,16 @@ pub const MAX_REQS: usize = 128;
 /// No request.
 pub(super) const NONE: usize = usize::MAX;
 
-/// How a service's calls are answered.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(u8)]
-pub enum SvcMode {
-    /// Forwarded to the service's host.
-    Forward = 0,
-    /// Answered by the in-kernel code (`lx.<name>=kernel`, or `lx=kernel` for all).
-    Kernel = 1,
-}
-
 /// One registry entry.
 pub struct SvcEntry {
     /// The endpoint of the process that serves the id (several ids may share one).
     endpoint: AtomicU32,
     /// The host serving it now (0: none online yet).
     host: AtomicU8,
-    /// [`SvcMode`].
-    mode: AtomicU8,
 }
 
 /// The registry, by service id.
-pub static SVC: [SvcEntry; LXS_MAX] = [const { SvcEntry { endpoint: AtomicU32::new(0), host: AtomicU8::new(0), mode: AtomicU8::new(0) } }; LXS_MAX];
+pub static SVC: [SvcEntry; LXS_MAX] = [const { SvcEntry { endpoint: AtomicU32::new(0), host: AtomicU8::new(0) } }; LXS_MAX];
 
 /// The endpoints the registry starts with: every piece still split out lives in
 /// linux-server (co-located); vfs-server and the device services have endpoints of their
@@ -90,51 +79,18 @@ const DEFAULT_ENDPOINTS: [(SvcId, u32); 11] = [
     (LXS_TEST, ENDPOINT_SVC_TEST),
 ];
 
-/// Fills the registry (once, at boot, before the services start) and applies the boot words
-/// `words` (`lx=kernel`, `lx.<name>=kernel`, `lx.<name>=linux`; separated by `+`, `,`, `;` or
-/// blanks, the `lx.` prefix optional): returns whether `lx=kernel` (everything back) was given.
-pub fn init(words: &[u8]) -> bool {
+/// Fills the registry (once, at boot, before the services start). The boot words `words`
+/// (separated by `+`, `,`, `;` or blanks, the `lx.` prefix optional) that used to switch
+/// pieces back — `kernel`, `lx=kernel`, `lx.<name>=kernel`, `lx.<name>=linux`,
+/// `lx.uring=kernel`, `lx.tmpfs=pool` — are ignored with a line in the boot log (wave 10
+/// 10-C, decision 32: no in-kernel copy is left to switch back to).
+pub fn init(words: &[u8]) {
     for &(id, ep) in DEFAULT_ENDPOINTS.iter() {
         SVC[id as usize].endpoint.store(ep, Ordering::Release);
     }
-    let mut all_kernel = false;
     for w in words.split(|c| matches!(c, b'+' | b',' | b';' | b' ' | b'\n' | b'\r' | b'\t' | 0)) {
-        let w = w.strip_prefix(b"lx.").unwrap_or(w);
-        let w = w.strip_prefix(b"lx=").map_or(w, |rest| if rest == b"kernel" { b"kernel".as_slice() } else { w });
-        if w == b"kernel" {
-            all_kernel = true;
-            continue;
-        }
-        // wave9 G9-C: the file service's switch-back words are gone with the kernel's copy of
-        // the file code (`lx.vfs=kernel`, `lx.vfsmnt=kernel`, `lx.fuse=kernel`,
-        // `lx.policy=kernel`, `lx.tmpfs=pool`): ignored, with a line in the boot log
-        // (and `lx.vfs=linux`: the file service is vfs-server's own process)
-        if matches!(w, b"vfs=kernel" | b"vfs=linux" | b"vfsmnt=kernel" | b"fuse=kernel" | b"policy=kernel" | b"tmpfs=pool") {
-            crate::kprintln!("[lx] {}: ignored (the file service has no switch back since wave 9)", core::str::from_utf8(w).unwrap_or("?"));
-            continue;
-        }
-        // wave10 G7b-1 begin: lx-proc's code is not built into linux-server: `lx.proc=linux`
-        // is ignored (`lx.proc=kernel` takes its calls and `/proc` back to the kernel)
-        if w == b"proc=linux" {
-            crate::kprintln!("[lx] proc=linux: ignored (lx-proc runs as its own process; lx.proc=kernel switches back)");
-            continue;
-        }
-        // wave10 G7b-1 end
-        // wave9 G6b-4 begin: `lx.uring=kernel`: io_uring and aio requests stay in the kernel
-        if super::uring::boot_word(w) {
-            continue;
-        }
-        // wave9 G6b-4 end
-        let Some(eq) = w.iter().position(|&c| c == b'=') else { continue };
-        let (name, val) = (&w[..eq], &w[eq + 1..]);
-        let Some(id) = LXS_NAMES.iter().position(|n| n.as_bytes() == name) else { continue };
-        if id == 0 {
-            continue;
-        }
-        match val {
-            b"kernel" => SVC[id].mode.store(SvcMode::Kernel as u8, Ordering::Release),
-            b"linux" => SVC[id].endpoint.store(ENDPOINT_LINUX_SERVER, Ordering::Release),
-            _ => {}
+        if ignored_word(w) {
+            crate::kprintln!("[lx] {}: ignored (no switch back since wave 10: a crashed service is restarted)", core::str::from_utf8(w).unwrap_or("?"));
         }
     }
     // Each id starts with the host its endpoint will have (the lowest id naming it)
@@ -147,7 +103,14 @@ pub fn init(words: &[u8]) -> bool {
     // file code reads, writes, maps, stats and creates them, so the calls it answers — sent
     // back, before vfs-server is up, after the ladder gave it up — serve them alone)
     crate::fs::tmem::ENABLED.store(true, Ordering::Relaxed);
-    all_kernel
+}
+
+/// Whether boot word `w` is one of the old switch-back words (see [`init`]): `kernel`,
+/// `[lx.]<x>=kernel`, `[lx.]<x>=linux`, `[lx.]tmpfs=pool`. (`lx.<name>.restart=...` is the
+/// restart ladder's, `restart::boot_word`.)
+pub fn ignored_word(w: &[u8]) -> bool {
+    let w = w.strip_prefix(b"lx.").unwrap_or(w);
+    !w.is_empty() && (w == b"kernel" || w.ends_with(b"=kernel") || w.ends_with(b"=linux") || w == b"tmpfs=pool")
 }
 
 /// The id whose host serves endpoint `ep`: the lowest id naming it (0: none).
@@ -156,7 +119,7 @@ fn home_of(ep: u32) -> SvcId {
 }
 
 /// The boot log: one line per service that has an endpoint.
-pub fn log_lines(all_kernel: bool) {
+pub fn log_lines() {
     for id in 1..LXS_MAX {
         let ep = SVC[id].endpoint.load(Ordering::Acquire);
         if ep == 0 {
@@ -164,10 +127,7 @@ pub fn log_lines(all_kernel: bool) {
         }
         let name = LXS_NAMES[id];
         let h = SVC[id].host.load(Ordering::Acquire);
-        // (wave9 G9-C: the file service stays forwarded with `lx=kernel`)
-        if (all_kernel && id != crate::ipc::protocol::LXS_VFS as usize) || mode(id as SvcId) == SvcMode::Kernel {
-            crate::kprintln!("[lx] {}: in the kernel ({})", name, if all_kernel { "lx=kernel" } else { "lx.<name>=kernel" });
-        } else if h as usize != id {
+        if h as usize != id {
             crate::kprintln!("[lx] {}: {} (co-located, endpoint {:#x})", name, LXS_NAMES[h as usize], ep);
         } else {
             crate::kprintln!("[lx] {}: its own process (endpoint {:#x}, when started)", name, ep);
@@ -175,15 +135,6 @@ pub fn log_lines(all_kernel: bool) {
     }
 }
 
-/// Service `svc`'s mode.
-#[inline]
-pub fn mode(svc: SvcId) -> SvcMode {
-    if (svc as usize) < LXS_MAX && SVC[svc as usize].mode.load(Ordering::Relaxed) == SvcMode::Kernel as u8 {
-        SvcMode::Kernel
-    } else {
-        SvcMode::Forward
-    }
-}
 
 /// The host that serves service `svc` (0: none).
 #[inline]
@@ -520,7 +471,7 @@ pub fn major_svc(major: u64) -> SvcId {
         return 0;
     }
     let s = MAJOR_SVC[major as usize].load(Ordering::Acquire);
-    if s != 0 && mode(s) == SvcMode::Forward && online(s) && !super::all_kernel() {
+    if s != 0 && online(s) {
         s
     } else {
         0

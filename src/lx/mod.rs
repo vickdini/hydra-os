@@ -414,30 +414,18 @@ fn vfs_ctx(c: &mut LxCall) {
     });
 }
 // wave7 G7-1 end
-/// Step 4's descriptors are made by the server (`lx=kernel` or `lx.ipc=kernel` turn it off).
-pub static STEP4: AtomicBool = AtomicBool::new(false);
-
 /// Whether step 4's descriptors (Unix sockets, pipes, eventfd, timerfd, signalfd, pidfd)
 /// are the service's: the kernel's dispatchers send the calls that make them there.
 pub fn step4() -> bool {
     // (wave6 G21: also while the service restarts: the calls wait for it)
-    STEP4.load(Ordering::Relaxed) && usable(LXS_IPC)
+    usable(LXS_IPC)
 }
 
-/// The boot entry asked for the in-kernel code (`lx=kernel`).
-pub static KERNEL_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
-/// Everything is answered in the kernel (`lx=kernel`).
-static ALL_KERNEL: AtomicBool = AtomicBool::new(false);
-/// The boot entry's `lx` words (`lx.<name>=kernel|linux`), kept for [`init`].
+/// The boot entry's `lx` words, kept for [`init`].
 static BOOT_WORDS: Mutex<([u8; 256], usize)> = Mutex::new(([0; 256], 0));
 
-/// Whether `lx=kernel` sent every moved call back to the kernel.
-pub fn all_kernel() -> bool {
-    ALL_KERNEL.load(Ordering::Relaxed)
-}
-
 /// The boot entry's option text (`admin::boot`): its words starting with `lx` are kept for
-/// [`init`] (the per-service switch-back words, decision 17).
+/// [`init`] (the old switch-back words are logged as ignored there).
 pub fn set_boot_words(text: &[u8]) {
     let mut w = BOOT_WORDS.lock();
     for word in text.split(|c| matches!(c, b' ' | b'\t' | 0)) {
@@ -535,9 +523,8 @@ pub struct Target {
 }
 
 /// Sets up the registry and the forwarding table at boot: the moved calls go to their
-/// services, unless QEMU's fw_cfg `opt/hydra/lx` or the boot entry's words send all of them
-/// (`kernel`, `lx=kernel`) or some (`lx.<name>=kernel`) back to the in-kernel code, or
-/// co-locate a split service in linux-server again (`lx.<name>=linux`).
+/// services. (QEMU's fw_cfg `opt/hydra/lx` and the boot entry's `lx` words are read only to
+/// log the old switch-back words as ignored: wave 10 10-C, decision 32.)
 pub fn init() {
     let mut words = [0u8; 400];
     let mut n = 0;
@@ -553,20 +540,15 @@ pub fn init() {
         words[n..n + k].copy_from_slice(&b.0[..k]);
         n += k;
     }
-    let kernel = svc::init(&words[..n]) || KERNEL_BY_BOOT_OPTION.load(Ordering::Acquire);
-    ALL_KERNEL.store(kernel, Ordering::Release);
-    set_forwarding(!kernel);
-    crate::kprintln!(
-        "[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, bpf, AF_INET/AF_INET6/AF_NETLINK/AF_UNIX sockets, eventfd, pipes, pidfd, signalfd, timerfd: {}",
-        if kernel { "in the kernel (switched back: lx=kernel)" } else { "forwarded to their services" }
-    );
-    svc::log_lines(kernel);
+    svc::init(&words[..n]);
+    set_forwarding();
+    crate::kprintln!("[lx] add_key, request_key, keyctl, mq_*, sem*, msg*, shm*, bpf, AF_INET/AF_INET6/AF_NETLINK/AF_UNIX sockets, eventfd, pipes, pidfd, signalfd, timerfd, the process calls: forwarded to their services");
+    svc::log_lines();
 }
 
-/// Routes the moved calls to their services (`true`; a service switched back with
-/// `lx.<name>=kernel` stays in the kernel) or all to the in-kernel code.
-pub fn set_forwarding(on: bool) {
-    let ent = |bits: u32, s: SvcId| if on && svc::mode(s) == svc::SvcMode::Forward { T_SERVER | bits | (s as u32) << T_SVC_SHIFT } else { 0 };
+/// Routes the moved calls to their services.
+pub fn set_forwarding() {
+    let ent = |bits: u32, s: SvcId| T_SERVER | bits | (s as u32) << T_SVC_SHIFT;
     // (wave10 G7b-1: + the process service's)
     for &(nr, bits, s) in MOVED.iter().chain(MOVED_STEP2).chain(MOVED_STEP4).chain(MOVED_PROC) {
         TABLE[nr as usize].store(ent(bits, s), Ordering::Release);
@@ -580,38 +562,26 @@ pub fn set_forwarding(on: bool) {
         // (wave7 G7-1: + vfs-server's)
         PRIV[(nr - PRIV_BASE) as usize].store(ent(bits, s), Ordering::Release);
     }
-    // wave10 G7b-1: the walk test call's redirects need `/proc` forwarded too (as with
-    // `lx=kernel`, wave 9 9-C): `lx.proc=kernel` takes it away
-    if svc::mode(crate::ipc::protocol::LXS_PROC) == svc::SvcMode::Kernel {
-        PRIV[(crate::ipc::protocol::LX_VFS_WALK_NR - PRIV_BASE) as usize].store(0, Ordering::Release);
-    }
-    STEP4.store(on && svc::mode(LXS_IPC) == svc::SvcMode::Forward, Ordering::Release);
-    // Socket routing (Group 12): the per-call bits only once some family moved, so that
-    // nothing changes for the socket calls before
+    // Socket routing (Group 12)
     let mut families = 0u64;
     for &(f, s) in MOVED_FAMILIES {
-        let v = if on && svc::mode(s) == svc::SvcMode::Forward { s } else { 0 };
-        FAMILY_SVC[f as usize].store(v, Ordering::Release);
-        if v != 0 {
-            families |= 1 << f;
-        }
+        FAMILY_SVC[f as usize].store(s, Ordering::Release);
+        families |= 1 << f;
     }
     FAMILIES.store(families, Ordering::Release);
-    let sockets = families != 0;
     for nr in BYFAMILY_NUMBERS {
-        TABLE[nr as usize].store(if sockets { T_SERVER | T_FAMILY } else { 0 }, Ordering::Release);
+        TABLE[nr as usize].store(T_SERVER | T_FAMILY, Ordering::Release);
     }
     for &nr in BYFD_NUMBERS {
-        TABLE[nr as usize].store(if sockets { T_SERVER | T_BYFD } else { 0 }, Ordering::Release);
+        TABLE[nr as usize].store(T_SERVER | T_BYFD, Ordering::Release);
     }
     // Group 13: read, write, readv, writev on server objects (pipes, Unix sockets, eventfd,
     // the test service's objects, ...) take the lock-free path too; on any other descriptor
     // they cost one bit test
     for nr in BYFD_IO_NUMBERS {
-        TABLE[nr as usize].store(if on { T_SERVER | T_BYFD } else { 0 }, Ordering::Release);
+        TABLE[nr as usize].store(T_SERVER | T_BYFD, Ordering::Release);
     }
     // wave7 G7-2: the file service's calls (those vfs-server claimed)
-    // (wave9 G9-C: always, also with `lx=kernel`)
     fileh::apply();
 }
 
@@ -911,7 +881,7 @@ pub fn dev_open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn crate::compat::l
     // open waits for it (up to the restart's 30 s), never reaching the kernel's copy meanwhile
     let s = if s == 0 && major < 256 {
         let c = svc::MAJOR_SVC[major as usize].load(Ordering::Acquire);
-        if c != 0 && svc::mode(c) == svc::SvcMode::Forward && !all_kernel() && restart::restarting(svc::host_of(c)) {
+        if c != 0 && restart::restarting(svc::host_of(c)) {
             match restart::wait_online(svc::host_of(c), &|| svc::major_svc(major) != 0) {
                 // (gone again meanwhile: no device rather than the kernel's copy)
                 Ok(()) => match svc::major_svc(major) {
@@ -920,7 +890,7 @@ pub fn dev_open(rdev: u64, flags: u32) -> Option<Result<Arc<dyn crate::compat::l
                 },
                 Err(e) => return Some(Err(if e == EIO { -19 } else { e })),
             }
-        } else if c != 0 && svc::mode(c) == svc::SvcMode::Forward && !all_kernel() {
+        } else if c != 0 {
             // Given up (not restarting): no device, rather than the kernel's copy beside a
             // service that held the device (and the screen) before
             return Some(Err(-19));
@@ -1371,13 +1341,6 @@ fn call_with(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, nobkl: boo
                 if redir.1 != 0 && is_trace_nr(c.nr) && x.id == svc::host_of(crate::ipc::protocol::LXS_PROC) {
                     proc::approve(me, c.nr, redir.1);
                 }
-                return fileh::LX_TO_KERNEL;
-            }
-            // wave7 G7-4: a redirect to a service the kernel answers (`lx.proc=kernel`, `lx=kernel`):
-            // nothing happened in the redirecting service, so the kernel's own code answers
-            if svc::mode(s) == svc::SvcMode::Kernel || all_kernel() {
-                // (wave7 G7-5: this also covers a FIFO open vfs-server sent to the IPC
-                // service while that one is switched back, `lx.ipc=kernel`)
                 return fileh::LX_TO_KERNEL;
             }
             // (wave10 G7b-1/G7b-2: `/proc` redirects go to lx-proc)

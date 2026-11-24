@@ -85,10 +85,10 @@ fn ring() -> Option<RingView> {
     (va != 0).then(|| unsafe { RingView::new(va as *mut u8) })
 }
 
-/// Whether input is forwarded to the input service (not `lx=kernel` / `lx.input=kernel`).
+/// Whether input is forwarded to the input service (always since wave 10 10-C).
 #[inline]
 pub fn forwarded() -> bool {
-    !crate::lx::all_kernel() && crate::lx::svc::mode(LXS_INPUT) == crate::lx::svc::SvcMode::Forward
+    true
 }
 
 /// Sends the keyboard and pointer to the desktop session (`true`) or back to the console

@@ -233,7 +233,7 @@ fn a_transparent_restart_of_the_network_service_keeps_the_watched_count() {
     assert!(!keeps_objects(LXS_NET));
     assert_eq!(crate::lx::WATCHED_NET.load(Ordering::Acquire), 0);
     crate::lx::svc::tests::reset();
-    crate::lx::svc::init(b"net=linux+ipc=linux");
+    crate::lx::svc::tests::init_colocated(b"net=linux+ipc=linux");
 }
 // wave8 GX2 end
 
@@ -259,6 +259,6 @@ fn an_ipc_crash_brings_the_login_screen_back() {
     assert!(sim.spawned().contains(&"lx-desktop"));
     crate::fake::rec(|r| r.display_manager = false);
     crate::lx::svc::tests::reset();
-    crate::lx::svc::init(b"net=linux+ipc=linux");
+    crate::lx::svc::tests::init_colocated(b"net=linux+ipc=linux");
 }
 // wave8 GX2 end
