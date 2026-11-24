@@ -1780,6 +1780,25 @@ fn getdents64(fd: i32, buf: u64, count: usize) -> i64 {
         let f = file.lock();
         (f.ino, f.offset)
     };
+    // wave11 GF: a `/dev/pts` directory: tty-server lists its slaves (the pool's directory is
+    // empty); the offset is the entry index
+    // (review 11: the caller's root's own `/dev/pts` object, not any directory of that name)
+    let pts = {
+        let f = file.lock();
+        f.is_dir && f.mnt == 0 && f.path.trim_end_matches('/') == "/dev/pts"
+    } && {
+        let r = proc_root();
+        ZfsClient::resolve_in(r, r, b"/dev/pts", true).is_ok_and(|i| i == ino)
+    };
+    if pts {
+        return match crate::lx::console::pts_list(buf, count as u64, cookie) {
+            Ok((n, next)) => {
+                file.lock().offset = next;
+                n as i64
+            }
+            Err(e) => e,
+        };
+    }
     // The /proc directory itself: its processes and files, not what is stored there
     if file.lock().path.trim_end_matches('/').ends_with("/proc") || file.lock().path == "/proc" {
         let is_proc = base_dir(AT_FDCWD, b"/proc").and_then(|(b, _)| resolve(b, b"/proc", true)).is_ok_and(|i| i == ino);

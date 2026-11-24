@@ -51,7 +51,7 @@ pub fn serve(cx: &Cx) -> Result<i64, i64> {
     let who = k.who.clone();
     let (n, attr) = if how == 2 {
         let n = ctxt::handle(c)?;
-        (n, ctxt::BE.getattr(n)?)
+        (n, ctxt::attr_of(c, n)?) // wave11 GF: (a FUSE file's too)
     } else {
         let path = ctxt::path(cx, a[0], false)?;
         k.find(c, &path, how == 0)?
@@ -63,6 +63,12 @@ pub fn serve(cx: &Cx) -> Result<i64, i64> {
         }
         Ok(n as i64)
     };
+    // wave11 GF: a FUSE file: the daemon's LISTXATTR, its reply to the caller's buffer
+    let fuse = ctxt::is_fuse(n);
+    if kind == 2 && fuse {
+        let then = crate::fuse::Then { how: crate::fuse::How::Bytes { ptr: a[1], size: a[2], list: Some(who.cap(CAP_SYS_ADMIN)) }, tell: None };
+        return crate::fuse::start(c, n.ino, crate::fuse::Req::Listxattr, then);
+    }
     if kind == 2 {
         let names = zfs::listxattr(n.ino)?;
         return out(&rules::xattr_list_shown(&names, who.cap(CAP_SYS_ADMIN)), a[1], a[2]);
@@ -76,7 +82,9 @@ pub fn serve(cx: &Cx) -> Result<i64, i64> {
     if write {
         k.writable(n)?;
     }
-    if let (XattrNs::Acl(default), 3) = (ns, kind) {
+    // (wave11 GF: in a FUSE mount the ACL names are the daemon's xattrs, as Linux's client
+    // without `posix_acl` passes them: below)
+    if let (XattrNs::Acl(default), 3, false) = (ns, kind, fuse) {
         return acl_remove(&who, n, &attr, default);
     }
     match ns {
@@ -99,6 +107,33 @@ pub fn serve(cx: &Cx) -> Result<i64, i64> {
         }
         _ => {}
     }
+    // wave11 GF begin: a FUSE file: the daemon's GETXATTR, SETXATTR, REMOVEXATTR
+    if fuse {
+        // (review 9: an ACL is changed by the owner or with CAP_FOWNER, as the pool's)
+        if write && matches!(ns, XattrNs::Acl(_)) && who.uid != attr.uid && !who.cap(CAP_FOWNER) {
+            return Err(EPERM);
+        }
+        let zero = crate::fuse::Then { how: crate::fuse::How::Zero, tell: None };
+        return match kind {
+            1 => crate::fuse::start(c, n.ino, crate::fuse::Req::Getxattr { name }, crate::fuse::Then { how: crate::fuse::How::Bytes { ptr: a[2], size: a[3], list: None }, tell: None }),
+            3 => crate::fuse::start(c, n.ino, crate::fuse::Req::Removexattr { name }, zero),
+            _ => {
+                let (value, size, flags) = (a[2], a[3], a[4]);
+                if flags & !3 != 0 || flags == 3 {
+                    return Err(EINVAL);
+                }
+                if size > SIZE_MAX {
+                    return Err(E2BIG);
+                }
+                let data = cx.copy_in_any(value, size as usize)?;
+                if &name[..] == b"security.capability" && !rules::fcaps_valid(&data) {
+                    return Err(EINVAL);
+                }
+                crate::fuse::start(c, n.ino, crate::fuse::Req::Setxattr { name, value: data, flags: flags as u32 }, zero)
+            }
+        };
+    }
+    // wave11 GF end
     match kind {
         1 => {
             let v = zfs::getxattr(n.ino, &name)?;

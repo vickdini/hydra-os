@@ -177,6 +177,9 @@ struct Pair {
     rm: VecDeque<RWait>,
     rs: VecDeque<RWait>,
     ws: VecDeque<WWait>,
+    /// wave11 GF (review 4): made through a sandbox's own devpts (bubblewrap's newinstance
+    /// mount): only that view shows it, and the system's `/dev/pts` does not.
+    inst: bool,
 }
 
 /// What a slot is.
@@ -361,6 +364,26 @@ impl Ttys {
         self.live.get(&index).copied()
     }
 
+    /// wave11 GF: the slaves `/dev/pts` lists (ascending): the system's view (`inst` false)
+    /// or a sandbox's own devpts (review 4).
+    pub fn live_indexes(&self, inst: bool) -> alloc::vec::Vec<u32> {
+        self.live.iter().filter(|(_, id)| self.pairs.get(id).is_some_and(|p| p.inst == inst)).map(|(i, _)| *i).collect()
+    }
+
+    /// wave11 GF (review 4): whether slave `index` belongs to a sandbox's own devpts.
+    pub fn inst_of(&self, index: u32) -> Option<bool> {
+        self.pairs.get(&self.live_pair(index)?).map(|p| p.inst)
+    }
+
+    /// wave11 GF (review 4): pair `index` was made through a sandbox's own devpts.
+    pub fn set_inst(&mut self, index: u32, inst: bool) {
+        if let Some(id) = self.live_pair(index) {
+            if let Some(p) = self.pairs.get_mut(&id) {
+                p.inst = inst;
+            }
+        }
+    }
+
     /// The pair that is session `sid`'s controlling terminal.
     fn controlling(&self, sid: u64) -> Option<u64> {
         if sid == 0 {
@@ -404,6 +427,7 @@ impl Ttys {
                 rm: VecDeque::new(),
                 rs: VecDeque::new(),
                 ws: VecDeque::new(),
+                inst: false,
             },
         );
         self.live.insert(index, id);

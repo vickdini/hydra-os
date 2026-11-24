@@ -67,6 +67,10 @@ pub mod console {
     pub fn pty_stat(_index: u64) -> Result<(u32, u32, u32), i64> {
         Err(-2)
     }
+    // wave11 GF: no tty-server on the host
+    pub fn pts_list(_buf: u64, _count: u64, _from: u64) -> Result<(usize, u64), i64> {
+        Err(-38)
+    }
     pub fn pty_setattr(_index: u64, _mode: Option<u32>, _uid: Option<u32>, _gid: Option<u32>) -> i64 {
         -2
     }

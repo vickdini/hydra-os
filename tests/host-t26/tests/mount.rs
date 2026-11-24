@@ -814,11 +814,18 @@ fn the_file_services_view_follows_every_change() {
     // tmpfs
     assert_eq!(mnt("tmpfs", "/tmp", "tmpfs", 0, ""), 0);
     assert_eq!(mount::vfs_table(ns).unwrap().2.last().unwrap().kind, mount::VFS_TMPFS);
-    // proc somewhere else and a bind of a device served by name: the kernel's below them
+    // proc somewhere else and a bind of a device served by name (wave11 GF: proc goes to its
+    // service, the device to its pool node when the pool has one, else the kernel's)
     assert_eq!(mnt("proc", "/newroot/proc", "proc", 0, ""), 0);
-    assert_eq!(mount::vfs_table(ns).unwrap().2.last().unwrap().kind, mount::VFS_KERNEL);
+    assert_eq!(mount::vfs_table(ns).unwrap().2.last().unwrap().kind, hydra_hosttests_t26::ipc::protocol::LX_MNT_PROC);
+    memfs::mkdir_p("/dev");
+    memfs::mkfile("/dev/null", b"");
     assert_eq!(mnt("/dev/null", "/sandbox/null", "", MS_BIND, ""), 0);
-    assert_eq!(mount::vfs_table(ns).unwrap().2.last().unwrap().kind, mount::VFS_KERNEL);
+    let dev_null = mount::vfs_table(ns).unwrap().2.last().unwrap().clone();
+    match memfs::lookup("/dev/null") {
+        Some(ino) => assert_eq!((dev_null.kind, dev_null.root), (mount::VFS_TREE, ino)),
+        None => assert_eq!(dev_null.kind, mount::VFS_KERNEL),
+    }
     // Even a failed call moves the generation (nothing is lost by taking a table again)
     let g2 = mount::vfs_gen(ns).unwrap();
     assert!(umount("/nowhere", 0) < 0);
@@ -942,3 +949,33 @@ fn whole_table_new_mounts_get_ids_and_tmpfs_trees_go() {
     let _ = mntrec::MAX_SLOTS;
 }
 // wave8 GF end
+
+// wave11 GF begin: the standard named mounts as the file service sees them
+#[test]
+fn proc_dev_and_devpts_are_the_services_wherever_they_are() {
+    use hydra_hosttests_t26::ipc::protocol::{LX_MNT_DEVPTS, LX_MNT_PROC};
+    let _e = setup();
+    memfs::mkdir_p("/proc");
+    memfs::mkdir_p("/dev/pts");
+    memfs::mkdir_p("/sys/fs/cgroup");
+    memfs::mkdir_p("/run");
+    memfs::mkdir_p("/newroot/proc");
+    let ns = unshare();
+    let (_, _, t) = mount::vfs_table(ns).unwrap();
+    let dev = memfs::lookup("/dev").unwrap();
+    // 1 the root, then /proc, /sys, /sys/fs/cgroup, /dev, /dev/pts, /run (the standard table)
+    assert_eq!(t[1].kind, LX_MNT_PROC, "proc: the process service");
+    assert_eq!(t[2].kind, mount::VFS_HOLE, "sysfs where it is: the pool's /sys");
+    assert_eq!(t[3].kind, mount::VFS_HOLE, "cgroup2");
+    assert_eq!((t[4].kind, t[4].root, t[4].mountpoint), (mount::VFS_TREE, dev, dev), "devtmpfs: the pool's /dev");
+    assert_eq!(t[5].kind, LX_MNT_DEVPTS, "devpts: the terminal service");
+    assert_eq!(t[6].kind, mount::VFS_HOLE, "/run");
+    // A proc mounted elsewhere is the process service's too
+    assert_eq!(mnt("proc", "/newroot/proc", "proc", 0, ""), 0);
+    assert_eq!(mount::vfs_table(ns).unwrap().2.last().unwrap().kind, LX_MNT_PROC);
+    // A cgroup2 elsewhere stays the kernel's
+    memfs::mkdir_p("/newroot/cg");
+    assert_eq!(mnt("cgroup2", "/newroot/cg", "cgroup2", 0, ""), 0);
+    assert_eq!(mount::vfs_table(ns).unwrap().2.last().unwrap().kind, mount::VFS_KERNEL);
+}
+// wave11 GF end

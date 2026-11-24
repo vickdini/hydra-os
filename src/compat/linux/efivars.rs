@@ -332,3 +332,37 @@ impl CharDevice for VarFile {
         st
     }
 }
+
+// wave11 GF begin: writes and deletes decided by linux-server (efivarfs is its tree)
+/// `SYS_LX_OBJ` op `LX_INFO_EFIVAR_SET` (linux-server's host only: `lx::obj` checks): variable
+/// file `name` (`name_len` bytes) set to the `len` bytes at `buf` (attributes, then the data,
+/// as an efivarfs `write`); `len` 0 deletes it (gone already: 0). The pool's files are
+/// written again afterwards. linux-server checked `CAP_SYS_ADMIN`.
+pub fn set_for(name: u64, lens: u64, buf: u64) -> i64 {
+    let (name_len, len) = ((lens & 0xFFFF_FFFF) as usize, (lens >> 32) as usize);
+    if name_len == 0 || name_len > 512 || len > 1 << 20 || (len != 0 && len < 4) {
+        return EINVAL;
+    }
+    let Ok(raw) = super::vfs::copy_in(name, name_len) else { return -14 };
+    let Some((n, guid)) = core::str::from_utf8(&raw).ok().and_then(parse_name) else { return ENOENT };
+    // (the firmware runs with the kernel's page tables: the data is copied into the kernel)
+    let r = if len == 0 {
+        match set(&n, &guid, 0, &[]) {
+            Ok(()) | Err(ENOENT) => Ok(()),
+            Err(e) => Err(e),
+        }
+    } else {
+        let Ok(data) = super::vfs::copy_in(buf, len) else { return -14 };
+        let attrs = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        set(&n, &guid, attrs, &data[4..])
+    };
+    refresh();
+    match r {
+        Ok(()) => 0,
+        Err(e) => {
+            crate::kprintln!("[efivars] SetVariable {} for linux-server ({} bytes): errno {}", n, len, -e);
+            e
+        }
+    }
+}
+// wave11 GF end

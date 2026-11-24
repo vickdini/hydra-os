@@ -463,11 +463,15 @@ fn initial_table(root: u64) -> MountNs {
         ("/dev/pts", "devpts", "devpts", 5),
         ("/run", "tmpfs", "tmpfs", 1),
     ] {
+        let mountpoint = lookup(path.as_bytes());
         ns.push(Mount {
             id: new_id(),
             parent,
-            mountpoint: lookup(path.as_bytes()),
-            root: 0,
+            mountpoint,
+            // wave11 GF: the pool's `/dev` (its devices are pool nodes since wave 10): the
+            // file service walks it wherever a pivot_root puts it (`vfs_mount`)
+            // (review 4: and the system's devpts is told from a sandbox's own: root not 0)
+            root: if fstype == "devtmpfs" || fstype == "devpts" { mountpoint.max(1) } else { 0 },
             kind: Kind::Named,
             flags: MS_NOSUID | MS_NOEXEC | MS_RELATIME,
             propagation: MS_SHARED,
@@ -921,11 +925,14 @@ fn mount_core(ns: &Arc<Mutex<MountNs>>, src: Option<(i64, Vec<u8>)>, target: (St
     if flags & MS_BIND != 0 {
         // A device (or other file) Hydra serves by name: the target shows it
         if let Some(served) = src.as_ref().and_then(|(d, p)| served_source_in(*d, p)) {
+            // wave11 GF: the device's pool node, if it has one (the file service walks to it)
+            let system_root = ns.lock().system_root;
+            let node = ZfsClient::resolve_in(system_root, system_root, served.as_bytes(), true).unwrap_or(0);
             ns.lock().push(Mount {
                 id: new_id(),
                 parent: tmnt,
                 mountpoint: tino,
-                root: 0,
+                root: node,
                 kind: Kind::Named,
                 flags: per,
                 propagation: 0,
@@ -2025,12 +2032,23 @@ fn vfs_mount(m: &Mount) -> Option<VfsMount> {
     if m.flags & MS_NOSYMFOLLOW != 0 {
         return None;
     }
+    let mut root = m.root; // wave11 GF
+    let located = m.mountpoint != 0 && m.mountpoint != u64::MAX;
     let kind = match m.kind {
+        // wave11 GF begin: what the file service walks or redirects itself, wherever the mount
+        // is (a mount on top of one of these is seen too, as on Linux): the pool's `/dev`
+        // (and a device node bound from it: its devices are pool nodes since wave 10), proc
+        // and devpts by their services
+        Kind::Named if located && m.fstype == "devtmpfs" && m.root != 0 && m.root >> 62 == 0 && m.root < u64::MAX - 1 => VFS_TREE,
+        Kind::Named if located && m.serves.as_deref() == Some("/proc") => crate::ipc::protocol::LX_MNT_PROC,
+        Kind::Named if located && m.serves.as_deref() == Some("/dev/pts") => crate::ipc::protocol::LX_MNT_DEVPTS,
+        // wave11 GF end
         Kind::Named if named_elsewhere(m) => {
             // (a mount point the kernel could not locate: only its path names it)
-            if m.mountpoint == 0 || m.mountpoint == u64::MAX {
+            if !located {
                 return None;
             }
+            root = 0; // wave11 GF
             VFS_KERNEL
         }
         Kind::Named => VFS_HOLE,
@@ -2043,7 +2061,7 @@ fn vfs_mount(m: &Mount) -> Option<VfsMount> {
         Kind::Tree { tmpfs: Some(_) } => VFS_TMPFS,
         Kind::Tree { tmpfs: None } => VFS_TREE,
     };
-    Some(VfsMount { kind, flags, parent: m.parent as u32, mountpoint: m.mountpoint, root: m.root })
+    Some(VfsMount { kind, flags, parent: m.parent as u32, mountpoint: m.mountpoint, root })
 }
 
 /// The file service's view of table `t`; `None` when it cannot walk it.

@@ -38,7 +38,7 @@ pub struct Walker {
     /// The call may wait for a FUSE daemon (and run again from its reply).
     pub fuse: bool,
     /// The caller's effective user (FUSE mounts without `allow_other` are their owner's).
-    pub euid: u32,
+    pub euid: u64,
     // wave9 G6b-2 end
     /// wave9 G6b-3: the caller is landlocked (its walks leave parent hints).
     pub ll: bool,
@@ -115,7 +115,7 @@ impl Backend for Walker {
 /// The walker of call `c`: the copy of its caller's mount table at least as new as the
 /// call (`LxCall::mnt_gen`).
 pub fn walker(c: &LxCall) -> Result<Walker, i64> {
-    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)?, fuse: crate::fuse::rerunnable(c.nr) && !(c.ll_dom != 0 && matches!(c.nr, 2 | 257)), euid: c.euid, ll: c.ll_dom != 0, req: c.id, nr: c.nr })
+    Ok(Walker { view: kmounts::view(c.mnt_ns, c.mnt_gen)?, fuse: crate::fuse::rerunnable(c.nr) && !(c.ll_dom != 0 && matches!(c.nr, 2 | 257)), euid: crate::fuse::caller_ids(c), ll: c.ll_dom != 0, req: c.id, nr: c.nr })
 }
 
 /// The caller's root in table `v`: inode `c.root` (0: the pool's root, or in another
@@ -141,8 +141,15 @@ fn root_in(v: &View, c: &LxCall) -> Result<Node, i64> {
 /// right for the root itself, as the kernel's walk takes it).
 fn node_in(v: &View, root: Node, ino: u64, mnt: u32) -> Result<Node, i64> {
     if v.ns == 0 {
+        // wave11 GF: or a file of one of its FUSE mounts (named without its mount: the first
+        // mount of its connection)
+        let mnt = match (mnt, crate::fuse::wire::split(ino)) {
+            (0, Some(_)) => v.fuse_mount_of(ino).map_or(0, |m| m as u32),
+            _ => mnt,
+        };
         if mnt != 0 {
-            return Err(KERNEL);
+            let n = Node::new(u16::try_from(mnt).map_err(|_| KERNEL)?, ino);
+            return if v.walkable_or_fuse(n) && crate::fuse::wire::split(ino).is_some() { Ok(n) } else { Err(KERNEL) };
         }
         return Ok(Node::new(0, if ino == 0 { zfs::root()? } else { ino }));
     }
@@ -150,7 +157,7 @@ fn node_in(v: &View, root: Node, ino: u64, mnt: u32) -> Result<Node, i64> {
         return Ok(root);
     }
     let n = Node::new(u16::try_from(mnt).map_err(|_| KERNEL)?, ino);
-    if mnt == 0 || !v.walkable(n) {
+    if mnt == 0 || !v.walkable_or_fuse(n) {
         return Err(KERNEL);
     }
     Ok(n)
@@ -160,7 +167,7 @@ fn node_in(v: &View, root: Node, ino: u64, mnt: u32) -> Result<Node, i64> {
 pub fn mount_flags(c: &LxCall, n: Node) -> Result<u32, i64> {
     let w = walker(c)?;
     // (a newer copy taken during the call may no longer have the mount: the kernel decides)
-    if !w.view.walkable(n) {
+    if !w.view.walkable_or_fuse(n) {
         return Err(KERNEL);
     }
     Ok(w.view.flags(n.mnt))
@@ -178,7 +185,7 @@ pub fn writable(c: &LxCall, n: Node) -> Result<(), i64> {
 pub fn not_mountpoint(c: &LxCall, n: Node) -> Result<(), i64> {
     let w = walker(c)?;
     // (a newer copy without `n`'s mount: the kernel decides — 7-7 review)
-    if !w.view.walkable(n) || w.view.is_mountpoint(n) {
+    if !w.view.walkable_or_fuse(n) || w.view.is_mountpoint(n) {
         return Err(KERNEL);
     }
     Ok(())
@@ -189,7 +196,9 @@ pub fn not_mountpoint(c: &LxCall, n: Node) -> Result<(), i64> {
 /// `LX_FS_*` bits on top of a root or working directory outside the pool and mounts the
 /// service cannot be given (wave7 G7-7: the others come as a copy of the table, `walker`).
 pub fn check(c: &LxCall, need: u32) -> Result<(), i64> {
-    if c.fs_flags & (LX_FS_FOREIGN | LX_FS_MOUNTS | need) != 0 || (c.mnt_ns == 0 && (c.root_mnt != 0 || c.cwd_mnt != 0)) {
+    // (wave11 GF: a working directory in a FUSE mount of the initial namespace is walked
+    // from: `node_in`)
+    if c.fs_flags & (LX_FS_FOREIGN | LX_FS_MOUNTS | need) != 0 || (c.mnt_ns == 0 && (c.root_mnt != 0 || (c.cwd_mnt != 0 && crate::fuse::wire::split(c.cwd).is_none()))) {
         return Err(KERNEL);
     }
     Ok(())
@@ -216,6 +225,25 @@ pub fn start(c: &LxCall, path: &[u8]) -> Result<Start, i64> {
         _ => Err(KERNEL),
     }
 }
+
+// wave11 GF begin
+/// The attributes of `n` for call `c`: a FUSE node's from the daemon (known, or the walk's
+/// question: the call waits and runs again), else the pool's.
+pub fn attr_of(c: &LxCall, n: Node) -> Result<Attr, i64> {
+    if crate::fuse::wire::split(n.ino).is_some() {
+        if !crate::fuse::rerunnable(c.nr) {
+            return Err(KERNEL);
+        }
+        return crate::fuse::be_getattr(n, crate::fuse::caller_ids(c));
+    }
+    BE.getattr(n)
+}
+
+/// Whether `n` is a file of a FUSE mount (vfs-server's connections).
+pub fn is_fuse(n: Node) -> bool {
+    crate::fuse::wire::split(n.ino).is_some()
+}
+// wave11 GF end
 
 /// The handle of a call on a descriptor (`at_*` with kind file or directory).
 pub fn handle(c: &LxCall) -> Result<Node, i64> {
@@ -278,7 +306,7 @@ impl Call {
 
     /// As [`mount_flags`], in this call's table.
     pub fn mount_flags(&self, n: Node) -> Result<u32, i64> {
-        if !self.w.view.walkable(n) {
+        if !self.w.view.walkable_or_fuse(n) {
             return Err(KERNEL);
         }
         Ok(self.w.view.flags(n.mnt))

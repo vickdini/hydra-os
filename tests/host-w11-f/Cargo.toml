@@ -1,0 +1,16 @@
+[package]
+name = "hydra_hosttests_w11_f"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group F's host unit tests (wave 11): the last walks — FUSE setattr requests, the /dev/pts listing, efivars unlink paths"
+
+# Standalone workspace: never pulled into the kernel build.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+spin = "0.9"

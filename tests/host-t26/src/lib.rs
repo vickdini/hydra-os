@@ -96,6 +96,9 @@ pub mod ipc {
         // wave9 G6b-2
         pub const LX_OBJ_KIND_FUSE: u32 = 72;
         pub const LX_MNT_FUSE: u32 = 4;
+        // wave11 GF: proc and devpts mounted elsewhere (their services)
+        pub const LX_MNT_PROC: u32 = 5;
+        pub const LX_MNT_DEVPTS: u32 = 6;
     }
 }
 

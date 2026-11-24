@@ -45,6 +45,7 @@ use hydra_rt::sys;
 use crate::proto::{LX_FH_CLAIM};
 
 pub use ctxt::KERNEL;
+pub use change::tell_kernel; // wave11 GF
 
 /// The calls this module serves (x86-64 numbers): stat, lstat, newfstatat, statx, access,
 /// faccessat, faccessat2, readlink, readlinkat, statfs, open, openat;
@@ -170,6 +171,11 @@ pub fn serve(cx: &Cx) -> Option<Answer> {
 pub fn answer(cx: &Cx, r: Result<i64, i64>) -> Answer {
     // wave9 G6b-2 begin: the walk has to ask a FUSE daemon: the call waits and runs again
     // from the reply (`crate::fuse`); a call that cannot is the kernel's
+    // wave11 GF: a change went to the daemon: its reply answers the call
+    if r == Err(crate::fuse::STARTED) {
+        SERVED.fetch_add(1, Ordering::Relaxed);
+        return (0, crate::proto::LX_REPLY_PENDING);
+    }
     let r = match r {
         Err(e) if crate::fuse::is_miss(e) => {
             if crate::fuse::wait_miss(e, &cx.c) {
@@ -200,7 +206,10 @@ pub fn answer(cx: &Cx, r: Result<i64, i64>) -> Answer {
                 return (-1, 0);
             }
             // (wave9 G6b-3: a landlocked caller's open there is the kernel's: its lexical chain)
-            if (pseudo_served(cx.nr) || (pts && pts_served(cx.nr))) && !(cx.c.ll_dom != 0 && matches!(cx.nr, 2 | 257)) {
+            // (wave11 GF: and an efivars unlink, linux-server's)
+            // (review 2: not for a landlocked caller, as its opens there)
+            let efi_unlink = svc == crate::proto::LXS_LINUX && obj == crate::proto::LX_VFS_PSEUDO_SYS && matches!(cx.nr, 87 | 263) && cx.c.ll_dom == 0;
+            if (pseudo_served(cx.nr) || (pts && pts_served(cx.nr)) || efi_unlink) && !(cx.c.ll_dom != 0 && matches!(cx.nr, 2 | 257)) {
                 let n = TO_PSEUDO.fetch_add(1, Ordering::Relaxed) + 1;
                 if n == 1 || (n >= 1024 && n.is_power_of_two()) {
                     hydra_rt::println!("[vfs-server] {} calls redirected to the Linux services (/proc, /sys, /dev/pts)", n);

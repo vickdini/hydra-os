@@ -42,6 +42,9 @@ fn is_number(name: &[u8]) -> bool {
 /// [`LX_VFS_PSEUDO_DEVPTS`] with this bit: the redirect's rest starts below `pts` (a walk that
 /// started in the `/dev/pts` directory) instead of at `pts`.
 pub const PTS_BELOW: u64 = 0x100;
+/// wave11 GF (review 4): with [`LX_VFS_PSEUDO_DEVPTS`]: the mount is a devpts of its own (a
+/// sandbox's newinstance mount), not the system's.
+pub const PTS_NEWINST: u64 = 0x200;
 
 /// The tree a served name starting at `name` is in (`name` passed [`may_serve`]).
 pub fn tree_of(name: &[u8]) -> Tree {
@@ -98,7 +101,33 @@ pub fn served(tree: Tree, name: &[u8], rest: &[&[u8]], open: bool) -> Option<(Sv
         (Tree::Sys, b"devices", [b"system", b"cpu", b"online" | b"possible" | b"present"]) => Some((LXS_LINUX, LX_VFS_PSEUDO_SYS)),
         (Tree::Sys, b"firmware", [b"efi", b"efivars", n]) if open && !n.is_empty() => Some((LXS_LINUX, LX_VFS_PSEUDO_SYS)),
         (Tree::Sys, b"fs", [b"cgroup", .., last]) if *last == b"cgroup.procs" => Some((0, 0)),
+        // (wave11 GF: an open of the directory itself is the pool's `/dev/pts`: a handle that
+        // `*at` calls start from and that the kernel lists through tty-server)
+        (Tree::Dev, b"pts", []) if open => None,
         (Tree::Dev, b"pts", _) => Some((LXS_TTY, LX_VFS_PSEUDO_DEVPTS)),
         _ => None,
     }
 }
+
+// wave11 GF begin: efivars unlinks (linux-server deletes the variable)
+/// Whether directory `dir` is the caller's root's `sys/firmware/efi/efivars` (from the
+/// caches).
+pub fn is_efivars_dir(be: &dyn Backend, cx: &Ctx, dir: Node) -> bool {
+    let mut n = cx.root;
+    for name in [&b"sys"[..], b"firmware", b"efi", b"efivars"] {
+        match be.lookup(n, name) {
+            Ok(x) => n = x,
+            Err(_) => return false,
+        }
+    }
+    n == dir
+}
+
+/// Where the part below `/sys` starts in `path` (an absolute or relative path naming an
+/// efivars file: `.../firmware/efi/efivars/<name>`), as linux-server's rules take it.
+pub fn efivars_tail(path: &[u8]) -> Option<u32> {
+    let key: &[u8] = b"firmware/efi/efivars/";
+    let i = path.windows(key.len()).rposition(|w| w == key)?;
+    (i == 0 || path[i - 1] == b'/').then_some(i as u32)
+}
+// wave11 GF end

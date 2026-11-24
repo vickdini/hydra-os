@@ -994,6 +994,8 @@ const _: () = assert!(core::mem::size_of::<LxCall>() <= LX_CALL_PARTIAL_OFF);
 /// `SYS_LX_OBJ` op 71 `LX_OBJ_PARTIAL(request id, answer)`: the request (served or waiting) has
 /// done part of its work that cannot be undone; `answer` (> 0) is what its caller gets if
 /// the service dies before answering it (a blocking stream send waiting with bytes sent).
+/// (wave11 GF: a negative errno marks a call whose effect may have begun outside the service
+/// — a FUSE change sent to its daemon —: it answers that errno instead of being resent.)
 pub const LX_OBJ_PARTIAL: u64 = 71;
 /// net-server's status word (`NETS_ST_*`) with its instance's epoch (a number new at every
 /// start, never 0): lx-net keeps it with its sockets and trusts kept handles only when it
@@ -3168,3 +3170,24 @@ pub struct LxNs0Fuse {
     pub source: [u8; LX_NS0FUSE_NAME_MAX],
 }
 // wave10 GV2 end
+
+// wave11 GF begin: the last walks (named mounts of a namespace's table walked by the file
+// service; UEFI variables written through linux-server)
+/// [`LxMntRec::kind`]: a proc mounted somewhere else than where Hydra serves it (bubblewrap's
+/// `/oldroot/proc`, `/newroot/proc`): the walk redirects to the process service
+/// ([`LXS_PROC`], [`LX_VFS_PSEUDO_PROC`]) with the rest of the path below the mount.
+pub const LX_MNT_PROC: u32 = 5;
+/// [`LxMntRec::kind`]: a devpts mounted elsewhere (bubblewrap's `--dev`): the walk redirects
+/// to the terminal service ([`LXS_TTY`], `LX_VFS_PSEUDO_DEVPTS` with its "below `pts`" bit).
+pub const LX_MNT_DEVPTS: u32 = 6;
+/// `SYS_LX_OBJ` operation (linux-server's host only): `(name, name_len | len << 32, buf)`:
+/// sets the UEFI variable of efivarfs file name `name` (`<Name>-<vendor GUID>`) to `len`
+/// bytes at `buf` (the 4-byte attributes, then the data, as an efivarfs write); `len` 0
+/// deletes it. The pool's efivars files are written again afterwards. The caller decided
+/// the permission (`CAP_SYS_ADMIN`).
+pub const LX_INFO_EFIVAR_SET: u64 = 83;
+/// `LX_KCALL_TTY` op `(op, buf, count, from)`: `getdents64` of a `/dev/pts` directory handle:
+/// `.`, `..`, `ptmx` and the live slaves from entry index `from` into the caller's `buf` (at
+/// most `count` bytes); answers the length `| next index << 32` (`-EINVAL`: no room for one).
+pub const LX_TTY_K_LIST: u64 = 8;
+// wave11 GF end

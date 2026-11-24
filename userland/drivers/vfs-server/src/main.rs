@@ -220,7 +220,8 @@ fn main(args: &[&str]) {
 /// completes it (or leaves it waiting for the next answer).
 pub fn rerun(call: &LxCall) {
     let cx = Cx::from_call(call, core::ptr::null_mut());
-    let (r, flags) = calls::serve(&cx).unwrap_or((ENOSYS, 0));
+    // (wave11 GF: the mount calls wait for a FUSE daemon too)
+    let (r, flags) = calls::serve(&cx).or_else(|| mountcalls::serve(&cx)).unwrap_or((ENOSYS, 0));
     if flags & LX_REPLY_PENDING != 0 {
         return;
     }

@@ -444,3 +444,89 @@ impl ConnRec {
         })
     }
 }
+
+// wave11 GF begin
+/// `struct fuse_setattr_in` (88 bytes) setting what is given: the mode, owner, group, size,
+/// access and modification times (`FATTR_*` valid bits), as the kernel's client made it.
+pub fn setattr_in(mode: Option<u32>, uid: Option<u32>, gid: Option<u32>, size: Option<u64>, atime: Option<(i64, u32)>, mtime: Option<(i64, u32)>) -> Vec<u8> {
+    const FATTR_MODE: u32 = 1;
+    const FATTR_UID: u32 = 2;
+    const FATTR_GID: u32 = 4;
+    const FATTR_SIZE: u32 = 8;
+    const FATTR_ATIME: u32 = 16;
+    const FATTR_MTIME: u32 = 32;
+    let valid = [(mode.is_some(), FATTR_MODE), (uid.is_some(), FATTR_UID), (gid.is_some(), FATTR_GID), (size.is_some(), FATTR_SIZE), (atime.is_some(), FATTR_ATIME), (mtime.is_some(), FATTR_MTIME)]
+        .iter()
+        .filter(|(on, _)| *on)
+        .fold(0u32, |v, (_, b)| v | b);
+    let mut a = Vec::with_capacity(88);
+    a.extend_from_slice(&valid.to_le_bytes());
+    a.extend_from_slice(&0u32.to_le_bytes());
+    a.extend_from_slice(&0u64.to_le_bytes()); // fh
+    a.extend_from_slice(&size.unwrap_or(0).to_le_bytes());
+    a.extend_from_slice(&0u64.to_le_bytes()); // lock_owner
+    a.extend_from_slice(&(atime.map_or(0, |t| t.0) as u64).to_le_bytes());
+    a.extend_from_slice(&(mtime.map_or(0, |t| t.0) as u64).to_le_bytes());
+    a.extend_from_slice(&0u64.to_le_bytes()); // ctime
+    a.extend_from_slice(&atime.map_or(0, |t| t.1).to_le_bytes());
+    a.extend_from_slice(&mtime.map_or(0, |t| t.1).to_le_bytes());
+    a.extend_from_slice(&0u32.to_le_bytes()); // ctimensec
+    a.extend_from_slice(&mode.unwrap_or(0).to_le_bytes());
+    a.extend_from_slice(&0u32.to_le_bytes());
+    a.extend_from_slice(&uid.unwrap_or(0).to_le_bytes());
+    a.extend_from_slice(&gid.unwrap_or(0).to_le_bytes());
+    a.extend_from_slice(&0u32.to_le_bytes());
+    a
+}
+// wave11 GF end
+
+// wave11 GF (review 1) begin
+/// The mode a FUSE SETATTR must carry so the set-ID bits go as on Linux (the daemon is
+/// never told to drop them): `mode`/`gid` the file's now (`dir`: a directory, never
+/// changed), `set_mode` a chmod's new bits, `size` a truncation, `chown` a chown (Linux
+/// clears set-user-ID, and set-group-ID with group execute, of a non-directory), `fsetid`
+/// the caller has `CAP_FSETID`, `in_gid` it is in the file's group. `None`: no mode to send.
+pub fn setid_mode(mode: u32, dir: bool, set_mode: Option<u32>, size: bool, chown: bool, fsetid: bool, in_gid: bool) -> Option<u32> {
+    let mut m = set_mode.unwrap_or(mode & 0o7777);
+    if !dir {
+        if chown {
+            m &= !0o4000;
+            if m & 0o2010 == 0o2010 {
+                m &= !0o2000;
+            }
+        }
+        if size && set_mode.is_none() && !fsetid {
+            m &= !0o4000;
+            if m & 0o2000 != 0 && (m & 0o010 != 0 || !in_gid) {
+                m &= !0o2000;
+            }
+        }
+    }
+    // chmod by a caller outside the file's group (and without CAP_FSETID): no S_ISGID
+    if set_mode.is_some() && !fsetid && !in_gid {
+        m &= !0o2000;
+    }
+    (set_mode.is_some() || m != mode & 0o7777).then_some(m)
+}
+// wave11 GF (review 1) end
+
+// wave11 GF (review 6) begin
+/// The node type `mknod` makes from mode type bits `t` (Linux's `may_mknod`: 0 is a regular
+/// file; a directory `EPERM`; anything but a regular file, device, FIFO or socket `EINVAL`).
+pub fn mknod_type(t: u32) -> Result<u32, i64> {
+    match t {
+        0 => Ok(S_IFREG),
+        0o100000 | 0o020000 | 0o060000 | 0o010000 | 0o140000 => Ok(t),
+        S_IFDIR => Err(-1),
+        _ => Err(-22),
+    }
+}
+
+/// A user's `dev_t` (glibc's encoding: major bits 8..20 and 32..44, minor bits 0..8 and
+/// 20..32) as the kernel's `new_encode_dev` for FUSE's 32-bit `rdev`.
+pub fn new_encode_dev(dev: u64) -> u64 {
+    let major = ((dev >> 8) & 0xFFF) | ((dev >> 32) & !0xFFF);
+    let minor = (dev & 0xFF) | ((dev >> 12) & !0xFF);
+    ((minor & 0xFF) | ((major & 0xFFF) << 8) | ((minor & !0xFF) << 12)) & 0xFFFF_FFFF
+}
+// wave11 GF (review 6) end

@@ -402,3 +402,69 @@ fn a_cut_record_is_an_overrun() {
     r.bytes();
     assert!(r.overrun());
 }
+
+// wave11 GF begin: named mounts walked or redirected by their services; nodes in FUSE mounts
+#[test]
+fn proc_and_devpts_mounted_elsewhere_go_to_their_services() {
+    use crate::proto::{LXS_TTY, LX_MNT_DEVPTS, LX_MNT_PROC, LX_VFS_PSEUDO_DEVPTS, LX_VFS_PSEUDO_PROC};
+    let t = tree();
+    let pts = t.fs.mkdir(t.etc, "pts", 0o755);
+    let recs = alloc::vec![rec(LX_MNT_TREE, 0, 0, 0, ROOT), rec(LX_MNT_PROC, 0, 1, t.nrproc, 0), rec(LX_MNT_DEVPTS, 0, 1, pts, 0)];
+    let v = kmounts::parse(5, &LxMntHead { gen: 3, root: 1, n: 3 }, &recs).unwrap();
+    let be = WithView { fs: &t.fs, view: &v };
+    let cx = ns_cx();
+    match walk::walk(&be, &cx, Start::Root, b"/newroot/proc/self/fd/1", 0) {
+        Ok(Walked::Redirect(r)) => {
+            assert_eq!((r.svc, r.obj), (LXS_PROC, LX_VFS_PSEUDO_PROC));
+            assert_eq!(r.tail, Some(14), "the rest below the mount: self/fd/1");
+        }
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+    match walk::walk(&be, &cx, Start::Root, b"/etc/pts/3", 0) {
+        Ok(Walked::Redirect(r)) => {
+            assert_eq!((r.svc, r.obj), (LXS_TTY, LX_VFS_PSEUDO_DEVPTS | 0x100 | 0x200), "a devpts of its own (root 0)");
+            assert_eq!(r.tail, Some(9));
+        }
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+    // (review 4) The system's devpts (its root the pool's /dev/pts): the system's view
+    let recs2 = alloc::vec![rec(LX_MNT_TREE, 0, 0, 0, ROOT), rec(LX_MNT_DEVPTS, 0, 1, pts, pts)];
+    let v2 = kmounts::parse(5, &LxMntHead { gen: 3, root: 1, n: 2 }, &recs2).unwrap();
+    let be2 = WithView { fs: &t.fs, view: &v2 };
+    match walk::walk(&be2, &cx, Start::Root, b"/etc/pts/3", 0) {
+        Ok(Walked::Redirect(r)) => assert_eq!(r.obj, LX_VFS_PSEUDO_DEVPTS | 0x100),
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+    // The mount points' own directories are not walked from (nothing of the pool there)
+    assert!(!v.walkable(Node::new(2, t.nrproc)));
+    // A kind beyond devpts is still refused
+    assert!(kmounts::parse(5, &LxMntHead { gen: 1, root: 1, n: 2 }, &[recs[0], rec(LX_MNT_DEVPTS + 1, 0, 1, 3, 0)]).is_none());
+}
+
+#[test]
+fn nodes_in_fuse_mounts_are_walked_from() {
+    use crate::fuse::wire::ino;
+    use crate::proto::LX_MNT_FUSE;
+    let t = tree();
+    let (a, b) = (0x8001u16, 0x8002u16);
+    // The initial namespace: two FUSE mounts (connections a, b)
+    let recs = alloc::vec![rec(LX_MNT_FUSE, 0, 0, t.doc, ino(a, 1)), rec(LX_MNT_FUSE, 0, 0, t.tmp, ino(b, 1))];
+    let v = kmounts::parse(0, &LxMntHead { gen: 2, root: 0, n: 2 }, &recs).unwrap();
+    assert!(v.walkable_or_fuse(Node::new(1, ino(a, 7))));
+    assert!(v.walkable_or_fuse(Node::new(2, ino(b, 1))));
+    assert!(!v.walkable_or_fuse(Node::new(1, ino(b, 7))), "another connection's node in mount 1");
+    assert!(!v.walkable_or_fuse(Node::new(0, ino(a, 7))), "a FUSE node without its mount");
+    assert!(!v.walkable_or_fuse(Node::new(3, ino(a, 7))), "a mount the table does not have");
+    assert!(v.walkable_or_fuse(Node::new(0, ROOT)), "the pool's own tree");
+    assert!(!v.walkable(Node::new(1, ino(a, 7))), "walkable alone stays the pool's");
+    assert_eq!(v.fuse_mount_of(ino(a, 7)), Some(1));
+    assert_eq!(v.fuse_mount_of(ino(b, 9)), Some(2));
+    assert_eq!(v.fuse_mount_of(ino(0x8003, 1)), None);
+    assert_eq!(v.fuse_mount_of(ROOT), None);
+    // Another namespace: a FUSE mount on a pool tree is walked from; on a kernel mount not
+    let recs = alloc::vec![rec(LX_MNT_TREE, 0, 0, 0, ROOT), rec(LX_MNT_FUSE, 0, 1, t.doc, ino(a, 1)), rec(LX_MNT_KERNEL, 0, 1, t.nrproc, 0), rec(LX_MNT_FUSE, 0, 3, 5, ino(b, 1))];
+    let v = kmounts::parse(5, &LxMntHead { gen: 3, root: 1, n: 4 }, &recs).unwrap();
+    assert!(v.walkable_or_fuse(Node::new(2, ino(a, 3))));
+    assert!(!v.walkable_or_fuse(Node::new(4, ino(b, 3))), "below a mount the kernel serves");
+}
+// wave11 GF end
