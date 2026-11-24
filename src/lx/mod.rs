@@ -347,9 +347,17 @@ fn is_trace_nr(nr: u64) -> bool {
     matches!(nr, 101 | 298 | 310 | 311 | 312 | 438)
 }
 
+/// Whether lx-proc decides call `nr` and has the kernel run it (a redirect to service 0,
+/// with or without an approval mark): the tracing calls and 7b-1's syslog, acct, unshare, setns, prctl. A
+/// lock-free redirect of one of them is marked so the ordinary path runs it at once.
+#[inline]
+fn is_decided_nr(nr: u64) -> bool {
+    is_trace_nr(nr) || matches!(nr, 103 | 157 | 163 | 272 | 308)
+}
+
 /// [`fast_entry`] got a redirect to the kernel for the calling thread's tracing call `nr`.
 fn trace_to_kernel_set(tid: u64, nr: u64) {
-    if is_trace_nr(nr) && tid != 0 {
+    if is_decided_nr(nr) && tid != 0 {
         let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
         TRACE_TO_KERNEL[cpu].store(tid << 12 | nr, Ordering::Relaxed);
         TRACE_MARKS.0.fetch_add(1, Ordering::Relaxed);
@@ -358,7 +366,7 @@ fn trace_to_kernel_set(tid: u64, nr: u64) {
 
 /// Takes this CPU's mark: whether it was the calling thread's call `nr`.
 fn trace_to_kernel_take(nr: u64) -> bool {
-    if !is_trace_nr(nr) {
+    if !is_decided_nr(nr) {
         return false;
     }
     let cpu = crate::arch::percpu::cpu().min(crate::arch::smp::MAX_CPUS - 1);
@@ -1227,6 +1235,11 @@ fn call_ident_raw(x: &'static Host, mut c: LxCall, groups: bool) -> i64 {
             c.ngroups = n as u64;
         }
     }
+    // wave10 G8-1: a tracing call carries its facts (no LXP_TRACE_FACTS round trip)
+    #[cfg(target_os = "uefi")]
+    if is_trace_nr(c.nr) {
+        trace::carry(&mut c, true);
+    }
     // The waits of `call_with` need no kernel lock: let the worker's answer switch straight
     // back to this thread even from a CPU without it (a thread blocked under the lock could
     // only be woken through the scheduler), and take the lock again before going on
@@ -2081,6 +2094,11 @@ pub fn fast_entry(frame: &SyscallFrame) -> Option<Fast> {
         }
         drop(table);
         drop_last(fds);
+    }
+    // wave10 G8-1: a tracing call carries its facts (no LXP_TRACE_FACTS round trip)
+    #[cfg(target_os = "uefi")]
+    if is_trace_nr(nr) {
+        trace::carry(&mut c, false);
     }
     let idx = crate::task::scheduler::CURRENT_IDX.load(Ordering::Relaxed) as usize;
     FAST_CALLS.fetch_add(1, Ordering::Relaxed);

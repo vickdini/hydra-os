@@ -71,7 +71,7 @@ fn static_and_system_files() {
     assert_eq!(text("/proc/sys/kernel/msgmax"), "8192\n");
     assert_eq!(text("/proc/sys/kernel/msgmnb"), "16384\n");
     assert_eq!(text("/proc/sys/kernel/msgmni"), "32000\n");
-    assert_eq!(text("/proc/sys/kernel/yama/ptrace_scope"), "3\n");
+    assert_eq!(text("/proc/sys/kernel/yama/ptrace_scope"), "0\n");
     assert_eq!(text("/proc/sys/kernel/perf_event_paranoid"), "2\n");
     assert_eq!(text("/proc/sys/user/max_user_namespaces"), "15000\n");
     assert_eq!(pfs::match_pseudo_path("/proc/sys/user/max_user_namespaces").unwrap().write(b"5\n"), 2);

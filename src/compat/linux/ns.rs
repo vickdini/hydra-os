@@ -671,7 +671,11 @@ fn user_ns_within(inner: &Option<Arc<UserNs>>, outer: &Option<Arc<UserNs>>) -> b
 /// Whether process `target`'s user namespace is process `caller`'s or lies below it
 /// (`false` when `target` is gone).
 pub fn user_within(target: u64, caller: u64) -> bool {
-    let procs = super::proc::PROCS.lock();
+    user_within_in(&super::proc::PROCS.lock(), target, caller)
+}
+
+/// [`user_within`] on a process table the caller holds.
+pub fn user_within_in(procs: &alloc::collections::BTreeMap<u64, alloc::boxed::Box<super::proc::Process>>, target: u64, caller: u64) -> bool {
     let Some(t) = procs.get(&target) else { return false };
     let mine = procs.get(&caller).and_then(|p| p.ns.user.clone());
     user_ns_within(&t.ns.user, &mine)

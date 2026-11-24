@@ -2734,6 +2734,10 @@ pub const LXP_ATTR_CAPS: u64 = 7;
 /// approval mark. Errors: those of the call before its permission check (`ESRCH`, `EBADF`,
 /// ...): lx-proc redirects with key 0 (the kernel decides).
 pub const LXP_TRACE_FACTS: u64 = 17;
+/// [`LxCall::flags`] bit: a tracing call (lx-proc's) carries its facts, the 16 words of
+/// `LXP_TRACE_FACTS`, in [`LxCall::groups`] (word `i` = `groups[2i] | groups[2i+1] << 32`;
+/// the call has no use for the groups), so lx-proc needs no `LXP_TRACE_FACTS` round trip.
+pub const LX_CALL_FACTS: u64 = 1 << 8;
 // wave10 G8-1 end
 
 // wave9 G6b-3 begin: Landlock and ABAC checks in the file service

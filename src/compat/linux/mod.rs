@@ -303,6 +303,20 @@ pub fn changes_identity(nr: u64) -> bool {
     matches!(nr, 59 | 322 | 101 | 105 | 106 | 113 | 114 | 116 | 117 | 119 | 122 | 123 | 126 | 157 | 272 | 308 | 317)
 }
 
+// wave10 G8-1 begin
+/// [`changes_identity`] for a call with first argument `arg0`: of `ptrace`'s requests only
+/// those that make or end a tracing (TRACEME, ATTACH, SEIZE, DETACH; a traced thread takes
+/// no lock-free path) change what the cached identities say. The requests on an attached
+/// tracee (PEEK/POKE/GETREGS/CONT/SINGLESTEP...) no longer make every thread in the system
+/// rebuild its cache.
+pub fn changes_identity_of(nr: u64, arg0: u64) -> bool {
+    if nr == 101 {
+        return matches!(arg0, 0 | 16 | 17 | 0x4206);
+    }
+    changes_identity(nr)
+}
+// wave10 G8-1 end
+
 /// High-level Linux system call dispatcher called by the hardware SYSCALL trampoline
 /// when the active task personality is set to Linux.
 ///

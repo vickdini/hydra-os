@@ -198,8 +198,9 @@ pub fn match_pseudo_path(path: &str) -> Option<PseudoFile> {
         "/proc/sys/kernel/msgmax" => Some(PseudoFile::ProcStatic(b"8192\n")),
         "/proc/sys/kernel/msgmnb" => Some(PseudoFile::ProcStatic(b"16384\n")),
         "/proc/sys/kernel/msgmni" => Some(PseudoFile::ProcStatic(b"32000\n")),
-        // Yama mode 3 ("no attach"): true of Hydra, which has no ptrace at all
-        "/proc/sys/kernel/yama/ptrace_scope" => Some(PseudoFile::ProcStatic(b"3\n")),
+        // wave10 G8-1: Yama scope 0 ("classic ptrace permissions"): what Hydra enforces
+        // (`lx::ptrace_rules`; no Yama restrictions); gdb and others read it to explain a refusal
+        "/proc/sys/kernel/yama/ptrace_scope" => Some(PseudoFile::ProcStatic(b"0\n")),
         "/proc/sys/kernel/perf_event_paranoid" => Some(PseudoFile::ProcStatic(b"2\n")),
         // /proc/<pid>/oom_score_adj and oom_score
         p if p.starts_with("/proc/asound/") && super::snd::is_proc_file(p) => Some(PseudoFile::ProcSnd(alloc::string::String::from(&p[13..]))),

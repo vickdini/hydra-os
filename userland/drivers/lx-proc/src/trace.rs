@@ -42,11 +42,16 @@ pub enum Answer {
 
 /// Decides call `c` (one of [`handles`]'): always a redirect to the kernel, with the key of
 /// the verdict when the facts could be had (the kernel keeps it as the call's approval mark;
-/// no `LXP_APPROVE` round trip).
-pub fn serve<K: Kernel, M: Mem>(k: &K, m: &M, c: &Call) -> Answer {
+/// no `LXP_APPROVE` round trip). `carried`: the facts the kernel put into the call
+/// (`LX_CALL_FACTS`); without them lx-proc asks `LXP_TRACE_FACTS`.
+pub fn serve<K: Kernel, M: Mem>(k: &K, m: &M, c: &Call, carried: Option<[u64; 16]>) -> Answer {
     let mut io = LxProcIo::EMPTY;
     io.a[0] = c.nr;
     io.a[1..7].copy_from_slice(&c.args);
+    // The facts the kernel put into the call on its way here (as good as asking)
+    if let Some(w) = carried {
+        return Answer::Kernel(rules::key(&w, rules::verdict(rules::decide(&rules::Facts::decode(&w)))));
+    }
     if c.nr == rules::NR_PERF_EVENT_OPEN {
         // (an attribute that cannot be read: the kernel's code gives EFAULT)
         let Ok(raw) = m.copy_in(c.args[0], ATTR_BITS + 8) else { return Answer::Kernel(0) };

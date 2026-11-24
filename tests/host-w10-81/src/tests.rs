@@ -293,7 +293,7 @@ fn key_of(a: trace::Answer) -> u64 {
 fn allowed_call_redirected_with_its_key() {
     let f = ptrace_facts(K_ATTACH, who(1000, 1000, 0), Some(tgt(1000, 1000)), 0);
     let k = K::with(Ok(f));
-    let key = key_of(trace::serve(&k, &no_mem(), &call(101, [PTRACE_ATTACH, 51, 0, 0, 0, 0])));
+    let key = key_of(trace::serve(&k, &no_mem(), &call(101, [PTRACE_ATTACH, 51, 0, 0, 0, 0]), None));
     let calls = k.calls.borrow();
     assert_eq!(calls.len(), 1, "one sub-op: the facts (the verdict rides on the redirect)");
     assert_eq!(calls[0].0, LXP_TRACE_FACTS);
@@ -305,14 +305,14 @@ fn allowed_call_redirected_with_its_key() {
 fn refused_call_carries_its_errno() {
     let f = ptrace_facts(K_ATTACH, who(1000, 1000, 0), Some(tgt(1001, 1001)), 0);
     let k = K::with(Ok(f));
-    let key = key_of(trace::serve(&k, &no_mem(), &call(101, [PTRACE_ATTACH, 51, 0, 0, 0, 0])));
+    let key = key_of(trace::serve(&k, &no_mem(), &call(101, [PTRACE_ATTACH, 51, 0, 0, 0, 0]), None));
     assert_eq!(verdict_of(key, &f.encode()), Some(EPERM));
 }
 
 #[test]
 fn facts_error_left_to_the_kernel() {
     let k = K::with(Err(ESRCH));
-    assert_eq!(trace::serve(&k, &no_mem(), &call(310, [99, 0, 0, 0, 0, 0])), trace::Answer::Kernel(0));
+    assert_eq!(trace::serve(&k, &no_mem(), &call(310, [99, 0, 0, 0, 0, 0]), None), trace::Answer::Kernel(0));
     assert_eq!(k.calls.borrow().len(), 1);
 }
 
@@ -324,7 +324,7 @@ fn perf_reads_the_attribute() {
     let m = M { addr: 0x1000, data: attr.clone() };
     let f = perf(who(1000, 1000, 0), false, PERF_PID_SELF, -1, None);
     let k = K::with(Ok(f));
-    let key = key_of(trace::serve(&k, &m, &call(298, [0x1000, 0, u64::MAX, u64::MAX, 0, 0])));
+    let key = key_of(trace::serve(&k, &m, &call(298, [0x1000, 0, u64::MAX, u64::MAX, 0, 0]), None));
     assert_eq!(k.calls.borrow()[0].1[7], 0);
     assert_eq!(verdict_of(key, &f.encode()), Some(0));
     // exclude_kernel clear: the kernel-mode bit
@@ -332,11 +332,24 @@ fn perf_reads_the_attribute() {
     let m = M { addr: 0x1000, data: attr };
     let f = perf(who(1000, 1000, 0), true, PERF_PID_SELF, -1, None);
     let k = K::with(Ok(f));
-    let key = key_of(trace::serve(&k, &m, &call(298, [0x1000, 0, u64::MAX, u64::MAX, 0, 0])));
+    let key = key_of(trace::serve(&k, &m, &call(298, [0x1000, 0, u64::MAX, u64::MAX, 0, 0]), None));
     assert_eq!(k.calls.borrow()[0].1[7], PERF_KERNEL as u64);
     assert_eq!(verdict_of(key, &f.encode()), Some(EACCES));
     // an attribute that cannot be read: the kernel's code answers (EFAULT), nothing asked
     let k = K::with(Ok(Facts::default()));
-    assert_eq!(trace::serve(&k, &no_mem(), &call(298, [0x2000, 0, 0, 0, 0, 0])), trace::Answer::Kernel(0));
+    assert_eq!(trace::serve(&k, &no_mem(), &call(298, [0x2000, 0, 0, 0, 0, 0]), None), trace::Answer::Kernel(0));
     assert!(k.calls.borrow().is_empty());
+}
+
+#[test]
+fn carried_facts_need_no_round_trip() {
+    let f = ptrace_facts(K_ATTACH, who(1000, 1000, 0), Some(tgt(1001, 1001)), 0);
+    let k = K::with(Err(-22));
+    let key = key_of(trace::serve(&k, &no_mem(), &call(101, [PTRACE_ATTACH, 51, 0, 0, 0, 0]), Some(f.encode())));
+    assert!(k.calls.borrow().is_empty(), "no sub-op");
+    assert_eq!(verdict_of(key, &f.encode()), Some(EPERM));
+    // perf: the carried facts already hold the kernel-mode bit; the attribute is not read
+    let f = perf(who(1000, 1000, 0), true, PERF_PID_SELF, -1, None);
+    let key = key_of(trace::serve(&k, &no_mem(), &call(298, [0x2000, 0, 0, 0, 0, 0]), Some(f.encode())));
+    assert_eq!(verdict_of(key, &f.encode()), Some(EACCES));
 }

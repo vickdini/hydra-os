@@ -398,6 +398,55 @@ static int cmp_d(const void *a, const void *b) {
     return x < y ? -1 : x > y;
 }
 
+// Where a decided call's time goes: a cold or warm attach, a kcmp after an identity-epoch
+// bump (any ptrace call), a kcmp after a pause (the service's worker gone idle)
+static int probe(int n) {
+    double a1 = 0, a2 = 0, k0 = 0, k1 = 0, k2 = 0, n0 = 0, n1 = 0;
+    for (int i = 0; i < n; i++) {
+        struct target t = spawn(-1, -1);
+        double t0 = now_us();
+        long r = ptrace(PTRACE_ATTACH, t.pid, 0, 0);
+        a1 += now_us() - t0;
+        if (r != 0) return 1;
+        waitpid(t.pid, NULL, __WALL);
+        ptrace(PTRACE_DETACH, t.pid, 0, 0);
+        release(&t);
+        t = spawn(-1, -1);
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_VM, 0, 0);
+        t0 = now_us();
+        r = ptrace(PTRACE_ATTACH, t.pid, 0, 0);
+        a2 += now_us() - t0;
+        if (r != 0) return 1;
+        waitpid(t.pid, NULL, __WALL);
+        ptrace(PTRACE_DETACH, t.pid, 0, 0);
+        release(&t);
+        // kcmp: hot, after an epoch bump, after a pause
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_VM, 0, 0);
+        t0 = now_us();
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_VM, 0, 0);
+        k0 += now_us() - t0;
+        ptrace(PTRACE_PEEKDATA, 1, 0, 0);
+        t0 = now_us();
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_VM, 0, 0);
+        k1 += now_us() - t0;
+        usleep(2000);
+        t0 = now_us();
+        syscall(SYS_kcmp, getpid(), getpid(), KCMP_VM, 0, 0);
+        k2 += now_us() - t0;
+        // Hydra's null call to linux-server (0x6710): hot, and after a pause
+        syscall(0x6710);
+        t0 = now_us();
+        syscall(0x6710);
+        n0 += now_us() - t0;
+        usleep(2000);
+        t0 = now_us();
+        syscall(0x6710);
+        n1 += now_us() - t0;
+    }
+    printf("ptperm probe: attach %.2f attach-after-kcmp %.2f kcmp-hot %.2f kcmp-after-epoch %.2f kcmp-after-pause %.2f lx_null-hot %.2f lx_null-after-pause %.2f us\n", a1 / n, a2 / n, k0 / n, k1 / n, k2 / n, n0 / n, n1 / n);
+    return 0;
+}
+
 static int bench(int n) {
     double att[5], det[5], peek[5], regs[5], perf[5], kc[5], vm[5];
     for (int round = 0; round < 5; round++) {
@@ -525,6 +574,7 @@ int main(int argc, char **argv) {
         return *p;
     }
     if (argc > 2 && !strcmp(argv[1], "bench")) return bench(atoi(argv[2]));
+    if (argc > 2 && !strcmp(argv[1], "probe")) return probe(atoi(argv[2]));
     if (argc > 2 && !strcmp(argv[1], "step")) return step(atoi(argv[2]));
     if (geteuid() != 0) {
         printf("ptperm: run as root\n");

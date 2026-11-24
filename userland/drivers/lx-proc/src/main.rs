@@ -112,7 +112,9 @@ fn serve(c: &LxCall, page: *mut u8) -> Answer {
     let call = Call { nr: c.nr, args: c.args, tgid: c.tgid, caps: c.caps, ids: [c.uid, c.euid, c.suid, c.gid, c.egid, c.sgid] };
     // wave10 G8-1 begin
     if trace::handles(c.nr) {
-        let trace::Answer::Kernel(key) = trace::serve(&Sys { req: c.id }, &CallerMem(&cx), &call);
+        // (the facts the kernel carried with the call, if it could)
+        let facts = (c.flags & LX_CALL_FACTS != 0).then(|| core::array::from_fn(|i| c.groups[2 * i] as u64 | (c.groups[2 * i + 1] as u64) << 32));
+        let trace::Answer::Kernel(key) = trace::serve(&Sys { req: c.id }, &CallerMem(&cx), &call, facts);
         return svcrt::redirect(page, 0, key, 0);
     }
     let out = policy::serve(&Sys { req: c.id }, &CallerMem(&cx), &call);
