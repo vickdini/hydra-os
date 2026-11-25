@@ -34,7 +34,19 @@ pub fn step_fmt(args: core::fmt::Arguments) {
     record(args, true);
 }
 
-/// While set, a line goes to the file even with `crumbs=screen` ([`force_line`]).
+/// After the start menu: breadcrumbs on the screen only ([`screen_only_from_now`]).
+static SCREEN_ONLY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// From now on breadcrumbs go to the screen only, not to `\logs\steps.txt` (called after
+/// the start menu). The NUC's firmware stopped in its boot-file reads when breadcrumb lines
+/// were written to the same FAT volume between them (wave 11, start-menu bisect); the boot
+/// log file (written after ExitBootServices through the kernel's own disk path) carries
+/// the rest.
+pub fn screen_only_from_now() {
+    SCREEN_ONLY.store(true, Ordering::Relaxed);
+}
+
+/// While set, a line goes to the file even after [`screen_only_from_now`] ([`force_line`]).
 static FORCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// A breadcrumb written to the file whatever the boot words say (the start variant's name).
@@ -66,7 +78,7 @@ fn record(args: core::fmt::Arguments, show: bool) {
         return;
     }
     // (the start menu's test entries 5-7: screen lines only, no file writes)
-    let screen_only = crate::arch::bootopts::say(&[b"crumbs=screen"]) && !FORCE.load(Ordering::Relaxed);
+    let screen_only = SCREEN_ONLY.load(Ordering::Relaxed) && !FORCE.load(Ordering::Relaxed);
     if screen_only && !show {
         return;
     }
