@@ -1425,14 +1425,19 @@ impl Scheduler {
             let Some(i) = expired else { break };
             let h = self.handoffs[i].unwrap();
             // A driver call that ran out of time (QEMU's `nmi` monitor command dumps the
-            // tasks when more is needed)
-            crate::console::serial_write(&alloc::format!(
-                "[handoff] expired: server {} caller {} (cpu {})
+            // tasks when more is needed). wave11 GG: a server that exited is no timeout
+            // (a driver that found no device ends while the supervisor waits for it; the
+            // supervisor reports it): its caller resumes without a word
+            let server_alive = self.tasks.iter().any(|t| t.id.0 == h.server && t.state != TaskState::Dead);
+            if server_alive {
+                crate::console::serial_write(&alloc::format!(
+                    "[handoff] expired: server {} caller {} (cpu {})
 ",
-                h.server,
-                h.caller,
-                crate::arch::percpu::cpu()
-            ));
+                    h.server,
+                    h.caller,
+                    crate::arch::percpu::cpu()
+                ));
+            }
             for j in i..self.handoffs.len() - 1 {
                 self.handoffs[j] = self.handoffs[j + 1];
             }

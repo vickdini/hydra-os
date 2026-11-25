@@ -513,6 +513,24 @@ pub mod arch {
         pub fn bar_size(dev: &PciDevice, i: u8) -> u64 {
             bar(dev, i).1
         }
+        /// wave11 GG: the capability list walk, on the fake configuration space.
+        pub fn find_capability(dev: &PciDevice, id: u8) -> Option<u8> {
+            let (b, d, f) = (dev.bus, dev.device, dev.function);
+            if pci_read_u16(b, d, f, 0x06) & 0x10 == 0 {
+                return None;
+            }
+            let mut at = pci_read_u8(b, d, f, 0x34) & 0xFC;
+            for _ in 0..48 {
+                if at < 0x40 {
+                    return None;
+                }
+                if pci_read_u8(b, d, f, at) == id {
+                    return Some(at);
+                }
+                at = pci_read_u8(b, d, f, at + 1) & 0xFC;
+            }
+            None
+        }
     }
     /// *stub*
     pub mod iommu {

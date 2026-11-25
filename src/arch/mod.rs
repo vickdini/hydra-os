@@ -82,6 +82,12 @@ pub mod usb_input;
 pub mod pci;
 /// PCID (tagged TLB entries) and the one helper that loads CR3.
 pub mod pcid;
+// wave11 GG begin
+/// The page attribute table: write-combining memory for the framebuffer.
+pub mod pat;
+/// EHCI USB controllers: taken from the firmware and stopped before the IOMMU translates.
+pub mod ehci;
+// wave11 GG end
 pub mod percpu;
 /// Dual 8259 Programmable Interrupt Controller (PIC) initialization and IRQ masking.
 pub mod pic;

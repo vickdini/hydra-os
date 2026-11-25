@@ -204,6 +204,9 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     crate::memory::frame_allocator::enable_direct_map();
     // Global kernel pages (wave 4): the kernel half's TLB entries survive CR3 writes
     crate::arch::pcid::enable_global();
+    // wave11 GG: write-combining for the framebuffer (PAT entry 1), the console's view first
+    crate::arch::pat::init_bsp();
+    crate::video::gop::use_write_combining();
 
     // 7. Initialize and remap legacy 8259 dual-PIC (Master: IRQ 0..7 -> 32..39, Slave: IRQ 8..15 -> 40..47)
     crate::arch::pic::init();
@@ -241,7 +244,7 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     println!("  - Interrupts & IDT   : Hydra 256 gates (Double Fault on TSS IST1)");
     println!("  - IRQ & Hardware     : 8259 PIC Remapped [32..47], PIT Timer @ 100 Hz (STI active)");
     println!("  - Virtual Memory     : Autonomous PML4 Root at PhysAddr {:#x}", cr3_frame);
-    println!("  - Display & Input    : 1024x768 Linear Framebuffer & 8042 PS/2 Keyboard (IRQ 1)");
+    println!("  - Display & Input    : {}", crate::video::gop::banner_text()); // wave11 GG
     println!("============================================================\n");
 
     // 9. Enable CPU hardware interrupts (sti) after banner rendering completes
@@ -267,6 +270,8 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     // Driver programs run from here on (the takeover lock is released first: they run
     // while their registration is awaited)
     drop(done);
+    // wave11 GG: the firmware's EHCI controllers stopped before DMA remapping starts
+    crate::arch::ehci::quiesce_all();
     // DMA remapping on before any driver programs its device
     crate::arch::iommu::init();
     crate::task::supervisor::start_all();
