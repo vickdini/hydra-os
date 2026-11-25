@@ -102,3 +102,13 @@ fn stops_without_a_stack_before_touching_the_firmware_tables() {
     host::NX.set(true);
     assert_eq!(relocate::image_phys(), None);
 }
+
+// wave11 GH: an image in the kept 2-4 GiB slot stays where the firmware loaded it
+#[test]
+fn image_in_the_kept_slot_stays_low() {
+    assert!(relocate::in_kept_low_slot(0xc73e_0000, 0x80_0000));
+    assert!(relocate::in_kept_low_slot(2 << 30, 4 << 20));
+    assert!(!relocate::in_kept_low_slot((4 << 30) - 0x10_0000, 0x20_0000), "crosses 4 GiB");
+    assert!(!relocate::in_kept_low_slot(0x7f00_0000, 0x80_0000), "below 2 GiB: programs' space");
+    assert!(!relocate::in_kept_low_slot(0x1_0000_0000, 0x80_0000), "above 4 GiB");
+}

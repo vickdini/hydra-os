@@ -212,7 +212,11 @@ fn main() -> Status {
     // (out of the low addresses programs need, wherever the firmware loaded it)
     // wave11 GH: breadcrumbs (diagnostic stick), and the word nohigh / key N to stay low
     arch::crumb::step("entry point (before the move to the higher half)");
-    if arch::crumb::want_high() {
+    // wave11 GH: an image the firmware loaded into the kept 2-4 GiB slot stays there (option B)
+    let kept_low = arch::relocate::load_range().is_some_and(|(start, size)| arch::relocate::in_kept_low_slot(start, size));
+    if kept_low {
+        arch::crumb::step("image in the kept 2-4 GiB range: staying low");
+    } else if arch::crumb::want_high() {
         arch::relocate::go_high(boot);
     }
     arch::crumb::step("staying at the load address (no higher-half move)");

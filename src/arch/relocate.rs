@@ -188,6 +188,29 @@ fn direct_map(pml4: u64) -> Option<()> {
     Some(())
 }
 
+// wave11 GH begin
+/// Where the firmware loaded the image `(start, size)` while it still runs there (before
+/// [`go_high`]): `None` if its header cannot be read.
+pub fn load_range() -> Option<(u64, u64)> {
+    unsafe {
+        let base = core::ptr::addr_of!(__ImageBase) as u64;
+        if base >= KERNEL_BASE {
+            return None;
+        }
+        pe_info(base).map(|(_, size)| (base, size))
+    }
+}
+
+/// Whether the image lies inside [2 GiB, 4 GiB): the slot of the low half the kernel keeps
+/// in every address space anyway (PCI hole, APICs), so staying there takes nothing from
+/// programs. Then the move to the higher half is skipped (the NUC's firmware, wave 11: an
+/// AMI/Intel firmware stops in its first file read when the kernel's code runs high before
+/// ExitBootServices, even with its own CR3, stack and IDT).
+pub fn in_kept_low_slot(start: u64, size: u64) -> bool {
+    start >= 2 << 30 && start.saturating_add(size) <= 4 << 30
+}
+// wave11 GH end
+
 /// The image's base relocation table `(rva, size)` and size of image, from its PE header.
 unsafe fn pe_info(base: u64) -> Option<((u32, u32), u64)> {
     let rd32 = |a: u64| core::ptr::read_unaligned(a as *const u32);

@@ -122,7 +122,9 @@ pub fn fw_read(file: &mut uefi::proto::media::file::RegularFile, buf: &mut [u8])
     let n = buf.len().min(FW_BOUNCE_SIZE);
     crate::arch::crumb::quiet_fmt(format_args!("  firmware read: {} bytes into {:#x}", n, bounce)); // wave11 GH
     let tmp = unsafe { core::slice::from_raw_parts_mut(bounce as *mut u8, n) };
-    let got = file.read(tmp).map_err(|_| ())?;
+    let r = file.read(tmp);
+    crate::arch::crumb::quiet_fmt(format_args!("  read returned: {}", match &r { Ok(n) => alloc::format!("{} bytes", n), Err(e) => alloc::format!("error {:?}", e.status()) })); // wave11 GH
+    let got = r.map_err(|_| ())?;
     buf[..got].copy_from_slice(&tmp[..got]);
     Ok(got)
 }

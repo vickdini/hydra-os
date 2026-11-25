@@ -239,6 +239,13 @@ pub mod arch {
         pub fn image_phys() -> Option<u64> {
             crate::fake::with(|s| s.image_phys)
         }
+        /// *stub* wave11 GH: the image's load range (none on the host: the move is tried).
+        pub fn load_range() -> Option<(u64, u64)> {
+            None
+        }
+        pub fn in_kept_low_slot(_start: u64, _size: u64) -> bool {
+            false
+        }
         /// *stub* wave11 GH: the rest of the boot, on the same (test) stack.
         pub fn run_on_kernel_stack(next: fn() -> !) -> ! {
             next()
