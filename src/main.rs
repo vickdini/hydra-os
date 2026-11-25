@@ -207,20 +207,30 @@ pub fn framebuffer_online(info: &video::VideoModeInfo) {
 fn main() -> Status {
     // First of all, before anything stores a pointer: the image moves to the higher half
     // (out of the low addresses programs need, wherever the firmware loaded it)
-    arch::relocate::go_high(boot);
+    // wave11 GH: breadcrumbs (diagnostic stick), and the word nohigh / key N to stay low
+    arch::crumb::step("entry point (before the move to the higher half)");
+    if arch::crumb::want_high() {
+        arch::relocate::go_high(boot);
+    }
+    arch::crumb::step("staying at the load address (no higher-half move)");
     boot()
 }
 
 /// The kernel's boot sequence, in the higher half (see [`arch::relocate`]).
 pub fn boot() -> ! {
+    arch::crumb::step("boot() running"); // wave11 GH
     arch::boottime::mark("entry (UEFI helpers)");
     uefi::helpers::init().unwrap();
+    arch::crumb::step_fmt(format_args!("UEFI helpers ready; image at {:#x}", main as *const () as usize)); // wave11 GH
     // wave11 GH: the boot log's memory (a crashed start's log is kept for its file), then
     // the boot words and the start menu, before anything reads them
     arch::bootlog::early();
+    arch::crumb::step("boot log memory placed");
     arch::bootopts::init();
+    arch::crumb::step_fmt(format_args!("boot words: {}", core::str::from_utf8(arch::bootopts::words().text()).unwrap_or("?")));
     // The Hydra logo instead of boot messages, unless the boot entry asks for them
     video::splash::decide();
+    arch::crumb::step("splash decided"); // wave11 GH
     // The boot processor's per-CPU data, and the kernel lock it holds while in the kernel
     arch::boottime::mark("banner");
     arch::percpu::init_this_cpu(0);
@@ -250,6 +260,7 @@ pub fn boot() -> ! {
 
     // Test CPU exception dispatch with non-fatal breakpoint trap
     x86_64::instructions::interrupts::int3();
+    arch::crumb::step("int3 trap returned"); // wave11 GH
     console::set_color(Color::LightGreen, Color::Black);
     println!("[+] CPU exception dispatch verified: resumed cleanly from #BP trap.");
 
@@ -270,6 +281,7 @@ pub fn boot() -> ! {
     arch::boottime::mark("memory map, frame allocator");
     println!("\n[*] Step 2: Discovering Memory & Initializing Frame Allocator...");
     memory::frame_allocator::init_memory_from_uefi();
+    arch::crumb::step("frame allocator ready"); // wave11 GH
 
     let (usable_mb, allocated_kb) = {
         let alloc = memory::frame_allocator::FRAME_ALLOCATOR.lock();
@@ -473,6 +485,7 @@ pub fn boot() -> ! {
     arch::boottime::mark("reading the boot files");
     arch::bootdisk::detect();
     arch::bootlog::prepare_file(); // wave11 GH: \logs\bootNNN.txt on the EFI partition
+    arch::crumb::step_fmt(format_args!("boot log file: {}", if arch::bootlog::file_on() { "made" } else { "none" })); // wave11 GH
     let boot_files = fs::ZfsClient::read_boot_files();
     console::set_color(Color::LightGreen, Color::Black);
     println!("[+] Boot volume: {} files staged for the pool", boot_files.len());
@@ -497,6 +510,7 @@ pub fn boot() -> ! {
     // Group 4: the boot options of the console (the emergency prompt), read while the
     // firmware's boot volume is still reachable
     crate::admin::boot::discover();
+    arch::crumb::step("console options read; taking over the hardware next"); // wave11 GH
 
     // 9. Hardware takeover: the kernel leaves the firmware behind and the driver programs
     //    (the disk driver among them) start in Ring 3

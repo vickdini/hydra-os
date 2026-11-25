@@ -22,10 +22,11 @@ back (part D). Nothing you can do here can harm the NUC's hardware.
 5. Click **START**. If Rufus asks how to write the image, choose **"Write in DD Image
    mode"**. Confirm that the stick will be erased. Wait until it says **READY** (a few
    minutes).
-6. Windows may now show a drive named **HYDRA-LIVE**, and perhaps a message that another
-   drive "needs to be formatted": **click Cancel. Never format it** (that part holds Hydra
-   itself, Windows just cannot read it).
+6. If Windows says a drive "needs to be formatted": **click Cancel. Never format it** (that
+   part holds Hydra itself; Windows just cannot read it).
 7. Eject the stick ("Safely remove") and unplug it.
+8. Also save the two small files `read-hydra-logs.cmd` and `read-hydra-logs.ps1` you were
+   given in one folder on the PC: they read Hydra's logs off the stick later (part D).
 
 ## B. Prepare the NUC and start Hydra
 
@@ -38,16 +39,23 @@ back (part D). Nothing you can do here can harm the NUC's hardware.
    appears. Check these settings (names differ a little between versions; leave everything
    else as it is):
    - **Boot > Secure Boot: off** (Disabled). Hydra is not signed for Secure Boot.
-   - **Boot > UEFI Boot: on.** (Legacy boot may stay on.)
+   - **Boot > Boot Priority: "UEFI Boot" ticked, "Legacy Boot" NOT ticked.** (The stick
+     only starts the UEFI way; with Legacy Boot on, the NUC may start it the old way and
+     show only a black screen.)
    - **Boot > Fast Boot: off** (so the NUC sees the stick and the F10 key).
    - **Advanced > Security** (or **Performance > Processor**): **Intel Virtualization
      Technology** and **Intel VT for Directed I/O (VT-d): on**, if they are listed.
    - Press **F10** to save and leave. The NUC restarts.
 5. Right after switching on (or after the restart), **press F10** repeatedly: a boot menu
-   appears. Choose the USB stick (its "UEFI" entry if there are two).
+   appears. Choose the stick's entry that **starts with "UEFI"** (for example "UEFI : USB ...").
+   An entry that just says "USB" is the old (legacy) way and will not work.
 6. **What you should see:**
-   - First a short text menu, **"Hydra - how to start"**, counting down 5 seconds. Do
-     nothing: entry 1 starts by itself. (If it does not count down, press **1**.)
+   - First a few lines starting with **`[hydra]`** (Hydra's first steps), then a short text
+     menu, **"Hydra - how to start"**, counting down 5 seconds. Do nothing: entry 1 starts by
+     itself. (If it does not count down, press **1**.)
+   - **If the screen stays black and no menu ever appears**, the non-UEFI entry was probably
+     chosen (or a message says "This Hydra stick needs UEFI boot"): switch off, check B.4
+     (Legacy Boot unticked) and choose the "UEFI" entry in F10.
    - Then the Hydra logo with a spinning circle, for up to a minute or two.
    - Then the desktop with a window **"You are trying Hydra"**. This is the live session:
      it runs from the stick and changes nothing on the NUC.
@@ -95,12 +103,16 @@ after 60 seconds to save its log; choose the stick again with F10 so it can writ
 1. If you tested the installed system (part C): start the stick once more (F10, entry 1)
    and simply shut it down again. On the way it copies the installed system's logs onto the
    stick (`logs\disk`).
-2. Plug the stick into the Windows PC. Open the drive **HYDRA-LIVE**, then the folder
-   **logs**. Every start left a file `boot001.txt`, `boot002.txt`, ... (the highest number
-   is the newest); the folder `disk` holds the installed system's ones.
-3. Right-click the **logs** folder > "Send to" > "Compressed (zipped) folder", and send that
-   zip file, your notes from B.7 / C.4, any photos and the Wi-Fi adapter's model back.
-4. Eject the stick safely before unplugging it.
+2. Plug the stick into the Windows PC. (Windows does not show the part of the stick where
+   Hydra keeps its logs, so a small script reads it; it only reads, it changes nothing.)
+3. In the folder where you saved them (A.8), **right-click `read-hydra-logs.cmd` > "Run as
+   administrator"** and confirm. It finds the Hydra stick by itself and puts a folder
+   `hydra-logs-<date>` and a file `hydra-logs-<date>.zip` on the Desktop. In the folder:
+   `steps.txt` (Hydra's first steps of the last start), `boot001.txt`, `boot002.txt`, ...
+   (one per start, the highest number is the newest) and `disk\` (the installed system's).
+4. Send that **zip file**, your notes from B.7 / C.4, any photos and the Wi-Fi adapter's
+   model back.
+5. Eject the stick safely before unplugging it.
 
 ## For the developers: what the stick does
 
@@ -112,5 +124,14 @@ after 60 seconds to save its log; choose the stick again with F10 so it can writ
   power-off/restart; after a kernel panic (or when the pool's disk never came) the log stays
   in memory, the machine restarts after 60 s and the next start writes it into the old
   file. See `src/arch/bootlog.rs`.
+- Breadcrumbs: with `\hydra\crumbs` on the EFI partition (the stick has it) every early
+  boot step is written to `\logs\steps.txt` through the firmware's file protocol, from the
+  entry point's first instruction, and shown as `[hydra] NN step` on the firmware console.
+  `src/arch/crumb.rs`.
+- Legacy (BIOS/CSM) start of the stick: the protective MBR's code area prints "This Hydra stick
+  needs UEFI boot" (`tools/build-image/mbr-message.py`).
+- Logs on Windows: `tools/nuc/read-hydra-logs.cmd` + `.ps1` (finds the disk whose partition 1
+  is an EFI partition and partition 2 a Hydra pool partition, reads FAT32 itself, read only;
+  `-Image FILE [-Offset N] -Out DIR` for image files).
 - The network is not needed: the boot waits at most 10 s for DHCP; the first-boot language
   download runs in the background and gives up after 10 minutes.

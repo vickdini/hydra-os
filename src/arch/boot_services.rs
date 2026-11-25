@@ -138,14 +138,18 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     set_hardware_mode(true);
 
     // 2b. The processors (ACPI MADT) and the start-up pages for the others
+    crate::arch::crumb::step("takeover: console on the framebuffer; reading the MADT"); // wave11 GH
     crate::arch::smp::discover();
+    crate::arch::crumb::step("takeover: MADT read; DMAR next"); // wave11 GH
     // 2c. The IOMMU's ACPI table (DMAR) and boot options
     crate::arch::iommu::discover();
     // 2d. PCID's off switches
     crate::arch::pcid::discover();
+    crate::arch::crumb::step("takeover: DMAR and PCID read; FADT next"); // wave11 GH
     // 2e. ACPI power-off and reset values (wave11 GH)
     crate::arch::power::discover();
 
+    crate::arch::crumb::end("takeover: ExitBootServices next (last breadcrumb)"); // wave11 GH
     // 3. Terminate UEFI Boot Services
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
     let entries_count = memory_map.entries().count();

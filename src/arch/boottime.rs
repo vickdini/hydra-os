@@ -17,6 +17,7 @@ fn tsc() -> u64 {
 
 /// Notes that boot stage `name` begins now.
 pub fn mark(name: &'static str) {
+    crate::arch::crumb::step(name); // wave11 GH: breadcrumbs (diagnostic stick)
     let i = COUNT.fetch_add(1, Ordering::AcqRel);
     if i < MAX {
         unsafe { (*core::ptr::addr_of_mut!(MARKS))[i] = (name, tsc()) };

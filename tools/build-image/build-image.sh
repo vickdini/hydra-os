@@ -147,6 +147,8 @@ esp_image() {
     mkdir -p "$R$WORK/esptree/hydra"
     printf 'Hydra live session: this file makes Hydra start as "try Hydra" from this stick.\r\n' > "$R$WORK/esptree/hydra/live"
     printf '# Hydra start menu: shown at every start; entry 1 starts after this many seconds.\r\ntimeout=5\r\n' > "$R$WORK/esptree/hydra/menu"
+    # Boot breadcrumbs (\logs\steps.txt and on screen) from the very first instruction
+    printf 'This file makes Hydra write each early start step into \\logs\\steps.txt (diagnostics).\r\n' > "$R$WORK/esptree/hydra/crumbs"
     printf '# Extra start words for Hydra, one or more per line (# starts a comment), e.g.\r\n#   verbose      boot messages instead of the logo\r\n#   iommu=off    no DMA remapping\r\n#   cpus=1       one processor\r\n' > "$R$WORK/esptree/hydra/options.txt"
     mkdir -p "$R$WORK/esptree/logs"
     printf 'Hydra writes a log of every start here: boot001.txt, boot002.txt, ... (the highest number is the newest).\r\nPlease send the newest one (or all of them) back.\r\n' > "$R$WORK/esptree/logs/README.TXT"
@@ -259,6 +261,7 @@ EOF
         dd if="$E" of="$S" bs=1M seek=1 conv=notrunc,sparse status=none
         dd if="$L" of="$S" bs=1M seek=$((1 + ESP_MIB)) conv=notrunc,sparse status=none
         rm -f "$E"
+        python3 "$HERE/mbr-message.py" "$S"
         sfdisk --list "$S"
         (cd "$R$OUT" && sha256sum hydra-live.img > hydra-live.img.sha256)
         say "stick image: $OUT/hydra-live.img ($(numfmt --to=iec "$total")), $(cat "$R$OUT/hydra-live.img.sha256")"
@@ -311,6 +314,7 @@ INSIDE
                 rm -f '$OUT/hydra-live.img'
                 qemu-img convert -O raw restick.qcow2 '$OUT/hydra-live.img'
                 rm -f restick.qcow2 esp.img"
+        python3 "$HERE/mbr-message.py" "$R$OUT/hydra-live.img"
         sfdisk --list "$R$OUT/hydra-live.img"
         (cd "$R$OUT" && sha256sum hydra-live.img > hydra-live.img.sha256)
         say "stick image: $OUT/hydra-live.img, $(cat "$R$OUT/hydra-live.img.sha256")"

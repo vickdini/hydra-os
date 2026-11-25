@@ -216,6 +216,7 @@ pub fn go_high(next: fn() -> !) {
         if base >= KERNEL_BASE {
             return;
         }
+        crate::arch::crumb::step("go_high: reading the PE header");
         let Some(((rva, len), size)) = pe_info(base) else { return };
         if rva == 0 || len == 0 || size == 0 || size > 0x3000_0000 {
             return;
@@ -224,6 +225,7 @@ pub fn go_high(next: fn() -> !) {
         if !each_reloc(base + rva as u64, len as u64, |_| {}) {
             return;
         }
+        crate::arch::crumb::step("go_high: relocations checked");
         // Hydra's top-level table: the firmware's entries (its identity map) and the top
         // entry for the image, which the firmware must not use
         let fw = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
@@ -233,15 +235,18 @@ pub fn go_high(next: fn() -> !) {
         }
         let Some(pml4) = page() else { return };
         core::ptr::copy_nonoverlapping(fw as *const u64, pml4 as *mut u64, 512);
+        crate::arch::crumb::step("go_high: firmware's top-level table copied");
         if direct_map(pml4).is_none() {
             return;
         }
+        crate::arch::crumb::step("go_high: direct map built");
         let size = (size + 4095) & !4095;
         for off in (0..size).step_by(4096) {
             if map(pml4, KERNEL_BASE + off, base + off).is_none() {
                 return;
             }
         }
+        crate::arch::crumb::step("go_high: image mapped high");
         let Some(stack) = stack_pages() else {
             return;
         };
@@ -250,10 +255,12 @@ pub fn go_high(next: fn() -> !) {
                 return;
             }
         }
+        crate::arch::crumb::step("go_high: stack mapped; switching CR3 next");
         // Nothing can fail from here on
         x86_64::instructions::interrupts::without_interrupts(|| {
             core::arch::asm!("mov cr3, {}", in(reg) pml4, options(nostack, preserves_flags));
         });
+        crate::arch::crumb::step("go_high: CR3 switched (Hydra's tables)");
         let delta = KERNEL_BASE.wrapping_sub(base);
         // Written through the high alias: the firmware may have made the identity pages
         // of read-only sections read-only
@@ -261,6 +268,7 @@ pub fn go_high(next: fn() -> !) {
             let p = (KERNEL_BASE + r) as *mut u64;
             core::ptr::write_unaligned(p, core::ptr::read_unaligned(p).wrapping_add(delta));
         });
+        crate::arch::crumb::step("go_high: relocations applied; jumping high next");
         crate::memory::frame_allocator::enable_direct_map();
         IMAGE_PHYS.store(base, Ordering::SeqCst);
         IMAGE_SIZE.store(size, Ordering::SeqCst);
