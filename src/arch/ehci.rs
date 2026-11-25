@@ -150,6 +150,136 @@ fn halt(hw: &mut impl Hw, caplen: usize, out: &mut Outcome) {
     hw.mmio_w32(caplen + USBSTS, 0x3F);
 }
 
+// wave11 GG (NUC run 8) begin
+/// What happened to an xHCI controller at takeover.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct XhciOutcome {
+    /// Its registers answered.
+    pub reachable: bool,
+    /// The firmware owned it (legacy support said "BIOS owned").
+    pub bios_owned: bool,
+    /// The firmware did not let go in time: ownership was taken by force.
+    pub forced: bool,
+    /// It was running (`USBCMD.R/S`).
+    pub was_running: bool,
+    /// It halted.
+    pub halted: bool,
+    /// The reset finished (`HCRST` and "controller not ready" both cleared).
+    pub reset: bool,
+}
+
+/// xHCI registers.
+const X_HCCPARAMS1: usize = 0x10;
+const X_USBCMD: usize = 0x00;
+const X_USBSTS: usize = 0x04;
+const X_CMD_RS: u32 = 1 << 0;
+const X_CMD_HCRST: u32 = 1 << 1;
+const X_STS_HCH: u32 = 1 << 0;
+const X_STS_CNR: u32 = 1 << 11;
+
+/// Takes the xHCI controller from the firmware and stops and resets it, so that nothing
+/// the firmware set up (its device context array, rings, scratchpad, all in memory the
+/// IOMMU no longer lets it reach) is fetched once DMA remapping is on: on the NUC the
+/// controller kept reading such memory (`[iommu] blocked DMA: device 00:14.0 ... tried to
+/// read 0xdbd8c000`) and then stopped serving the keyboard and mouse. The steps of
+/// Linux's `quirk_usb_handoff_xhci`: legacy support handoff (in the registers' extended
+/// capabilities), SMIs off, R/S cleared and up to 20 ms for HCHalted, then `HCRST` and up
+/// to a second for it and "controller not ready" to clear. Bus mastering stays as it is
+/// (the USB driver needs it; the supervisor turns it on).
+pub fn xhci_quiesce(hw: &mut impl Hw) -> XhciOutcome {
+    let mut out = XhciOutcome::default();
+    if hw.cfg_r32(PCI_COMMAND) & CMD_MEMORY == 0 {
+        return out;
+    }
+    let cap = hw.mmio_r32(0);
+    if cap == u32::MAX {
+        return out;
+    }
+    out.reachable = true;
+    let caplen = (cap & 0xFF) as usize;
+    // Extended capabilities: HCCPARAMS1 bits 31:16, in dwords from the register base
+    let mut off = ((hw.mmio_r32(X_HCCPARAMS1) >> 16) as usize) * 4;
+    for _ in 0..64 {
+        if off == 0 || off >= 0x10000 {
+            break;
+        }
+        let v = hw.mmio_r32(off);
+        if v & 0xFF == CAP_LEGSUP {
+            if v & LEGSUP_BIOS_OWNED != 0 {
+                out.bios_owned = true;
+                hw.mmio_w32(off, v | LEGSUP_OS_OWNED);
+                let mut left = 1000;
+                while hw.mmio_r32(off) & LEGSUP_BIOS_OWNED != 0 && left > 0 {
+                    hw.delay_us(1000);
+                    left -= 1;
+                }
+                if hw.mmio_r32(off) & LEGSUP_BIOS_OWNED != 0 {
+                    out.forced = true;
+                    let now = hw.mmio_r32(off);
+                    hw.mmio_w32(off, (now & !LEGSUP_BIOS_OWNED) | LEGSUP_OS_OWNED);
+                }
+            }
+            // SMI enables off, pending SMI events cleared (write 1 to clear)
+            let ctl = hw.mmio_r32(off + 4);
+            hw.mmio_w32(off + 4, (ctl & !0x0000_E011) | 0xE000_0000);
+            break;
+        }
+        let next = ((v >> 8) & 0xFF) as usize;
+        off = if next == 0 { 0 } else { off + next * 4 };
+    }
+    // Halt
+    let cmd = hw.mmio_r32(caplen + X_USBCMD);
+    out.was_running = cmd & X_CMD_RS != 0;
+    if out.was_running || hw.mmio_r32(caplen + X_USBSTS) & X_STS_HCH == 0 {
+        hw.mmio_w32(caplen + X_USBCMD, cmd & !X_CMD_RS);
+        for _ in 0..200 {
+            if hw.mmio_r32(caplen + X_USBSTS) & X_STS_HCH != 0 {
+                break;
+            }
+            hw.delay_us(100);
+        }
+    }
+    out.halted = hw.mmio_r32(caplen + X_USBSTS) & X_STS_HCH != 0;
+    if !out.halted {
+        return out;
+    }
+    // Reset: it forgets every pointer the firmware gave it
+    hw.mmio_w32(caplen + X_USBCMD, X_CMD_HCRST);
+    // (some Intel controllers must not be read for a moment after the reset starts)
+    hw.delay_us(1000);
+    for _ in 0..1000 {
+        if hw.mmio_r32(caplen + X_USBCMD) & X_CMD_HCRST == 0 && hw.mmio_r32(caplen + X_USBSTS) & X_STS_CNR == 0 {
+            out.reset = true;
+            break;
+        }
+        hw.delay_us(1000);
+    }
+    out
+}
+
+/// The log line for an xHCI controller.
+pub fn describe_xhci(name: &str, o: &XhciOutcome) -> alloc::string::String {
+    if !o.reachable {
+        return alloc::format!("[xhci] {}: registers not reachable from the kernel (left to usb-driver)", name);
+    }
+    alloc::format!(
+        "[xhci] {}: {}{}{}",
+        name,
+        if o.was_running { "was running, " } else { "" },
+        match (o.halted, o.reset) {
+            (true, true) => "halted and reset",
+            (true, false) => "halted; THE RESET DID NOT FINISH",
+            _ => "DID NOT HALT",
+        },
+        match (o.bios_owned, o.forced) {
+            (false, _) => "",
+            (true, false) => "; the firmware handed it over",
+            (true, true) => "; the firmware did not let go: taken by force",
+        }
+    )
+}
+// wave11 GG (NUC run 8) end
+
 /// One controller on the machine: configuration space by port I/O, registers through the
 /// direct map.
 struct Machine {
@@ -184,15 +314,28 @@ impl Hw for Machine {
     }
 }
 
-/// Takes every EHCI controller from the firmware and stops it. Called at takeover, before
+/// Takes every EHCI controller from the firmware and stops it, and stops and resets the
+/// xHCI one ([`xhci_quiesce`]). Called at takeover, before
 /// the IOMMU starts translating (and whether or not it does).
 pub fn quiesce_all() {
     for dev in super::pci::find_all_class(0x0C, 0x03) {
-        if super::pci::pci_read_u8(dev.bus, dev.device, dev.function, 0x09) != 0x20 {
-            continue; // UHCI, OHCI or xHCI
-        }
+        let progif = super::pci::pci_read_u8(dev.bus, dev.device, dev.function, 0x09);
         let bar = super::pci::bar_address(&dev, 0);
         let name = alloc::format!("{:02x}:{:02x}.{}", dev.bus, dev.device, dev.function);
+        // wave11 GG (NUC run 8): the xHCI controller too, stopped and reset
+        if progif == 0x30 {
+            let o = if bar == 0 || bar >= 4 << 30 {
+                XhciOutcome::default()
+            } else {
+                let regs = crate::memory::frame_allocator::phys_to_virt(bar) as *mut u32;
+                xhci_quiesce(&mut Machine { dev, regs })
+            };
+            crate::kprintln!("{}", describe_xhci(&name, &o));
+            continue;
+        }
+        if progif != 0x20 {
+            continue; // UHCI, OHCI
+        }
         let o = if bar == 0 || bar >= 4 << 30 {
             // No window to reach it through: at least no DMA
             let mut m = Machine { dev, regs: core::ptr::null_mut() };

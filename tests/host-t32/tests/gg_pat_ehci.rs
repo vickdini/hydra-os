@@ -333,3 +333,96 @@ fn a_screen_mapping_gets_write_combining_on_its_framebuffer_pages_only() {
     assert_eq!(pat::type_of_4k(pat::with_wc(POWER_ON_PAT), fb), pat::MT_WC, "framebuffer page: {fb:#x}");
     assert_eq!(pat::type_of_4k(pat::with_wc(POWER_ON_PAT), status), pat::MT_WB, "status page: {status:#x}");
 }
+
+// ---- ehci.rs: the xHCI controller stopped and reset at takeover (NUC run 8) ----
+
+/// A simulated xHCI controller whose firmware lets go after `release_after` delays and
+/// which halts and finishes its reset after a few delays.
+struct XFake {
+    mmio: BTreeMap<usize, u32>,
+    delays: u32,
+    release_after: Option<u32>,
+    resets_after: Option<u32>,
+    reset_at: Option<u32>,
+}
+
+const XECP: usize = 0x500;
+const XCAPLEN: usize = 0x80;
+
+impl XFake {
+    fn new(bios_owned: bool) -> XFake {
+        let mut mmio = BTreeMap::new();
+        mmio.insert(0x00, 0x0100_0000 | XCAPLEN as u32);
+        mmio.insert(0x10, ((XECP / 4) as u32) << 16);
+        // A vendor capability first, then legacy support
+        mmio.insert(XECP, 0xC0 | 2 << 8);
+        mmio.insert(XECP + 8, 1 | if bios_owned { 1 << 16 } else { 0 });
+        mmio.insert(XECP + 12, 0xE000_0011);
+        mmio.insert(XCAPLEN, 1); // running
+        mmio.insert(XCAPLEN + 4, 0);
+        XFake { mmio, delays: 0, release_after: Some(2), resets_after: Some(3), reset_at: None }
+    }
+}
+
+impl Hw for XFake {
+    fn cfg_r32(&mut self, off: u8) -> u32 {
+        if off == 0x04 { 0x0006 } else { 0 }
+    }
+    fn cfg_w32(&mut self, _off: u8, _v: u32) {
+        panic!("the xHCI's configuration space is left alone");
+    }
+    fn mmio_r32(&mut self, off: usize) -> u32 {
+        *self.mmio.get(&off).unwrap_or(&0)
+    }
+    fn mmio_w32(&mut self, off: usize, v: u32) {
+        if off == XCAPLEN && v & 2 != 0 {
+            self.reset_at = Some(self.delays);
+            self.mmio.insert(XCAPLEN, 2);
+            self.mmio.insert(XCAPLEN + 4, 1 | 1 << 11); // halted, not ready
+            return;
+        }
+        if off == XCAPLEN && v & 1 == 0 {
+            self.mmio.insert(XCAPLEN + 4, 1); // halts at once
+        }
+        self.mmio.insert(off, v);
+    }
+    fn delay_us(&mut self, _us: u64) {
+        self.delays += 1;
+        let os = self.mmio[&(XECP + 8)] & (1 << 24) != 0;
+        if os && self.release_after.is_some_and(|n| self.delays >= n) {
+            let v = self.mmio[&(XECP + 8)] & !(1 << 16);
+            self.mmio.insert(XECP + 8, v);
+        }
+        if let (Some(at), Some(n)) = (self.reset_at, self.resets_after) {
+            if self.delays >= at + n {
+                self.mmio.insert(XCAPLEN, 0);
+                self.mmio.insert(XCAPLEN + 4, 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn the_firmwares_xhci_is_handed_over_halted_and_reset_before_dma_remapping() {
+    let mut f = XFake::new(true);
+    let o = ehci::xhci_quiesce(&mut f);
+    assert_eq!(o, ehci::XhciOutcome { reachable: true, bios_owned: true, forced: false, was_running: true, halted: true, reset: true });
+    assert_eq!(f.mmio[&(XECP + 8)] & (1 << 24 | 1 << 16), 1 << 24, "OS owned, BIOS let go");
+    assert_eq!(f.mmio[&(XECP + 12)] & 0xE011, 0, "SMI enables off");
+    assert!(ehci::describe_xhci("00:14.0", &o).contains("was running, halted and reset; the firmware handed it over"));
+    // A firmware that never lets go, a reset that never finishes
+    let mut f = XFake::new(true);
+    f.release_after = None;
+    f.resets_after = None;
+    let o = ehci::xhci_quiesce(&mut f);
+    assert!(o.forced && o.halted && !o.reset);
+    assert!(ehci::describe_xhci("00:14.0", &o).contains("THE RESET DID NOT FINISH"));
+    // Not the firmware's: halted and reset all the same
+    let mut f = XFake::new(false);
+    let o = ehci::xhci_quiesce(&mut f);
+    assert!(!o.bios_owned && o.reset);
+    // Registers that do not answer
+    let mut f = XFake::new(false);
+    f.mmio.insert(0, u32::MAX);
+    assert_eq!(ehci::xhci_quiesce(&mut f), ehci::XhciOutcome::default());
+}

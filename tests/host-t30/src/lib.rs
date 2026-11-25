@@ -192,6 +192,8 @@ pub mod arch {
     }
     pub mod idt {
         pub static UACCESS_FAULTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        /// *stub* wave11 GG: the last user-copy fault per CPU.
+        pub static LAST_UACCESS_FAULT: [core::sync::atomic::AtomicU64; 16] = [const { core::sync::atomic::AtomicU64::new(0) }; 16];
         pub const MSI_VECTOR_BASE: u64 = 0x50;
     }
     pub mod fwcfg {
@@ -825,6 +827,10 @@ pub mod compat {
             use alloc::collections::BTreeMap;
             use alloc::vec::Vec;
 
+            /// *stub* wave11 GG: (pid, tid) of the caller.
+            pub fn current_ids() -> (u64, u64) {
+                (0, 0)
+            }
             // wave8 GX2 begin: *stub* signals and exits for `lx::desktop`
             pub fn has_exited(pid: u64) -> bool {
                 crate::fake::rec(|r| r.posted.iter().any(|p| p.0 == pid && p.2 == 9))
