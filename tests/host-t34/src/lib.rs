@@ -273,6 +273,9 @@ pub mod arch {
         pub fn after_panic() {}
         pub fn append(_text: &[u8]) {}
         pub fn at_power(_what: &'static str) {}
+        pub fn file_on() -> bool {
+            false
+        }
     }
     /// The boot words' real logic.
     #[path = "../../../../src/arch/bootwords.rs"]
@@ -289,6 +292,18 @@ pub mod arch {
         }
         pub fn ucs2() -> Vec<u8> {
             words().ucs2()
+        }
+    }
+    /// *stub* Boot breadcrumbs: none.
+    pub mod crumb {
+        pub fn step(_name: &str) {}
+        pub fn step_fmt(_args: core::fmt::Arguments) {}
+        pub fn end(_name: &str) {}
+        pub fn want_high() -> bool {
+            true
+        }
+        pub fn pick_gop() -> Option<uefi::Handle> {
+            None
         }
     }
     // wave11 GH end

@@ -60,6 +60,10 @@ pub mod crumb {
         true
     }
     pub fn end(_name: &str) {}
+    pub fn step_fmt(_args: core::fmt::Arguments) {}
+    pub fn pick_gop() -> Option<uefi::Handle> {
+        None
+    }
 }
 /// The boot words' plain logic.
 pub mod bootwords;
