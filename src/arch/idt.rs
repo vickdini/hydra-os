@@ -389,6 +389,20 @@ pub fn init() {
             for v in 32..fw_entries.min(256) {
                 idt.entries[v] = unsafe { core::ptr::read_unaligned(src.add(v)) };
             }
+            // During boot services the CPU reads the table from a firmware page below
+            // 4 GiB at its identity address (the image may lie above 4 GiB and is reached
+            // at a higher-half address; firmware code that looks at the IDT expects neither)
+            if let Ok(page) = uefi::boot::allocate_pages(uefi::boot::AllocateType::MaxAddress(0xFFFF_FFFF), uefi::boot::MemoryType::LOADER_DATA, 1) {
+                let low = page.as_ptr() as *mut IdtEntry;
+                unsafe { core::ptr::copy_nonoverlapping(idt.entries.as_ptr(), low, 256) };
+                let idtr = x86_64::structures::DescriptorTablePointer {
+                    limit: (core::mem::size_of::<InterruptDescriptorTable>() - 1) as u16,
+                    base: x86_64::VirtAddr::new(low as u64),
+                };
+                unsafe { x86_64::instructions::tables::lidt(&idtr) };
+                drop(idt);
+                return;
+            }
         }
     }
     // Load IDT into CPU
