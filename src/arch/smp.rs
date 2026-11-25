@@ -942,6 +942,7 @@ extern "C" fn ap_main(cpu: u64) -> ! {
         crate::arch::idt::enable_xsave(false);
         x86_64::registers::control::Cr0::write_raw(BSP_CR0.load(Ordering::Relaxed));
     }
+    crate::arch::pat::init_ap(); // wave11 GG: the boot processor's memory types
     crate::arch::gdt::load_for_ap(cpu);
     crate::arch::idt::load_on_this_cpu();
     // From here on it serves TLB flush requests (from its wait loops, then interrupts)

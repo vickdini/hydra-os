@@ -2,6 +2,23 @@
 
 use crate::native::*;
 
+/// A copy as the old `copy_rect` made it: everything in the rectangle written (a copy of
+/// the screen that is not valid yet), no cursor.
+fn copy_rect(t: &Target, src: Option<&Src>, crtc: (u32, u32), x0: u32, y0: u32, x1: u32, y1: u32) {
+    let mut sh = Shadow::new(t.width, t.height);
+    draw_rect(t, &mut sh, src, crtc, None, x0, y0, x1, y1);
+}
+
+/// The cursor drawn over the picture in its own area (the old `compose_cursor`).
+fn compose_cursor(t: &Target, src: Option<&Src>, crtc: (u32, u32), cur: &Cursor, x: i32, y: i32) -> (i32, i32, u32, u32) {
+    let mut sh = Shadow::new(t.width, t.height);
+    let p = Placed { cur, x, y };
+    let (x0, y0) = (x.max(0) as u32, y.max(0) as u32);
+    let (x1, y1) = ((x + cur.w as i32).max(0) as u32, (y + cur.h as i32).max(0) as u32);
+    draw_rect(t, &mut sh, src, crtc, Some(&p), x0, y0, x1, y1);
+    (x, y, cur.w, cur.h)
+}
+
 fn target(buf: &mut [u8], w: u32, h: u32, stride: usize, bgr: bool) -> Target {
     assert!(buf.len() >= stride * h as usize * 4);
     Target { ptr: buf.as_mut_ptr(), stride, width: w, height: h, bgr }
@@ -160,4 +177,141 @@ fn vblank_paces_at_sixty_hertz() {
         n += 1;
     }
     assert!((59..=61).contains(&n), "{n} completions in a second");
+}
+
+// wave11 GG: the copy of what the screen shows, and writes only where rows change
+
+/// A screen of `w` x `h` (stride = w) as a target, its copy made valid by a first full draw.
+fn shown_screen(scr: &mut [u8], pic: &[u8], w: u32, h: u32, cur: Option<&Placed>) -> (Target, Shadow) {
+    let t = target(scr, w, h, w as usize, true);
+    let mut sh = Shadow::new(w, h);
+    let d = draw_rect(&t, &mut sh, Some(&src(pic, w, h, w * 4)), (0, 0), cur, 0, 0, w, h);
+    assert_eq!(d.written, (w * h) as u64, "a copy not yet valid writes everything");
+    assert!(sh.is_valid());
+    (t, sh)
+}
+
+/// Fills the screen behind `t` with `b` (what is not written later keeps it).
+fn poison(t: &Target, w: u32, h: u32, b: u8) {
+    unsafe { core::ptr::write_bytes(t.ptr, b, (w * h * 4) as usize) };
+}
+
+#[test]
+fn an_unchanged_picture_writes_nothing() {
+    let (w, h) = (40u32, 10u32);
+    let pic = picture(w, h, w * 4);
+    let mut scr = vec![0u8; (w * h * 4) as usize];
+    let (t, mut sh) = shown_screen(&mut scr, &pic, w, h, None);
+    let d = draw_rect(&t, &mut sh, Some(&src(&pic, w, h, w * 4)), (0, 0), None, 0, 0, w, h);
+    assert_eq!(d, Drawn { composed: (w * h) as u64, written: 0 });
+}
+
+#[test]
+fn a_changed_pixel_writes_its_block_only() {
+    let (w, h) = (40u32, 10u32);
+    let mut pic = picture(w, h, w * 4);
+    let mut scr = vec![0u8; (w * h * 4) as usize];
+    let (t, mut sh) = shown_screen(&mut scr, &pic, w, h, None);
+    poison(&t, w, h, 0xEE);
+    let i = ((5 * w + 20) * 4) as usize;
+    pic[i..i + 4].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+    let d = draw_rect(&t, &mut sh, Some(&src(&pic, w, h, w * 4)), (0, 0), None, 0, 0, w, h);
+    assert_eq!(d.written, BLOCK as u64, "one block");
+    assert_eq!(px(&scr, w as usize, 20, 5), 0x1234_5678);
+    // The block (pixels 16..32 of row 5) was written whole, nothing else
+    assert_eq!(px(&scr, w as usize, 16, 5), 0xFF00_0000 | 5 << 12 | 16);
+    assert_eq!(px(&scr, w as usize, 15, 5), 0xEEEE_EEEE);
+    assert_eq!(px(&scr, w as usize, 32, 5), 0xEEEE_EEEE);
+    assert_eq!(px(&scr, w as usize, 20, 4), 0xEEEE_EEEE);
+}
+
+#[test]
+fn nearby_changes_merge_into_one_write() {
+    let (w, h) = (128u32, 1u32);
+    let mut pic = picture(w, h, w * 4);
+    let mut scr = vec![0u8; (w * h * 4) as usize];
+    let (t, mut sh) = shown_screen(&mut scr, &pic, w, h, None);
+    poison(&t, w, h, 0xEE);
+    // Blocks 0 and 2 change (one unchanged block between): one run of 3 blocks
+    for x in [0usize, 33] {
+        pic[x * 4] ^= 0xFF;
+    }
+    let d = draw_rect(&t, &mut sh, Some(&src(&pic, w, h, w * 4)), (0, 0), None, 0, 0, w, h);
+    assert_eq!(d.written, 3 * BLOCK as u64);
+    assert_eq!(px(&scr, w as usize, 20, 0), 0xFF00_0000 | 20, "the gap was written too");
+    // Blocks far apart: two writes, the middle untouched
+    let (t, mut sh) = shown_screen(&mut scr, &pic, w, h, None);
+    poison(&t, w, h, 0xEE);
+    for x in [0usize, 120] {
+        pic[x * 4] ^= 0xFF;
+    }
+    let d = draw_rect(&t, &mut sh, Some(&src(&pic, w, h, w * 4)), (0, 0), None, 0, 0, w, h);
+    assert_eq!(d.written, 2 * BLOCK as u64);
+    assert_eq!(px(&scr, w as usize, 60, 0), 0xEEEE_EEEE);
+}
+
+#[test]
+fn the_cursor_moves_without_ever_leaving_the_screen() {
+    let (w, h) = (64u32, 32u32);
+    let pic = picture(w, h, w * 4);
+    let cur = vec![255u8; 8 * 8 * 4]; // an opaque white 8x8 cursor
+    let c = Cursor { base: cur.as_ptr(), len: cur.len() as u64, w: 8, h: 8 };
+    let mut scr = vec![0u8; (w * h * 4) as usize];
+    let a = Placed { cur: &c, x: 10, y: 10 };
+    let (t, mut sh) = shown_screen(&mut scr, &pic, w, h, Some(&a));
+    assert_eq!(px(&scr, w as usize, 12, 12), 0xFFFF_FFFF);
+    // Move by 3 pixels: the old area, then the new one, each composed with the cursor at
+    // its new place. Pixels white before and after are never written with the picture.
+    poison(&t, w, h, 0xEE);
+    let b = Placed { cur: &c, x: 13, y: 10 };
+    let s = src(&pic, w, h, w * 4);
+    draw_rect(&t, &mut sh, Some(&s), (0, 0), Some(&b), 10, 10, 18, 18);
+    draw_rect(&t, &mut sh, Some(&s), (0, 0), Some(&b), 13, 10, 21, 18);
+    // Columns 10..13 became picture again, the cursor is at 13..21
+    assert_eq!(px(&scr, w as usize, 11, 12), 0xFF00_0000 | 12 << 12 | 11);
+    assert_eq!(px(&scr, w as usize, 14, 12), 0xFFFF_FFFF);
+    assert_eq!(px(&scr, w as usize, 20, 12), 0xFFFF_FFFF);
+    // Row 20 (below both areas) was not touched
+    assert_eq!(px(&scr, w as usize, 12, 20), 0xEEEE_EEEE);
+}
+
+#[test]
+fn an_invalidated_copy_rewrites_everything() {
+    let (w, h) = (20u32, 4u32);
+    let pic = picture(w, h, w * 4);
+    let mut scr = vec![0u8; (w * h * 4) as usize];
+    let (t, mut sh) = shown_screen(&mut scr, &pic, w, h, None);
+    // The console drew over the screen
+    poison(&t, w, h, 0x33);
+    sh.invalidate();
+    // A partial draw writes its rectangle whole but does not make the copy valid
+    let d = draw_rect(&t, &mut sh, Some(&src(&pic, w, h, w * 4)), (0, 0), None, 0, 0, 5, 2);
+    assert_eq!(d.written, 10);
+    assert!(!sh.is_valid());
+    let d = draw_rect(&t, &mut sh, Some(&src(&pic, w, h, w * 4)), (0, 0), None, 0, 0, w, h);
+    assert_eq!(d.written, (w * h) as u64);
+    assert!(sh.is_valid());
+    assert_eq!(px(&scr, w as usize, 19, 3), 0xFF00_0000 | 3 << 12 | 19);
+}
+
+#[test]
+fn rgb_screens_compare_in_screen_order() {
+    let pic = vec![0x01u8, 0x02, 0x03, 0xFF];
+    let mut scr = vec![0u8; 4];
+    let t = target(&mut scr, 1, 1, 1, false);
+    let mut sh = Shadow::new(1, 1);
+    draw_rect(&t, &mut sh, Some(&src(&pic, 1, 1, 4)), (0, 0), None, 0, 0, 1, 1);
+    let d = draw_rect(&t, &mut sh, Some(&src(&pic, 1, 1, 4)), (0, 0), None, 0, 0, 1, 1);
+    assert_eq!(d.written, 0);
+    assert_eq!(&scr, &[0x03, 0x02, 0x01, 0xFF]);
+}
+
+#[test]
+fn draws_clip_to_the_screen_and_the_copy() {
+    let (w, h) = (8u32, 4u32);
+    let mut scr = vec![0u8; (w * h * 4) as usize];
+    let t = target(&mut scr, w, h, w as usize, true);
+    let mut sh = Shadow::new(w, h);
+    assert_eq!(draw_rect(&t, &mut sh, None, (0, 0), None, 9, 0, 20, 20), Drawn::default());
+    assert_eq!(draw_rect(&t, &mut sh, None, (0, 0), None, 0, 0, 100, 100).composed, (w * h) as u64);
 }

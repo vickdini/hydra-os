@@ -725,7 +725,27 @@ impl Xhci {
         if self.portsc(port) & PORT_CCS == 0 {
             return Err("disconnected again");
         }
-        if !self.reset_port(port) {
+        // wave11 GG: up to three resets, as Linux retries (a device that is slow to come
+        // up after its first reset, such as a USB Wi-Fi adapter switching modes, enables
+        // after a later one); the port's status is logged when none worked
+        let mut enabled = false;
+        for (i, wait) in [0u64, 50, 200].into_iter().enumerate() {
+            if wait > 0 {
+                sys::sleep_ms(wait);
+            }
+            if self.portsc(port) & PORT_CCS == 0 {
+                return Err("disconnected during the reset");
+            }
+            if self.reset_port(port) {
+                if i > 0 {
+                    println!("[usb-driver] port {}: enabled after reset {}", port, i + 1);
+                }
+                enabled = true;
+                break;
+            }
+        }
+        if !enabled {
+            println!("[usb-driver] port {}: PORTSC {:#010x} after 3 resets (speed {}, link state {})", port, self.portsc(port), (self.portsc(port) >> 10) & 0xF, (self.portsc(port) >> 5) & 0xF);
             return Err("the port does not enable after a reset");
         }
         let speed = (self.portsc(port) >> 10) & 0xF;

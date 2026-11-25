@@ -234,15 +234,21 @@ fn the_boot_report() {
     let out = fake::take_out();
     assert!(out.contains("[+] Network Subsystem: Intel E1000 Online (MAC 52:54:00:12:34:56, Link: UP), protocols in net-server"));
     assert!(out.ends_with("    - DHCP Lease: Acquiring dynamic IPv4 configuration... ONLINE (10.0.2.15, GW 10.0.2.2, DNS 10.0.2.3)\n"));
-    // No lease within 10 s; no link yet
+    // wave11 GG: no link (no cable): 3 s of waiting, not the lease's 10 s
     status(NETS_ST_IP, 0);
     status(NETS_ST_FLAGS, NETS_F_NIC);
     let t0 = fake::ticks();
     k::net::init();
-    assert_eq!(fake::ticks() - t0, 1000);
+    assert!((300..=302).contains(&(fake::ticks() - t0)), "{} ticks", fake::ticks() - t0);
     let out = fake::take_out();
     assert!(out.contains("Link: NEGOTIATING"));
-    assert!(out.ends_with("Deferred (no DHCP answer yet; net-server keeps trying)\n"));
+    assert!(out.ends_with("Deferred (no link: no cable?; net-server keeps trying)\n"));
+    // A link but no lease within 10 s
+    status(NETS_ST_FLAGS, NETS_F_NIC | NETS_F_LINK);
+    let t0 = fake::ticks();
+    k::net::init();
+    assert_eq!(fake::ticks() - t0, 1000);
+    assert!(fake::take_out().ends_with("Deferred (no DHCP answer yet; net-server keeps trying)\n"));
 }
 
 #[test]

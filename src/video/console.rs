@@ -438,6 +438,21 @@ pub fn release_display() -> Option<(*mut u8, usize, usize, usize, bool)> {
     Some((real, info.1, info.2, info.3, info.4))
 }
 
+// wave11 GG begin
+/// The framebuffer is now reached at `real` (a write-combining view of the same memory,
+/// `gop::use_write_combining`): the console draws there, or returns there from its
+/// off-screen copy.
+pub fn move_framebuffer(real: *mut u8) {
+    let mut guard = VIDEO_CONSOLE.lock();
+    let Some(console) = guard.as_mut() else { return };
+    let mut shadow = SHADOW.lock();
+    match shadow.as_mut() {
+        Some((_, r)) => *r = real as usize,
+        None => console.framebuffer_mut().set_base(real),
+    }
+}
+// wave11 GG end
+
 /// Moves the console to a black off-screen copy for the boot logo (as for a compositor,
 /// see [`release_display`]). Returns the real framebuffer (address, width, height, stride
 /// in pixels, BGR order) for the logo.

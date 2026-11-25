@@ -228,6 +228,14 @@ pub struct Stats {
     pub copy_ns: u64,
     pub copy_max_ns: u64,
     pub cursor_updates: u64,
+    // wave11 GG begin
+    /// Time spent on cursor updates (the screen's part of the pointer's latency).
+    pub cursor_ns: u64,
+    pub cursor_max_ns: u64,
+    /// Pixels composed and pixels actually written to the framebuffer.
+    pub composed_px: u64,
+    pub written_px: u64,
+    // wave11 GG end
 }
 
 /// The device's state.
@@ -241,6 +249,8 @@ pub struct Kms {
     cursor_bo: Option<(Arc<Bo>, u32, u32)>,
     cursor: (i32, i32),
     drawn_cursor: Option<(i32, i32, u32, u32)>,
+    /// wave11 GG: what the screen shows (rows are written only where they change).
+    shown: dcore::Shadow,
     dpms: u64,
     master: Option<u32>,
     blobs: BTreeMap<u32, Vec<u8>>,
@@ -345,6 +355,7 @@ impl Kms {
             cursor_bo: None,
             cursor: (0, 0),
             drawn_cursor: None,
+            shown: dcore::Shadow::new(width, height),
             dpms: 0,
             master: None,
             blobs: BTreeMap::new(),
@@ -498,6 +509,8 @@ impl Kms {
         }
         self.taken = true;
         self.drawn_cursor = None;
+        // The console drew on the screen meanwhile
+        self.shown.invalidate();
         Ok(())
     }
 
@@ -528,12 +541,24 @@ impl Kms {
         let t0 = self.screen.now_ns();
         let Some(t) = self.screen.begin() else { return };
         let src = self.scanout.as_ref().map(|f| f.src());
-        dcore::copy_rect(&t, src.as_ref(), self.crtc_xy, r.0, r.1, r.2, r.3);
-        self.drawn_cursor = None;
-        if let Some((bo, w, h)) = &self.cursor_bo {
-            let cur = dcore::Cursor { base: bo.mem.ptr(), len: bo.size, w: *w, h: *h };
-            self.drawn_cursor = Some(dcore::compose_cursor(&t, src.as_ref(), self.crtc_xy, &cur, self.cursor.0, self.cursor.1));
+        // wave11 GG: rows composed with the cursor in RAM, only changed blocks written
+        let cur = self.cursor_bo.as_ref().map(|(bo, w, h)| dcore::Cursor { base: bo.mem.ptr(), len: bo.size, w: *w, h: *h });
+        let placed = cur.as_ref().map(|c| dcore::Placed { cur: c, x: self.cursor.0, y: self.cursor.1 });
+        let d = dcore::draw_rect(&t, &mut self.shown, src.as_ref(), self.crtc_xy, placed.as_ref(), r.0, r.1, r.2, r.3);
+        self.stats.composed_px += d.composed;
+        self.stats.written_px += d.written;
+        // The cursor's areas (where it was drawn, where it is) right on the screen whether
+        // or not they were in `r` (unchanged blocks cost no writes)
+        let now = cur.as_ref().map(|c| (self.cursor.0, self.cursor.1, c.w, c.h));
+        if let Some(old) = self.drawn_cursor.take() {
+            if Some(old) != now {
+                self.cursor_area(&t, src.as_ref(), placed.as_ref(), old);
+            }
         }
+        if let Some(a) = now {
+            self.cursor_area(&t, src.as_ref(), placed.as_ref(), a);
+        }
+        self.drawn_cursor = now;
         self.screen.end();
         let dt = self.screen.now_ns().saturating_sub(t0);
         self.stats.presents += 1;
@@ -551,19 +576,36 @@ impl Kms {
         if !self.shown() || self.dpms != 0 {
             return;
         }
+        let t0 = self.screen.now_ns();
         let Some(t) = self.screen.begin() else { return };
         let src = self.scanout.as_ref().map(|f| f.src());
-        if let Some((x, y, w, h)) = self.drawn_cursor.take() {
-            let (x0, y0) = (x.max(0) as u32, y.max(0) as u32);
-            let (x1, y1) = ((x + w as i32).max(0) as u32, (y + h as i32).max(0) as u32);
-            dcore::copy_rect(&t, src.as_ref(), self.crtc_xy, x0, y0, x1, y1);
+        // wave11 GG: the old area and the new one, each row composed with the cursor at
+        // its new place before it is written (the cursor never disappears from the screen)
+        let cur = self.cursor_bo.as_ref().map(|(bo, w, h)| dcore::Cursor { base: bo.mem.ptr(), len: bo.size, w: *w, h: *h });
+        let placed = cur.as_ref().map(|c| dcore::Placed { cur: c, x: self.cursor.0, y: self.cursor.1 });
+        if let Some(old) = self.drawn_cursor.take() {
+            self.cursor_area(&t, src.as_ref(), placed.as_ref(), old);
         }
-        if let Some((bo, w, h)) = &self.cursor_bo {
-            let cur = dcore::Cursor { base: bo.mem.ptr(), len: bo.size, w: *w, h: *h };
-            self.drawn_cursor = Some(dcore::compose_cursor(&t, src.as_ref(), self.crtc_xy, &cur, self.cursor.0, self.cursor.1));
+        if let Some(c) = &cur {
+            let now = (self.cursor.0, self.cursor.1, c.w, c.h);
+            self.cursor_area(&t, src.as_ref(), placed.as_ref(), now);
+            self.drawn_cursor = Some(now);
         }
         self.screen.end();
         self.stats.cursor_updates += 1;
+        let dt = self.screen.now_ns().saturating_sub(t0);
+        self.stats.cursor_ns += dt;
+        self.stats.cursor_max_ns = self.stats.cursor_max_ns.max(dt);
+    }
+
+    /// wave11 GG: puts screen area `a` (`x, y, w, h`, clipped to the screen) right, with
+    /// the cursor `placed` blended in.
+    fn cursor_area(&mut self, t: &dcore::Target, src: Option<&dcore::Src>, placed: Option<&dcore::Placed>, a: (i32, i32, u32, u32)) {
+        let (x0, y0) = (a.0.max(0) as u32, a.1.max(0) as u32);
+        let (x1, y1) = ((a.0 + a.2 as i32).max(0) as u32, (a.1 + a.3 as i32).max(0) as u32);
+        let d = dcore::draw_rect(t, &mut self.shown, src, self.crtc_xy, placed, x0, y0, x1, y1);
+        self.stats.composed_px += d.composed;
+        self.stats.written_px += d.written;
     }
 
     /// The kernel changed the screen's state: shown again repaints the session. The state is
@@ -572,6 +614,8 @@ impl Kms {
         let state = self.screen.state();
         if self.taken && state == SCREEN_SHOWN {
             self.drawn_cursor = None;
+            // wave11 GG: the console drew on the screen meanwhile
+            self.shown.invalidate();
             self.present();
         }
         if state == crate::proto::SCREEN_CONSOLE || state == crate::proto::SCREEN_PANIC {

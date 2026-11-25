@@ -304,7 +304,7 @@ fn report(last: kms::Stats) -> kms::Stats {
     let presents = d(s.presents, last.presents);
     let avg = if presents > 0 { d(s.copy_ns, last.copy_ns) / presents / 1000 } else { 0 };
     println!(
-        "[display] 60s: ioctls {} ({} behind the console), flips {}, pictures {}, completions {}, held {}, copy avg {} us max {} us, cursor {}{}",
+        "[display] 60s: ioctls {} ({} behind the console), flips {}, pictures {}, completions {}, held {}, copy avg {} us max {} us, cursor {} (avg {} us max {} us), written {} of {} kpx{}",
         d(s.ioctls, last.ioctls),
         d(s.ioctls_hidden, last.ioctls_hidden),
         d(s.flips, last.flips),
@@ -314,13 +314,20 @@ fn report(last: kms::Stats) -> kms::Stats {
         avg,
         s.copy_max_ns / 1000,
         d(s.cursor_updates, last.cursor_updates),
+        // wave11 GG: the cursor's time and how much of what was composed reached the screen
+        d(s.cursor_ns, last.cursor_ns) / d(s.cursor_updates, last.cursor_updates).max(1) / 1000,
+        s.cursor_max_ns / 1000,
+        d(s.written_px, last.written_px) / 1000,
+        d(s.composed_px, last.composed_px) / 1000,
         if hidden { " [console shown]" } else { "" }
     );
     if let Some(k) = KMS.lock().as_mut() {
         k.stats.copy_max_ns = 0;
+        k.stats.cursor_max_ns = 0;
     }
     let mut s = s;
     s.copy_max_ns = 0;
+    s.cursor_max_ns = 0;
     s
 }
 

@@ -1052,6 +1052,15 @@ pub mod video {
             rec!("splash::tick");
         }
     }
+    /// *stub* wave11 GG: the console's write-combining view and the banner text.
+    pub mod gop {
+        pub fn use_write_combining() {
+            rec!("gop::use_write_combining");
+        }
+        pub fn banner_text() -> alloc::string::String {
+            alloc::string::String::from("framebuffer")
+        }
+    }
 }
 
 // *stub* The fix-up labels of `crate::lx::copy`'s user-memory copies: each "instruction"

@@ -26,6 +26,12 @@ fn usb_and_sound_drivers_get_their_controllers() {
     fake::pci_set_bar(hda, 0, 0xF7B1_0000, 0x4000);
     fake::pci_poke32(hda, 0x78, 1 << 11); // no-snoop enabled
     fake::pci_poke32(hda, 0x2C, 0x2222_1111);
+    // wave11 GG: traffic class 7 and power state D3 left by the firmware (a PM capability at 0x50)
+    fake::pci_poke32(hda, 0x44, 0x0000_0007);
+    fake::pci_poke32(hda, 0x04, 0x0010_0000);
+    fake::pci_poke32(hda, 0x34, 0x50);
+    fake::pci_poke32(hda, 0x50, 0x0003_0001);
+    fake::pci_poke32(hda, 0x54, 0x0000_0003);
 
     supervisor::supervisor_init();
     let usb = SUPERVISOR.lock().start_service("usb_driver").unwrap();
@@ -42,6 +48,9 @@ fn usb_and_sound_drivers_get_their_controllers() {
     let snd = SUPERVISOR.lock().start_service("sound_driver").unwrap();
     assert_eq!(&with(snd.0, |t| t.cmdline.clone()).unwrap()[..], b"/drivers/sound_driver\0mmio=0xf7b10000\0");
     assert_eq!(fake::pci_peek32(hda, 0x78) & (1 << 11), 0, "no-snoop cleared");
+    assert_eq!(fake::pci_peek32(hda, 0x44) & 7, 0, "traffic class 0");
+    assert_eq!(fake::pci_peek32(hda, 0x54) & 3, 0, "power state D0");
+    assert!(fake::klog_has("no-snoop was on: off, traffic class was set: 0, power state D3: now D0"));
     assert_eq!(*fake::SND.lock().unwrap(), vec![String::from("0000:00:1b.0")]);
     assert!(fake::SVC_LOG.lock().unwrap().contains(&("set_grants", ENDPOINT_SOUND_DEV, 0xF7B1_0000, 0x4000)));
 
