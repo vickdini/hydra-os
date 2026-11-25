@@ -306,9 +306,8 @@ pub fn discover() {
     } else if crate::fs::bootfs::file_exists("\\hydra\\noiommu") {
         *OFF_BY.lock() = Some("file \\hydra\\noiommu on the EFI partition");
     }
-    if fw.is_some_and(|v| v.starts_with(b"test")) {
-        TEST.store(true, Ordering::Relaxed);
-    }
+    // (set either way: host tests run discover more than once; wave11 GH)
+    TEST.store(fw.is_some_and(|v| v.starts_with(b"test")), Ordering::Relaxed);
     let Some(rsdp) = acpi_rsdp() else { return };
     unsafe {
         let rd32 = |p: u64| core::ptr::read_unaligned(p as *const u32);
