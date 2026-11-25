@@ -60,6 +60,12 @@ const RIRBSTS: usize = 0x5D;
 const RIRBSIZE: usize = 0x5E;
 const DPLBASE: usize = 0x70;
 const DPUBASE: usize = 0x74;
+// wave11 GG: the immediate command interface (a fallback when the rings get no answer)
+const ICOI: usize = 0x60;
+const ICII: usize = 0x64;
+const ICIS: usize = 0x68;
+const ICIS_BUSY: u16 = 1 << 0;
+const ICIS_VALID: u16 = 1 << 1;
 
 // Stream descriptor registers (offsets in a descriptor)
 const SD_CTL: usize = 0x00;
@@ -81,6 +87,10 @@ const VERB_SET_POWER_STATE: u32 = 0x705;
 const VERB_SET_STREAM_CHANNEL: u32 = 0x706;
 const VERB_SET_PIN_CTL: u32 = 0x707;
 const VERB_SET_EAPD: u32 = 0x70C;
+// wave11 GG: Realtek's processing coefficients (on the vendor widget 0x20)
+const VERB_SET_COEF_INDEX: u32 = 0x5;
+const VERB_GET_PROC_COEF: u32 = 0xC;
+const VERB_SET_PROC_COEF: u32 = 0x4;
 const VERB_GET_CONFIG_DEFAULT: u32 = 0xF1C;
 /// 4-bit verbs (16-bit payload).
 const VERB4_SET_FORMAT: u32 = 0x2;
@@ -189,6 +199,27 @@ impl Regs {
     }
 }
 
+// wave11 GG begin
+/// Writes the cache line holding `p` back to memory and drops it (`clflush`), so the
+/// controller sees what the CPU wrote and the CPU then reads what the controller wrote,
+/// even when the controller's DMA does not snoop the caches (an Intel PCH whose firmware
+/// left "no snoop" on; the kernel also turns that off, see `hda_args`).
+fn flush_line(p: *const u8) {
+    // SAFETY: `clflush` of a mapped address; `mfence` orders it with the accesses around it
+    unsafe { core::arch::asm!("mfence", "clflush [{0}]", "mfence", in(reg) p, options(nostack, preserves_flags)) };
+}
+
+/// How the driver talks to the codecs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Transport {
+    /// The command and response rings (CORB/RIRB), as normal.
+    Rings,
+    /// The immediate command registers (`ICOI`/`ICII`/`ICIS`), one verb at a time: Linux's
+    /// `single_cmd` fallback for controllers whose rings stay silent.
+    Immediate,
+}
+// wave11 GG end
+
 /// One widget of an audio function group.
 #[derive(Clone, Default)]
 struct Widget {
@@ -256,6 +287,10 @@ struct Hda {
     widgets: Vec<Widget>,
     routes: [Option<Route>; 2],
     timeouts: u32,
+    /// wave11 GG: rings or immediate commands.
+    transport: Transport,
+    /// wave11 GG: how long a verb may take (ms): long for the first verbs of a codec.
+    verb_ms: u64,
 }
 
 impl Hda {
@@ -263,14 +298,20 @@ impl Hda {
 
     /// Sends `cmd` and returns the codec's response (`None` if it gave none).
     fn command(&mut self, cmd: u32) -> Option<u32> {
+        if self.transport == Transport::Immediate {
+            return self.command_immediate(cmd);
+        }
         let r = self.regs;
         let wp = (self.corb_wp + 1) % self.corb_entries;
-        unsafe { (self.mem.add(CORB_OFF + wp * 4) as *mut u32).write_volatile(cmd) };
+        let slot = unsafe { self.mem.add(CORB_OFF + wp * 4) };
+        unsafe { (slot as *mut u32).write_volatile(cmd) };
+        // wave11 GG: in memory before the controller is told
+        flush_line(slot);
         self.corb_wp = wp;
         r.w16(CORBWP, wp as u16);
         let mut resp = None;
         let rirb_entries = self.rirb_entries;
-        let got = wait_for(20, || {
+        let got = wait_for(self.verb_ms, || {
             loop {
                 let hw = (r.r16(RIRBWP) & 0xFF) as usize % rirb_entries;
                 if hw == self.rirb_rp {
@@ -278,6 +319,8 @@ impl Hda {
                 }
                 self.rirb_rp = (self.rirb_rp + 1) % rirb_entries;
                 let e = unsafe { self.mem.add(RIRB_OFF + self.rirb_rp * 8) as *const u32 };
+                // wave11 GG: what the controller wrote, not a stale cached copy
+                flush_line(e as *const u8);
                 let (value, ex) = unsafe { (e.read_volatile(), e.add(1).read_volatile()) };
                 // An interrupt cause the controller counts responses with: acknowledge it,
                 // or it stops at RINTCNT responses
@@ -292,11 +335,110 @@ impl Hda {
         if !got {
             self.timeouts += 1;
             if self.timeouts <= 4 {
-                println!("[hda-driver] no response to verb {:#010x}", cmd);
+                println!("[hda-driver] no response to verb {:#010x} ({})", cmd, self.ring_state());
             }
         }
         resp
     }
+
+    // wave11 GG begin
+    /// The command path's registers, for the log when a codec stays silent.
+    fn ring_state(&self) -> String {
+        let r = self.regs;
+        alloc::format!(
+            "GCTL {:#x} STATESTS {:#x} CORBWP {} CORBRP {:#x} CORBCTL {:#x} CORBSIZE {:#x} RIRBWP {} RIRBCTL {:#x} RIRBSTS {:#x} RINTCNT {} ICIS {:#x}",
+            r.r32(GCTL),
+            r.r16(STATESTS),
+            r.r16(CORBWP),
+            r.r16(CORBRP),
+            r.r8(CORBCTL),
+            r.r8(CORBSIZE),
+            r.r16(RIRBWP),
+            r.r8(RIRBCTL),
+            r.r8(RIRBSTS),
+            r.r16(RINTCNT),
+            r.r16(ICIS)
+        )
+    }
+
+    /// Sends `cmd` through the immediate command registers.
+    fn command_immediate(&mut self, cmd: u32) -> Option<u32> {
+        let r = self.regs;
+        if !wait_for(self.verb_ms, || r.r16(ICIS) & ICIS_BUSY == 0) {
+            self.timeouts += 1;
+            return None;
+        }
+        // Clear "result valid" (write 1), the verb, then "busy" starts it
+        r.w16(ICIS, r.r16(ICIS) | ICIS_VALID);
+        r.w32(ICOI, cmd);
+        r.w16(ICIS, (r.r16(ICIS) & !ICIS_VALID) | ICIS_BUSY);
+        if wait_for(self.verb_ms, || r.r16(ICIS) & (ICIS_VALID | ICIS_BUSY) == ICIS_VALID) {
+            return Some(r.r32(ICII));
+        }
+        self.timeouts += 1;
+        if self.timeouts <= 4 {
+            println!("[hda-driver] no immediate response to verb {:#010x} ({})", cmd, self.ring_state());
+        }
+        None
+    }
+
+    /// Stops the command rings and talks to the codecs through the immediate command
+    /// registers from now on (the rings must not run while they are used).
+    fn use_immediate(&mut self) {
+        let r = self.regs;
+        r.w8(CORBCTL, 0);
+        r.w8(RIRBCTL, 0);
+        wait_for(10, || r.r8(CORBCTL) & 2 == 0 && r.r8(RIRBCTL) & 2 == 0);
+        self.transport = Transport::Immediate;
+    }
+
+    /// The codec's vendor id, asked patiently: up to three tries on the rings with a long
+    /// timeout, then the immediate command registers. 0 if it never answers.
+    fn wake_codec(&mut self, codec: u32) -> u32 {
+        self.codec = codec;
+        self.verb_ms = 200;
+        let mut id = 0;
+        for _ in 0..3 {
+            id = self.param(0, PARAM_VENDOR_ID);
+            if id != 0 && id != 0xFFFF_FFFF {
+                break;
+            }
+        }
+        if (id == 0 || id == 0xFFFF_FFFF) && self.transport == Transport::Rings {
+            println!("[hda-driver] codec {}: the command rings got no answer; trying the immediate command registers", codec);
+            self.use_immediate();
+            id = self.param(0, PARAM_VENDOR_ID);
+        }
+        self.verb_ms = 50;
+        id
+    }
+
+    /// A Realtek processing coefficient: read, then `(old & !mask) | set`.
+    fn realtek_coef(&mut self, index: u32, mask: u32, set: u32) {
+        const VENDOR_NID: u8 = 0x20;
+        self.verb4(VENDOR_NID, VERB_SET_COEF_INDEX, index);
+        let old = self.verb4(VENDOR_NID, VERB_GET_PROC_COEF, 0) & 0xFFFF;
+        self.verb4(VENDOR_NID, VERB_SET_COEF_INDEX, index);
+        self.verb4(VENDOR_NID, VERB_SET_PROC_COEF, (old & !mask) | set);
+    }
+
+    /// Codec-specific set-up Linux's `patch_realtek.c` does for the codecs of the machines
+    /// Hydra runs on: the ALC283 (the user's NUC) needs its headphone amplifier out of
+    /// the "capless" low-power mode and the combo jack's 3k pull-down off, or the front
+    /// headphone jack stays silent.
+    fn codec_fixups(&mut self) {
+        match self.vendor {
+            0x10EC_0283 => {
+                // Index 0x43: direct-drive headphone amplifier, normal mode
+                self.realtek_coef(0x43, 0xFFFF, 0x9614);
+                // Index 0x46 bits 13:12: the headset jack's 3k pull-down off
+                self.realtek_coef(0x46, 3 << 12, 0);
+                println!("[hda-driver] Realtek ALC283: headphone amplifier and combo jack set up");
+            }
+            _ => {}
+        }
+    }
+    // wave11 GG end
 
     /// A 12-bit verb with an 8-bit payload to widget `nid`.
     fn verb(&mut self, nid: u8, verb: u32, payload: u32) -> u32 {
@@ -331,14 +473,18 @@ impl Hda {
         r.w32(INTCTL, 0);
         r.w16(STATESTS, 0x7FFF);
         // Controller reset: CRST low, then high; the codecs then announce themselves
+        // (wave11 GG: the waits as Linux's `azx_reset`: >= 100 us in reset for the codecs'
+        // clocks, >= 521 us after it before they ask for an address)
         r.w32(GCTL, r.r32(GCTL) & !1);
-        wait_for(100, || r.r32(GCTL) & 1 == 0);
+        if !wait_for(100, || r.r32(GCTL) & 1 == 0) {
+            println!("[hda-driver] the controller did not enter reset (GCTL {:#x})", r.r32(GCTL));
+        }
         sys::sleep_ms(1);
         r.w32(GCTL, r.r32(GCTL) | 1);
         if !wait_for(100, || r.r32(GCTL) & 1 == 1) {
             println!("[hda-driver] the controller did not leave reset");
         }
-        // Codecs need 521 us after the reset to request their address
+        sys::sleep_ms(2);
         let mut codecs = 0;
         wait_for(100, || {
             codecs = r.r16(STATESTS) & 0x7FFF;
@@ -364,7 +510,14 @@ impl Hda {
         let corb = self.mem_phys + CORB_OFF as u64;
         r.w32(CORBLBASE, corb as u32);
         r.w32(CORBUBASE, (corb >> 32) as u32);
-        // Read pointer reset (the bit reads back set on real controllers; QEMU clears it at once)
+        // wave11 GG: the rings' memory clean and in memory (not only in this CPU's cache)
+        unsafe { core::ptr::write_bytes(self.mem.add(CORB_OFF), 0, 0x1000) };
+        for off in (0..0x1000).step_by(64) {
+            flush_line(unsafe { self.mem.add(CORB_OFF + off) });
+        }
+        // Write pointer first, then the read pointer reset (as Linux's `azx_init_cmd_io`;
+        // the bit reads back set on real controllers; QEMU clears it at once)
+        r.w16(CORBWP, 0);
         r.w16(CORBRP, 0x8000);
         wait_for(10, || r.r16(CORBRP) & 0x8000 != 0);
         r.w16(CORBRP, 0);
@@ -388,6 +541,8 @@ impl Hda {
         r.w8(CORBCTL, 0x02);
         r.w8(RIRBCTL, 0x03);
         wait_for(10, || r.r8(CORBCTL) & 2 != 0);
+        // wave11 GG: the rings again after a fallback to immediate commands
+        self.transport = Transport::Rings;
         codecs
     }
 
@@ -430,9 +585,10 @@ impl Hda {
 
     /// Finds the first audio function group of codec `codec` and reads its widgets.
     fn probe_codec(&mut self, codec: u32) -> bool {
-        self.codec = codec;
-        self.vendor = self.param(0, PARAM_VENDOR_ID);
+        // wave11 GG: patient for the first answer, with the immediate registers as fallback
+        self.vendor = self.wake_codec(codec);
         if self.vendor == 0 || self.vendor == 0xFFFF_FFFF {
+            println!("[hda-driver] codec {} does not answer", codec);
             return false;
         }
         let nodes = self.param(0, PARAM_NODE_COUNT);
@@ -807,19 +963,41 @@ fn main(args: &[&str]) {
         widgets: Vec::new(),
         routes: [None, None],
         timeouts: 0,
+        transport: Transport::Rings,
+        verb_ms: 50,
     };
     let gcap = regs.r16(GCAP);
     let (iss, oss) = (((gcap >> 8) & 0xF) as usize, ((gcap >> 12) & 0xF) as usize);
-    let codecs = hda.reset();
+    let mut codecs = hda.reset();
     if codecs == 0 {
-        println!("[hda-driver] controller at {:#x}: no codec", mmio);
+        // wave11 GG: one more reset before giving up
+        sys::sleep_ms(10);
+        codecs = hda.reset();
+    }
+    if codecs == 0 {
+        println!("[hda-driver] controller at {:#x}: no codec ({})", mmio, hda.ring_state());
         return;
+    }
+    // wave11 GG: `cmd=immediate` (a test or a diagnosis): no command rings at all
+    if args.contains(&"cmd=immediate") {
+        hda.use_immediate();
+        println!("[hda-driver] immediate commands only (cmd=immediate)");
+    }
+    // wave11 GG: a codec that does not answer gets a second controller reset
+    if !(0..15).any(|c| codecs & (1 << c) != 0 && { let v = hda.wake_codec(c); v != 0 && v != u32::MAX }) {
+        println!("[hda-driver] no codec answered; resetting the controller once more");
+        sys::sleep_ms(10);
+        let again = hda.reset();
+        if again != 0 {
+            codecs = again;
+        }
     }
     // The first codec with an audio function group and a playback route
     for c in 0..15 {
         if codecs & (1 << c) == 0 || !hda.probe_codec(c) {
             continue;
         }
+        hda.codec_fixups(); // wave11 GG
         if oss > 0 {
             hda.routes[0] = hda.setup_output(0x80 + iss * 0x20, iss);
         }

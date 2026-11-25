@@ -63,8 +63,14 @@ pub fn init() {
     );
     crate::console::set_color(uefi::proto::console::text::Color::Yellow, uefi::proto::console::text::Color::Black);
     crate::print!("    - DHCP Lease: Acquiring dynamic IPv4 configuration... ");
-    let deadline = crate::arch::pit::ticks() + 1000;
+    let start = crate::arch::pit::ticks();
+    let deadline = start + 1000;
     while i.ip == [0; 4] && crate::arch::pit::ticks() < deadline {
+        // wave11 GG: no cable (the link still down after 3 s): no lease to wait for; the boot
+        // goes on and net-server keeps trying (the NUC on Wi-Fi waited 10 s here)
+        if !i.link && crate::arch::pit::ticks() >= start + 300 {
+            break;
+        }
         crate::task::sleep_ms(20);
         i = iface();
     }
@@ -73,7 +79,7 @@ pub fn init() {
         crate::println!("ONLINE ({}, GW {}, DNS {})", dotted(i.ip), dotted(i.gateway), dotted(i.dns));
     } else {
         crate::console::set_color(uefi::proto::console::text::Color::LightRed, uefi::proto::console::text::Color::Black);
-        crate::println!("Deferred (no DHCP answer yet; net-server keeps trying)");
+        crate::println!("Deferred ({}; net-server keeps trying)", if i.link { "no DHCP answer yet" } else { "no link: no cable?" });
     }
 }
 

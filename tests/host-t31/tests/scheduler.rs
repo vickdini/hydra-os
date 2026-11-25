@@ -687,6 +687,8 @@ fn a_driver_call_ends_when_its_deadline_passes_or_its_server_dies() {
     kill(server2);
     assert_eq!(yield_on(0), 0);
     assert!(!scheduler::handoff_active());
+    // wave11 GG: a server that exited did not run out of time: no "expired" line
+    assert!(!fake::serial_has(&format!("[handoff] expired: server {} caller 0", server2)));
 }
 
 #[test]

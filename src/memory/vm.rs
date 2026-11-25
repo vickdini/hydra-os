@@ -1432,7 +1432,7 @@ impl Mm {
                         obj.page_written(index);
                     }
                     // wave11 GG: the framebuffer's pages write-combining
-                    let wc = if obj.write_combining(source) { crate::arch::pat::wc_flags() } else { PageTableFlags::empty() };
+                    let wc = if obj.write_combining(source) { PageTableFlags::WRITE_THROUGH } else { PageTableFlags::empty() };
                     entry.set_addr(source.start_address(), pte_flags_for(vma.prot, write || !tracks) | wc);
                 } else if write {
                     let copy = alloc_user_frame().ok_or(FaultError::OutOfMemory)?;

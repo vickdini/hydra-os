@@ -482,6 +482,38 @@ fn hda_args() -> Option<Vec<String>> {
         if devc & (1 << 11) != 0 {
             pci::pci_write_u16(b, d, f, 0x78, devc & !(1 << 11));
         }
+        // wave11 GG begin
+        // TCSEL (0x44) bits 2:0: traffic class 0, as Linux does for every Intel controller
+        // (a firmware that leaves another class makes the controller's DMA stall: no
+        // answers from the codecs, clicks)
+        let tcsel = pci::pci_read_u8(b, d, f, 0x44);
+        if tcsel & 7 != 0 {
+            let word = pci::pci_read_u32(b, d, f, 0x44);
+            pci::pci_write_u32(b, d, f, 0x44, word & !7);
+        }
+        // Power state D0 (the firmware may have put the controller to sleep)
+        let mut power = 0;
+        if let Some(pm) = pci::find_capability(&dev, 0x01) {
+            let pmcsr = pci::pci_read_u16(b, d, f, pm + 4);
+            power = pmcsr & 3;
+            if power != 0 {
+                pci::pci_write_u16(b, d, f, pm + 4, pmcsr & !3);
+                crate::arch::pit::sleep_ms(10);
+            }
+        }
+        crate::kprintln!(
+            "[supervisor] HDA {:04x}:{:04x} at {:02x}:{:02x}.{}: no-snoop {}, traffic class {}, power state D{}{}",
+            dev.vendor_id,
+            dev.device_id,
+            b,
+            d,
+            f,
+            if devc & (1 << 11) != 0 { "was on: off" } else { "off" },
+            if tcsel & 7 != 0 { "was set: 0" } else { "0" },
+            power,
+            if power != 0 { ": now D0" } else { "" }
+        );
+        // wave11 GG end
     }
     let sub = pci::pci_read_u32(dev.bus, dev.device, dev.function, 0x2C);
     crate::compat::linux::snd::set_controller(
@@ -969,6 +1001,7 @@ pub fn start_all() {
             crate::compat::linux::snd::probe();
         }
         // wave8 GS end
+        let t0 = crate::arch::pit::uptime_ms(); // wave11 GG: each service's start time (the NUC's boot)
         let launched = {
             let mut sup = SUPERVISOR.lock();
             let name = sup.services[idx].name;
@@ -978,7 +1011,7 @@ pub fn start_all() {
         match launched {
             Ok((name, endpoint, id)) => {
                 if await_registration(endpoint, id) {
-                    crate::kprintln!("[supervisor] started '{}' (process {}, endpoint {:#x})", name, id.0, endpoint);
+                    crate::kprintln!("[supervisor] started '{}' (process {}, endpoint {:#x}) in {} ms", name, id.0, endpoint, crate::arch::pit::uptime_ms().saturating_sub(t0));
                 } else if !is_task_alive(id) {
                     // It found no device (a disk adapter without a disk): not restarted,
                     // and another service may take the endpoint

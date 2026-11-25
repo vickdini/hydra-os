@@ -52,6 +52,14 @@ if ! ping org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId;
     fi
     rm -f /run/dbus/system_bus_socket /run/dbus/pid
     mkdir -p /run/dbus
+    # The login records (systemd-tmpfiles makes them elsewhere): SDDM's helper writes
+    # /run/utmp (glibc's /var/run/utmp) and logs "Failed to write utmpx" without it
+    # (wave 11, Group G)
+    if [ "$(id -u)" = 0 ] && ! [ -e /run/utmp ]; then
+        : > /run/utmp
+        chgrp utmp /run/utmp 2>/dev/null
+        chmod 664 /run/utmp
+    fi
     dbus-daemon --system || exit 1
 fi
 if ! ping org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Peer.Ping; then
