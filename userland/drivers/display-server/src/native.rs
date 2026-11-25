@@ -258,12 +258,16 @@ pub fn draw_rect(t: &Target, sh: &mut Shadow, src: Option<&Src>, crtc: (u32, u32
         if shown[..] == row[..] {
             continue;
         }
-        // Runs of changed blocks (short gaps of unchanged ones included)
-        let blocks = n.div_ceil(BLOCK);
+        // Runs of changed blocks (short gaps of unchanged ones included). Blocks follow the
+        // screen's own 16-pixel grid (absolute columns), so a write covers whole 64-byte
+        // lines (one write-combining burst each), whatever column the rectangle starts at
+        let off = x0 as usize % BLOCK;
+        let blocks = (n + off).div_ceil(BLOCK);
+        let span = |i: usize| ((i * BLOCK).saturating_sub(off) * 4, ((i + 1) * BLOCK - off).min(n) * 4);
         let mut b = 0;
         while b < blocks {
             let differs = |i: usize, shown: &[u8]| {
-                let (s, e) = (i * BLOCK * 4, ((i + 1) * BLOCK * 4).min(n * 4));
+                let (s, e) = span(i);
                 shown[s..e] != row[s..e]
             };
             if !differs(b, shown) {
@@ -279,7 +283,7 @@ pub fn draw_rect(t: &Target, sh: &mut Shadow, src: Option<&Src>, crtc: (u32, u32
                 }
                 k += 1;
             }
-            let (s, e) = (start * BLOCK * 4, (end * BLOCK * 4).min(n * 4));
+            let (s, e) = (span(start).0, span(end - 1).1);
             shown[s..e].copy_from_slice(&row[s..e]);
             // SAFETY: bytes s..e of the row lie inside the target's visible area
             unsafe { core::ptr::copy_nonoverlapping(row.as_ptr().add(s), dst.add(s), e - s) };
@@ -290,7 +294,19 @@ pub fn draw_rect(t: &Target, sh: &mut Shadow, src: Option<&Src>, crtc: (u32, u32
     if whole {
         sh.valid = true;
     }
+    // The write-combining buffers drained now, not at some later instruction: the picture
+    // (or the cursor's last partial line) reaches the screen at once
+    if out.written > 0 {
+        store_fence();
+    }
     out
+}
+
+/// `sfence`: every earlier store, write-combining ones included, is visible before any
+/// later one.
+fn store_fence() {
+    // SAFETY: an ordering instruction, no memory operands
+    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
 }
 // wave11 GG end
 

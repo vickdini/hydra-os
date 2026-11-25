@@ -7,10 +7,12 @@
 //! type wins over an MTRR UC range), which makes the same copy a few milliseconds.
 //!
 //! The PAT (`IA32_PAT`, MSR 0x277) holds 8 memory types; a page table entry selects one
-//! with its PAT, PCD and PWT bits. Hydra uses Linux's layout: entry 1 (**PWT alone**)
-//! becomes WC instead of the power-on write-through (nothing in the kernel asks for
-//! write-through); the other entries stay as the firmware left them (the power-on
-//! default: entry 0 write-back, entry 3 uncacheable, ...). Every CPU gets the same value
+//! with its PAT, PCD and PWT bits. As Linux does, entry 1 (**PWT alone**) becomes WC
+//! instead of the power-on write-through (nothing in the kernel asks for write-through;
+//! Linux also changes entries 5 and 7, Hydra does not); the other entries stay as the
+//! firmware left them (the power-on default: entry 0 write-back, entry 3 uncacheable,
+//! ...). Firmware page-table entries with PWT alone (write-through regions, none known on
+//! the machines Hydra runs on) become write-combining too. Every CPU gets the same value
 //! (the boot processor at takeover, each application processor as it starts).
 //!
 //! Two mappings of the framebuffer are WC:
@@ -18,7 +20,9 @@
 //!   [`crate::memory::vm::MappedObject`] whose `write_combining` says so);
 //! - the kernel console's, [`alias_wc`]: the framebuffer's pages in the direct map
 //!   (`DIRECT_MAP_BASE + phys`, 2 MiB pages there), whose 2 MiB (or 1 GiB) entries that
-//!   cover it are split into 4 KiB ones so that only the framebuffer's own pages change.
+//!   cover it are split into 4 KiB ones so that only the framebuffer's own pages change;
+//! - and its old identity mapping (the boot logo's), changed the same way, so that no
+//!   alias of another memory type remains (Intel SDM 11.12.4).
 //!
 //! QEMU (KVM) gives emulated device memory write-back whatever the guest asks, so the
 //! change is invisible there.
@@ -162,11 +166,62 @@ unsafe fn split_slot(slot: *mut u64, size: u64) -> bool {
     true
 }
 
+/// Makes the 4 KiB leaves mapping `[va, va + pages * 4096)` to `[phys, ...)` in the
+/// kernel's tables at `pml4` write-combining, splitting large entries on the way.
+/// `Err(i)`: page `i` is not mapped there (or maps other memory); pages before it changed.
+///
+/// # Safety
+///
+/// The kernel's own tables; one CPU running.
+unsafe fn wc_range(pml4: u64, va: u64, phys: u64, pages: u64) -> Result<(), u64> {
+    let p2v = crate::memory::frame_allocator::phys_to_virt;
+    for i in 0..pages {
+        let va = va + i * 4096;
+        let l4 = (p2v(pml4) as *mut u64).add(((va >> 39) & 511) as usize);
+        let e4 = l4.read_volatile();
+        if e4 & PTE_PRESENT == 0 {
+            return Err(i);
+        }
+        let l3 = (p2v(e4 & ADDR_4K) as *mut u64).add(((va >> 30) & 511) as usize);
+        let e3 = l3.read_volatile();
+        if e3 & PTE_PRESENT == 0 || (e3 & PTE_PS != 0 && !split_slot(l3, 1 << 30)) {
+            return Err(i);
+        }
+        let e3 = l3.read_volatile();
+        let l2 = (p2v(e3 & ADDR_4K) as *mut u64).add(((va >> 21) & 511) as usize);
+        let e2 = l2.read_volatile();
+        if e2 & PTE_PRESENT == 0 || (e2 & PTE_PS != 0 && !split_slot(l2, 1 << 21)) {
+            return Err(i);
+        }
+        let e2 = l2.read_volatile();
+        let l1 = (p2v(e2 & ADDR_4K) as *mut u64).add(((va >> 12) & 511) as usize);
+        let e1 = l1.read_volatile();
+        if e1 & PTE_PRESENT == 0 || e1 & ADDR_4K != phys + i * 4096 {
+            return Err(i);
+        }
+        l1.write_volatile(make_wc(e1));
+    }
+    Ok(())
+}
+
+/// Writes back and drops every cache line of this CPU (`wbinvd`): lines of the
+/// framebuffer cached through its old write-back mapping must not be written over the
+/// picture later.
+fn write_back_caches() {
+    #[cfg(target_os = "uefi")]
+    // SAFETY: ring 0; only the boot processor runs (no other CPU holds lines to flush)
+    unsafe {
+        core::arch::asm!("wbinvd", options(nostack, preserves_flags))
+    };
+}
+
 /// Makes the kernel's direct-map view of `[phys, phys + len)` write-combining and
-/// returns its address (`DIRECT_MAP_BASE + phys`). `None` if the PAT is not set up, the
-/// direct map does not cover the range, or there is no memory for the split tables (the
-/// caller then keeps its old mapping). Boot processor only, at takeover, after the
-/// direct map was enabled.
+/// returns its address (`DIRECT_MAP_BASE + phys`); its identity mapping (`phys`, kept
+/// for the boot logo) is made write-combining as well where it exists, so no alias of
+/// another memory type remains. `None` if the PAT is not set up, the direct map does not
+/// cover the range, or there is no memory for the split tables (the caller then keeps
+/// its old mapping). Boot processor only, at takeover, after the direct map was enabled
+/// and before the other processors start.
 pub fn alias_wc(phys: u64, len: u64) -> Option<u64> {
     if !enabled() || len == 0 || phys & 0xFFF != 0 {
         return None;
@@ -177,45 +232,29 @@ pub fn alias_wc(phys: u64, len: u64) -> Option<u64> {
         return None;
     }
     let pages = len.div_ceil(4096);
-    let p2v = crate::memory::frame_allocator::phys_to_virt;
-    for i in 0..pages {
-        let va = base + phys + i * 4096;
-        // SAFETY: walking (and splitting) the kernel's own tables, one CPU running
-        unsafe {
-            let l4 = (p2v(pml4) as *mut u64).add(((va >> 39) & 511) as usize);
-            let e4 = l4.read_volatile();
-            if e4 & PTE_PRESENT == 0 {
-                return None;
-            }
-            let l3 = (p2v(e4 & ADDR_4K) as *mut u64).add(((va >> 30) & 511) as usize);
-            let e3 = l3.read_volatile();
-            if e3 & PTE_PRESENT == 0 {
-                return None;
-            }
-            if e3 & PTE_PS != 0 && !split_slot(l3, 1 << 30) {
-                return None;
-            }
-            let e3 = l3.read_volatile();
-            let l2 = (p2v(e3 & ADDR_4K) as *mut u64).add(((va >> 21) & 511) as usize);
-            let e2 = l2.read_volatile();
-            if e2 & PTE_PRESENT == 0 {
-                return None;
-            }
-            if e2 & PTE_PS != 0 && !split_slot(l2, 1 << 21) {
-                return None;
-            }
-            let e2 = l2.read_volatile();
-            let l1 = (p2v(e2 & ADDR_4K) as *mut u64).add(((va >> 12) & 511) as usize);
-            let e1 = l1.read_volatile();
-            if e1 & PTE_PRESENT == 0 || e1 & ADDR_4K != phys + i * 4096 {
-                return None;
-            }
-            l1.write_volatile(make_wc(e1));
-        }
-    }
-    // The old (large, global) entries may be cached: drop every page of the range
+    // SAFETY: the kernel's own tables, one CPU running
+    let direct = unsafe { wc_range(pml4, base + phys, phys, pages) };
+    // The identity alias: as many of its pages as are mapped there
+    let identity = match unsafe { wc_range(pml4, phys, phys, pages) } {
+        Ok(()) => pages,
+        Err(i) => i,
+    };
+    // Lines cached through the old write-back types out, then the old (large, global)
+    // TLB entries
+    write_back_caches();
     for i in 0..pages {
         x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(base + phys + i * 4096));
+        x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(phys + i * 4096));
     }
+    IDENTITY_WC.store(identity, Ordering::Release);
+    direct.ok()?;
     Some(base + phys)
+}
+
+/// How many pages of the framebuffer's identity mapping [`alias_wc`] made write-combining.
+static IDENTITY_WC: AtomicU64 = AtomicU64::new(0);
+
+/// See [`IDENTITY_WC`].
+pub fn identity_wc_pages() -> u64 {
+    IDENTITY_WC.load(Ordering::Acquire)
 }

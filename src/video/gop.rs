@@ -189,6 +189,12 @@ pub fn use_write_combining() {
     };
     super::console::move_framebuffer(va as *mut u8);
     FB_WC.store(true, core::sync::atomic::Ordering::Release);
+    crate::kprintln!(
+        "[video] framebuffer at {:#x}: write-combining view at {:#x}; {} of its pages' identity mapping write-combining too",
+        phys,
+        va,
+        crate::arch::pat::identity_wc_pages()
+    );
 }
 
 /// The banner's "Display & Input" text: the real mode and input devices.

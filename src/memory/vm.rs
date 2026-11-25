@@ -985,7 +985,9 @@ impl Mm {
                         } else {
                             shared || frame_refcount(frame) == 1
                         };
-                        entry.set_addr(frame.start_address(), pte_flags_for(prot, exclusive));
+                        // wave11 GG: a write-combining page (the framebuffer) stays one
+                        let wc = entry.flags() & PageTableFlags::WRITE_THROUGH;
+                        entry.set_addr(frame.start_address(), pte_flags_for(prot, exclusive) | wc);
                         flush(self.pml4, addr);
                     }
                 }
@@ -1391,14 +1393,16 @@ impl Mm {
 
         if pte_holds_frame(entry) {
             let frame = PhysFrame::<Size4KiB>::containing_address(entry.addr());
+            // wave11 GG: a write-combining page (the framebuffer) keeps its type
+            let wc = entry.flags() & PageTableFlags::WRITE_THROUGH;
             if !write {
                 let writable = entry.flags().contains(PageTableFlags::WRITABLE);
-                entry.set_addr(frame.start_address(), pte_flags_for(vma.prot, writable));
+                entry.set_addr(frame.start_address(), pte_flags_for(vma.prot, writable) | wc);
             } else if vma.shared || frame_refcount(frame) == 1 {
                 if let (true, Backing::Object { obj, pgoff }) = (vma.shared, &vma.backing) {
                     obj.page_written(pgoff + (page - vma.start) / PAGE_SIZE);
                 }
-                entry.set_addr(frame.start_address(), pte_flags_for(vma.prot, true));
+                entry.set_addr(frame.start_address(), pte_flags_for(vma.prot, true) | wc);
             } else {
                 // Copy-on-write: take a private copy of a shared page
                 let copy = alloc_user_frame().ok_or(FaultError::OutOfMemory)?;

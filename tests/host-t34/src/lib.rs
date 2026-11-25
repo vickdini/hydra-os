@@ -226,6 +226,9 @@ pub mod arch {
             crate::fake::log("pat::alias_wc");
             None
         }
+        pub fn identity_wc_pages() -> u64 {
+            0
+        }
     }
     /// *stub*
     pub mod relocate {
