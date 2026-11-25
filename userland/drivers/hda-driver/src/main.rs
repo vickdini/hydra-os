@@ -145,6 +145,9 @@ const BDL_MAX: usize = 256;
 /// Stream tags given to the two streams.
 const TAG: [u32; 2] = [1, 2];
 
+/// wave11 GG: verbs in a row without an answer after which a codec counts as gone.
+const SILENT_MAX: u32 = 8;
+
 const EIO: i64 = -5;
 const ENODEV: i64 = -19;
 const EINVAL: i64 = -22;
@@ -287,6 +290,9 @@ struct Hda {
     widgets: Vec<Widget>,
     routes: [Option<Route>; 2],
     timeouts: u32,
+    /// wave11 GG: verbs in a row without an answer; at [`SILENT_MAX`] the codec counts as
+    /// gone and further verbs fail at once (a bounded boot delay).
+    silent: u32,
     /// wave11 GG: rings or immediate commands.
     transport: Transport,
     /// wave11 GG: how long a verb may take (ms): long for the first verbs of a codec.
@@ -298,6 +304,24 @@ impl Hda {
 
     /// Sends `cmd` and returns the codec's response (`None` if it gave none).
     fn command(&mut self, cmd: u32) -> Option<u32> {
+        // wave11 GG: a codec that stopped answering is not waited for any more
+        if self.silent >= SILENT_MAX {
+            return None;
+        }
+        let resp = self.command_once(cmd);
+        if resp.is_some() {
+            self.silent = 0;
+        } else {
+            self.silent += 1;
+            if self.silent == SILENT_MAX {
+                println!("[hda-driver] codec {}: {} verbs in a row without an answer: given up", self.codec, SILENT_MAX);
+            }
+        }
+        resp
+    }
+
+    /// [`Self::command`] on the transport in use.
+    fn command_once(&mut self, cmd: u32) -> Option<u32> {
         if self.transport == Transport::Immediate {
             return self.command_immediate(cmd);
         }
@@ -396,6 +420,7 @@ impl Hda {
     /// timeout, then the immediate command registers. 0 if it never answers.
     fn wake_codec(&mut self, codec: u32) -> u32 {
         self.codec = codec;
+        self.silent = 0;
         self.verb_ms = 200;
         let mut id = 0;
         for _ in 0..3 {
@@ -407,35 +432,46 @@ impl Hda {
         if (id == 0 || id == 0xFFFF_FFFF) && self.transport == Transport::Rings {
             println!("[hda-driver] codec {}: the command rings got no answer; trying the immediate command registers", codec);
             self.use_immediate();
+            self.silent = 0;
             id = self.param(0, PARAM_VENDOR_ID);
         }
         self.verb_ms = 50;
         id
     }
 
-    /// A Realtek processing coefficient: read, then `(old & !mask) | set`.
+    /// A Realtek processing coefficient: read, then `(old & !mask) | set` (Linux's
+    /// `alc_update_coef_idx`).
     fn realtek_coef(&mut self, index: u32, mask: u32, set: u32) {
         const VENDOR_NID: u8 = 0x20;
         self.verb4(VENDOR_NID, VERB_SET_COEF_INDEX, index);
         let old = self.verb4(VENDOR_NID, VERB_GET_PROC_COEF, 0) & 0xFFFF;
-        self.verb4(VENDOR_NID, VERB_SET_COEF_INDEX, index);
-        self.verb4(VENDOR_NID, VERB_SET_PROC_COEF, (old & !mask) | set);
+        self.realtek_coef_write(index, (old & !mask) | set);
     }
 
-    /// Codec-specific set-up Linux's `patch_realtek.c` does for the codecs of the machines
-    /// Hydra runs on: the ALC283 (the user's NUC) needs its headphone amplifier out of
-    /// the "capless" low-power mode and the combo jack's 3k pull-down off, or the front
-    /// headphone jack stays silent.
+    /// A Realtek processing coefficient written whole (Linux's `alc_write_coef_idx`).
+    fn realtek_coef_write(&mut self, index: u32, value: u32) {
+        const VENDOR_NID: u8 = 0x20;
+        self.verb4(VENDOR_NID, VERB_SET_COEF_INDEX, index);
+        self.verb4(VENDOR_NID, VERB_SET_PROC_COEF, value);
+    }
+
+    /// Codec-specific set-up as Linux's Realtek driver does it (`alc283_init`), before the
+    /// pins are set up: the ALC283 (the user's NUC) gets its headphone amplifier in high
+    /// power mode while the pins change (index 0x43 written whole, 0x9004) and the combo
+    /// jack's 3k pull-down off (index 0x46 bits 13:12 cleared, the only masked one);
+    /// [`Self::codec_fixups_done`] then puts the amplifier back to normal mode (0x9614).
     fn codec_fixups(&mut self) {
-        match self.vendor {
-            0x10EC_0283 => {
-                // Index 0x43: direct-drive headphone amplifier, normal mode
-                self.realtek_coef(0x43, 0xFFFF, 0x9614);
-                // Index 0x46 bits 13:12: the headset jack's 3k pull-down off
-                self.realtek_coef(0x46, 3 << 12, 0);
-                println!("[hda-driver] Realtek ALC283: headphone amplifier and combo jack set up");
-            }
-            _ => {}
+        if self.vendor == 0x10EC_0283 {
+            self.realtek_coef_write(0x43, 0x9004);
+            self.realtek_coef(0x46, 3 << 12, 0);
+        }
+    }
+
+    /// After the pins are set up: the end of [`Self::codec_fixups`].
+    fn codec_fixups_done(&mut self) {
+        if self.vendor == 0x10EC_0283 {
+            self.realtek_coef_write(0x43, 0x9614);
+            println!("[hda-driver] Realtek ALC283: headphone amplifier and combo jack set up (as Linux's alc283_init)");
         }
     }
     // wave11 GG end
@@ -459,6 +495,7 @@ impl Hda {
     /// Resets the controller and starts the command rings; the codecs present (bit mask).
     fn reset(&mut self) -> u16 {
         let r = self.regs;
+        self.silent = 0; // wave11 GG
         // Stop the command rings and every stream the firmware may have left running
         r.w8(CORBCTL, 0);
         r.w8(RIRBCTL, 0);
@@ -963,6 +1000,7 @@ fn main(args: &[&str]) {
         widgets: Vec::new(),
         routes: [None, None],
         timeouts: 0,
+        silent: 0,
         transport: Transport::Rings,
         verb_ms: 50,
     };
@@ -1004,6 +1042,7 @@ fn main(args: &[&str]) {
         if iss > 0 {
             hda.routes[1] = hda.setup_input(0x80, 0);
         }
+        hda.codec_fixups_done(); // wave11 GG
         if hda.routes[0].is_some() {
             break;
         }

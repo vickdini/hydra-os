@@ -173,10 +173,13 @@ impl Hw for Machine {
         unsafe { self.regs.add(off / 4).write_volatile(v) }
     }
     fn delay_us(&mut self, us: u64) {
-        // A write to the POST port takes about a microsecond on every chipset
-        for _ in 0..us {
-            // SAFETY: port 0x80 is the diagnostic port, free to write
-            unsafe { x86_64::instructions::port::Port::<u8>::new(0x80).write(0) };
+        // The kernel's clock (the timer runs at this point of the takeover); a bound on the
+        // spins in case it does not move
+        let end = super::pit::now_ns().saturating_add(us * 1000);
+        let mut spins = us.saturating_mul(10_000);
+        while super::pit::now_ns() < end && spins > 0 {
+            core::hint::spin_loop();
+            spins -= 1;
         }
     }
 }

@@ -315,3 +315,25 @@ fn draws_clip_to_the_screen_and_the_copy() {
     assert_eq!(draw_rect(&t, &mut sh, None, (0, 0), None, 9, 0, 20, 20), Drawn::default());
     assert_eq!(draw_rect(&t, &mut sh, None, (0, 0), None, 0, 0, 100, 100).composed, (w * h) as u64);
 }
+
+#[test]
+fn blocks_follow_the_screens_grid_not_the_rectangles() {
+    // A rectangle from column 10: its first block is columns 10..16, the next 16..32
+    let (w, h) = (64u32, 1u32);
+    let mut pic = picture(w, h, w * 4);
+    let mut scr = vec![0u8; (w * h * 4) as usize];
+    let (t, mut sh) = shown_screen(&mut scr, &pic, w, h, None);
+    poison(&t, w, h, 0xEE);
+    pic[20 * 4] ^= 0xFF;
+    let d = draw_rect(&t, &mut sh, Some(&src(&pic, w, h, w * 4)), (0, 0), None, 10, 0, 50, 1);
+    assert_eq!(d.written, BLOCK as u64, "columns 16..32");
+    assert_eq!(px(&scr, w as usize, 15, 0), 0xEEEE_EEEE);
+    assert_eq!(px(&scr, w as usize, 16, 0), 0xFF00_0000 | 16);
+    assert_eq!(px(&scr, w as usize, 31, 0), 0xFF00_0000 | 31);
+    assert_eq!(px(&scr, w as usize, 32, 0), 0xEEEE_EEEE);
+    // A change in the partial first block (columns 10..16) writes only those 6 pixels
+    pic[12 * 4] ^= 0xFF;
+    let d = draw_rect(&t, &mut sh, Some(&src(&pic, w, h, w * 4)), (0, 0), None, 10, 0, 50, 1);
+    assert_eq!(d.written, 6);
+    assert_eq!(px(&scr, w as usize, 9, 0), 0xEEEE_EEEE);
+}
