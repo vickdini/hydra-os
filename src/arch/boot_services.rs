@@ -120,18 +120,26 @@ pub fn kernel_low_ranges(
 ///
 /// - Returns `Err("Hardware takeover (ExitBootServices) has already been executed.")` on duplicate invocation.
 /// - Returns `Err("Hardware GOP framebuffer driver not available.")` if video initialization failed.
-pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> {
-    let mut done = TAKEOVER_DONE.lock();
-    if *done {
+// wave11 GH begin
+/// The firmware's final memory map, from [`leave_firmware`] to [`take_hardware_ownership`]
+/// (handed over between two stacks: see `main::boot`).
+struct FinalMap(uefi::mem::memory_map::MemoryMapOwned);
+// (only the boot processor touches it, once, before anything else runs)
+unsafe impl Send for FinalMap {}
+static FINAL_MAP: Mutex<Option<FinalMap>> = Mutex::new(None);
+
+/// The first half of the takeover (steps 1 to 3): the console on the framebuffer, the
+/// ACPI tables read, and `ExitBootServices`. Runs on the firmware's stack: firmware code
+/// must never run on a higher-half stack (the NUC's firmware stopped there, wave 11);
+/// `main::boot` moves to the kernel's own stack only after this.
+pub fn leave_firmware() -> Result<(), &'static str> {
+    if *TAKEOVER_DONE.lock() || FINAL_MAP.lock().is_some() {
         return Err("Hardware takeover (ExitBootServices) has already been executed.");
     }
-
     // 1. Ensure GOP Linear Framebuffer driver is initialized
-    let fb_virt = if let Some(info) = crate::video::get_video_info() {
-        info.base_ptr as u64
-    } else {
+    if crate::video::get_video_info().is_none() {
         return Err("Hardware GOP framebuffer driver not available.");
-    };
+    }
 
     // 2. Route all console printing to VideoConsole
     enable_standalone_video(true);
@@ -152,6 +160,28 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     crate::arch::crumb::end("takeover: ExitBootServices next (last breadcrumb)"); // wave11 GH
     // 3. Terminate UEFI Boot Services
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
+    *FINAL_MAP.lock() = Some(FinalMap(memory_map));
+    Ok(())
+}
+// wave11 GH end
+
+/// The takeover ([`leave_firmware`] first, if it has not run), then everything after
+/// `ExitBootServices`: the low layout, GDT, IDT, page tables, interrupts, the other
+/// processors, the driver programs.
+pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> {
+    // wave11 GH begin
+    if FINAL_MAP.lock().is_none() {
+        leave_firmware()?;
+    }
+    let mut done = TAKEOVER_DONE.lock();
+    if *done {
+        return Err("Hardware takeover (ExitBootServices) has already been executed.");
+    }
+    let Some(FinalMap(memory_map)) = FINAL_MAP.lock().take() else {
+        return Err("the firmware's memory map is gone");
+    };
+    let fb_virt = crate::video::get_video_info().map_or(0, |info| info.base_ptr as u64);
+    // wave11 GH end
     let entries_count = memory_map.entries().count();
 
     // 3a. Which GiB slots of the low 512 GiB the kernel keeps in every address space: all

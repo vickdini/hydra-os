@@ -28,14 +28,33 @@ static IMAGE_PHYS: AtomicU64 = AtomicU64::new(0);
 static IMAGE_SIZE: AtomicU64 = AtomicU64::new(0);
 /// The boot stack's physical range start.
 static STACK_PHYS: AtomicU64 = AtomicU64::new(0);
-/// wave11 GH (NUC diagnostics): move only the code and data high and keep running on the
-/// firmware's stack (its slot of the low half is then kept, as without the move).
-static KEEP_FW_STACK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// Asks [`go_high`] to keep the firmware's stack (diagnostics: firmware code then never
-/// runs on a stack at a higher-half address).
-pub fn keep_firmware_stack() {
-    KEEP_FW_STACK.store(true, Ordering::SeqCst);
+/// wave11 GH: moves to the kernel's own stack in the higher half (the one [`go_high`] mapped)
+/// and calls `next` there; does not return. [`go_high`] leaves the kernel on the firmware's
+/// stack: the firmware's own code runs on the caller's stack, and a real firmware (the
+/// NUC's) stops when that is at a higher-half address (its drivers use stack buffers for
+/// DMA or cut addresses to 32 bits). So this is called once `ExitBootServices` is done.
+/// Without the move (`nohigh`, or the move impossible) `next` simply runs on the current
+/// stack.
+pub fn run_on_kernel_stack(next: fn() -> !) -> ! {
+    if STACK_PHYS.load(Ordering::SeqCst) == 0 {
+        next();
+    }
+    let top = STACK_BOTTOM + STACK_SIZE;
+    unsafe {
+        // The Microsoft x64 convention of the UEFI target: 32 bytes of shadow space, the
+        // stack 16-byte aligned at the call
+        core::arch::asm!(
+            "mov rsp, {top}",
+            "xor ebp, ebp",
+            "sub rsp, 32",
+            "call {target}",
+            "ud2",
+            top = in(reg) top,
+            target = in(reg) next as usize as u64,
+            options(noreturn)
+        );
+    }
 }
 
 extern "C" {
@@ -285,28 +304,15 @@ pub fn go_high(next: fn() -> !) {
         // wave11 GH: the first thing at the high target prints a line through the firmware
         // with nothing but identity addresses (crumb::high_arrived)
         crate::arch::crumb::prepare_arrival();
-        if KEEP_FW_STACK.load(Ordering::SeqCst) {
-            crate::arch::crumb::step("go_high: jumping to the high code on the firmware's stack");
-            core::arch::asm!(
-                "and rsp, -16",
-                "sub rsp, 32",
-                "call {target}",
-                "ud2",
-                target = in(reg) target,
-                options(noreturn)
-            );
-        }
         STACK_PHYS.store(stack, Ordering::SeqCst);
-        let top = STACK_BOTTOM + STACK_SIZE;
-        // The Microsoft x64 convention of the UEFI target: 32 bytes of shadow space, the
-        // stack 16-byte aligned at the call
+        // wave11 GH: to the high code, still on the firmware's stack (the kernel's own stack
+        // is taken after ExitBootServices: run_on_kernel_stack); 16-byte aligned at the
+        // call, 32 bytes of shadow space (the Microsoft x64 convention of the UEFI target)
         core::arch::asm!(
-            "mov rsp, {top}",
-            "xor ebp, ebp",
+            "and rsp, -16",
             "sub rsp, 32",
             "call {target}",
             "ud2",
-            top = in(reg) top,
             target = in(reg) target,
             options(noreturn)
         );

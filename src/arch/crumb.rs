@@ -218,22 +218,11 @@ pub fn want_high() -> bool {
             break;
         }
     }
-    uefi::system::with_stdout(|o| {
-        let _ = core::fmt::Write::write_str(o, "[hydra] or L to move only the code high and keep the firmware's stack\r\n");
-    });
-    for _ in 0..30 {
+    for _ in 0..20 {
         if let Some(Key::Printable(c)) = uefi::system::with_stdin(|i| i.read_key().ok().flatten()) {
-            match char::from(c) {
-                'n' | 'N' => {
-                    step("N pressed: staying at the load address");
-                    return false;
-                }
-                'l' | 'L' => {
-                    step("L pressed: code high, firmware's stack kept");
-                    crate::arch::relocate::keep_firmware_stack();
-                    return true;
-                }
-                _ => {}
+            if matches!(char::from(c), 'n' | 'N') {
+                step("N pressed: staying at the load address");
+                return false;
             }
         }
         uefi::boot::stall(core::time::Duration::from_millis(100));

@@ -229,6 +229,10 @@ pub mod arch {
         pub fn image_phys() -> Option<u64> {
             crate::fake::with(|s| s.image_phys)
         }
+        /// *stub* wave11 GH: the rest of the boot, on the same (test) stack.
+        pub fn run_on_kernel_stack(next: fn() -> !) -> ! {
+            next()
+        }
     }
     /// *stub*
     pub mod boottime {
@@ -247,6 +251,10 @@ pub mod arch {
     }
     /// *stub*
     pub mod boot_services {
+        /// *stub* wave11 GH: the first half of the takeover.
+        pub fn leave_firmware() -> Result<(), &'static str> {
+            Ok(())
+        }
         pub fn take_hardware_ownership() -> Result<(), &'static str> {
             crate::fake::log("take_hardware_ownership");
             crate::fake::with(|s| s.takeover_fail).map_or(Ok(()), Err)
@@ -994,6 +1002,8 @@ pub mod fs {
 
     pub mod client {
         pub use super::ZfsClient;
+        /// *stub* wave11 GH: a boot file as `read_boot_files` gives it.
+        pub type BootFile = (alloc::string::String, alloc::vec::Vec<u8>);
         /// *stub* Joins `p` to `cwd` (".." and "." handled), in `buf`.
         pub fn normalize_path<'a>(cwd: &str, p: &str, buf: &'a mut [u8; 128]) -> &'a str {
             let full = if p.starts_with('/') { p.to_string() } else { format!("{}/{}", cwd.trim_end_matches('/'), p) };

@@ -516,6 +516,23 @@ pub fn boot() -> ! {
     // 9. Hardware takeover: the kernel leaves the firmware behind and the driver programs
     //    (the disk driver among them) start in Ring 3
     arch::boottime::mark("hardware takeover (CPUs, drivers, network)");
+    // wave11 GH: ExitBootServices still on the firmware's stack, then the rest of the boot
+    // on the kernel's own stack in the higher half (a fresh call: nothing of this frame is
+    // used there; the boot files go through a static)
+    *BOOT_FILES.lock() = Some(boot_files);
+    if let Err(e) = crate::arch::boot_services::leave_firmware() {
+        console::set_color(Color::LightRed, Color::Black);
+        println!("[!] Leaving the firmware failed: {}", e);
+    }
+    arch::relocate::run_on_kernel_stack(boot_after_firmware)
+}
+
+/// The boot files read from the boot volume, from [`boot`] to [`boot_after_firmware`].
+static BOOT_FILES: spin::Mutex<Option<alloc::vec::Vec<fs::client::BootFile>>> = spin::Mutex::new(None);
+
+/// The boot after `ExitBootServices`, on the kernel's own stack (see [`boot`]).
+fn boot_after_firmware() -> ! {
+    let boot_files = BOOT_FILES.lock().take().unwrap_or_default();
     if let Err(e) = crate::arch::boot_services::take_hardware_ownership() {
         console::set_color(Color::LightRed, Color::Black);
         println!("[!] Hardware takeover failed: {}", e);
