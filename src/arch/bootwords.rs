@@ -154,9 +154,24 @@ pub fn menu_choice(key: char) -> Option<&'static str> {
         '1' | '\r' | '\n' => Some(""),
         '2' => Some(SAFE),
         '3' => Some(SAFE_CONSOLE),
+        // wave11 GH (NUC diagnostics): each switches suspects back to e41757a's behaviour
+        '4' => Some(DIAG_IDT),
+        '5' => Some(DIAG_CRUMBS),
+        '6' => Some(DIAG_BOTH),
+        '7' => Some(DIAG_ALL),
         _ => None,
     }
 }
+
+/// Start menu entry 4: Hydra's own IDT during boot services (no firmware interrupt gates).
+pub const DIAG_IDT: &str = "diag4 fwidt=off";
+/// Entry 5: no breadcrumb file writes once the boot words are read (screen lines only).
+pub const DIAG_CRUMBS: &str = "diag5 crumbs=screen";
+/// Entry 6: both.
+pub const DIAG_BOTH: &str = "diag6 fwidt=off crumbs=screen";
+/// Entry 7: everything that can be switched back (also the firmware bounce buffers anywhere
+/// in memory, not below 4 GiB).
+pub const DIAG_ALL: &str = "diag7 fwidt=off crumbs=screen anypages";
 
 // wave11 GH review (M1): the start menu never waits for ever
 /// A key at the start menu.

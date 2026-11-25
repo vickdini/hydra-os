@@ -32,6 +32,12 @@ macro_rules! kprintln {
 }
 
 pub mod arch {
+    /// *stub* wave11 GH: no boot words on the host.
+    pub mod bootopts {
+        pub fn say(_words: &[&[u8]]) -> bool {
+            false
+        }
+    }
     /// *stub* wave11 GH: breadcrumbs (none on the host).
     pub mod crumb {
         pub fn fw_ptr_ok(_p: *const u8, _what: &str) -> bool {

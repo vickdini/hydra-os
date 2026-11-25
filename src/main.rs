@@ -235,6 +235,10 @@ pub fn boot() -> ! {
     arch::bootlog::early();
     arch::crumb::step("boot log memory placed");
     arch::bootopts::init();
+    // wave11 GH: which start variant runs (written to the file even for the screen-only ones)
+    if arch::bootopts::say(&[b"crumbs=screen"]) {
+        arch::crumb::force_line(format_args!("start variant: {} (file breadcrumbs stop here)", core::str::from_utf8(arch::bootopts::words().text()).unwrap_or("?")));
+    }
     arch::crumb::step_fmt(format_args!("boot words: {}", core::str::from_utf8(arch::bootopts::words().text()).unwrap_or("?")));
     // The Hydra logo instead of boot messages, unless the boot entry asks for them
     video::splash::decide();

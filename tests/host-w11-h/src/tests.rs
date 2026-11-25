@@ -500,3 +500,16 @@ fn menu_other_key_waits_30_s_then_starts_entry_1() {
     let (_, i) = run(&mut m, &keys, 10_000);
     assert_eq!(i, 200 + MENU_IDLE_LIMIT as usize - 1);
 }
+
+#[test]
+fn menu_test_entries() {
+    assert_eq!(menu_choice('4'), Some(DIAG_IDT));
+    assert_eq!(menu_choice('5'), Some(DIAG_CRUMBS));
+    assert_eq!(menu_choice('6'), Some(DIAG_BOTH));
+    assert_eq!(menu_choice('7'), Some(DIAG_ALL));
+    for w in [DIAG_BOTH, DIAG_ALL] {
+        assert!(w.contains("fwidt=off") && w.contains("crumbs=screen"));
+    }
+    assert!(DIAG_ALL.contains("anypages"));
+    assert_eq!(menu_choice('8'), None);
+}

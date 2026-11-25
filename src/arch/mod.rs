@@ -64,6 +64,7 @@ pub mod crumb {
     pub fn high_arrived() {}
     pub fn step_fmt(_args: core::fmt::Arguments) {}
     pub fn quiet_fmt(_args: core::fmt::Arguments) {}
+    pub fn force_line(_args: core::fmt::Arguments) {}
     pub fn machine_state() {}
     pub fn fw_ptr_ok(_p: *const u8, _what: &str) -> bool {
         true

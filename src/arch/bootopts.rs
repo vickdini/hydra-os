@@ -115,7 +115,11 @@ fn menu(wait: u32) -> Option<&'static str> {
     out("\r\n  Hydra - how to start\r\n\r\n");
     out("    1  Start Hydra\r\n");
     out("    2  Safe mode: one processor, no IOMMU, no PCID, messages on screen\r\n");
-    out("    3  Safe mode, text console only (no desktop)\r\n\r\n");
+    out("    3  Safe mode, text console only (no desktop)\r\n");
+    out("    4  Test: Hydra's own interrupt table while the firmware runs\r\n");
+    out("    5  Test: no log-file writes while starting (screen only)\r\n");
+    out("    6  Test: 4 and 5\r\n");
+    out("    7  Test: 4, 5 and buffers anywhere in memory\r\n\r\n");
     if wait == 0 {
         return None;
     }
@@ -142,7 +146,9 @@ fn menu(wait: u32) -> Option<&'static str> {
         if let Some(words) = m.step(key) {
             out("\r\n\r\n");
             if !words.is_empty() {
-                out("  Starting in safe mode.\r\n");
+                out("  Starting with: ");
+                out(words);
+                out("\r\n");
             }
             return (!words.is_empty()).then_some(words);
         }

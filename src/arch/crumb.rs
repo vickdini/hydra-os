@@ -34,6 +34,16 @@ pub fn step_fmt(args: core::fmt::Arguments) {
     record(args, true);
 }
 
+/// While set, a line goes to the file even with `crumbs=screen` ([`force_line`]).
+static FORCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// A breadcrumb written to the file whatever the boot words say (the start variant's name).
+pub fn force_line(args: core::fmt::Arguments) {
+    FORCE.store(true, Ordering::Relaxed);
+    record(args, true);
+    FORCE.store(false, Ordering::Relaxed);
+}
+
 /// A breadcrumb in the file only (no screen line, no pause): for the many small steps.
 pub fn quiet_fmt(args: core::fmt::Arguments) {
     record(args, false);
@@ -55,6 +65,11 @@ fn record(args: core::fmt::Arguments, show: bool) {
     if ENDED.load(Ordering::Relaxed) {
         return;
     }
+    // (the start menu's test entries 5-7: screen lines only, no file writes)
+    let screen_only = crate::arch::bootopts::say(&[b"crumbs=screen"]) && !FORCE.load(Ordering::Relaxed);
+    if screen_only && !show {
+        return;
+    }
     let n = COUNT.fetch_add(1, Ordering::Relaxed);
     let mut text = crate::console::FixedBuf::new();
     let _ = core::fmt::Write::write_fmt(&mut text, format_args!("{:02} ", n));
@@ -65,7 +80,7 @@ fn record(args: core::fmt::Arguments, show: bool) {
     line[..k].copy_from_slice(&t[..k]);
     line[LINE - 2] = b'\r';
     line[LINE - 1] = b'\n';
-    if !write_line(n, &line) {
+    if !screen_only && !write_line(n, &line) {
         STATE.store(2, Ordering::Relaxed);
     }
     if !show {

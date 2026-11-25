@@ -116,7 +116,9 @@ pub fn fw_read(file: &mut uefi::proto::media::file::RegularFile, buf: &mut [u8])
     }
     let mut bounce = FW_BOUNCE.load(core::sync::atomic::Ordering::Relaxed);
     if bounce == 0 {
-        bounce = allocate_pages(AllocateType::MaxAddress(0xFFFF_FFFF), MemoryType::LOADER_DATA, FW_BOUNCE_SIZE / 4096).map_err(|_| ())?.as_ptr() as u64;
+        // (wave11 GH: below 4 GiB; the start menu's test entry 7 lets the firmware choose)
+        let place = if crate::arch::bootopts::say(&[b"anypages"]) { AllocateType::AnyPages } else { AllocateType::MaxAddress(0xFFFF_FFFF) };
+        bounce = allocate_pages(place, MemoryType::LOADER_DATA, FW_BOUNCE_SIZE / 4096).map_err(|_| ())?.as_ptr() as u64;
         FW_BOUNCE.store(bounce, core::sync::atomic::Ordering::Relaxed);
     }
     let n = buf.len().min(FW_BOUNCE_SIZE);
