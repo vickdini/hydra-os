@@ -52,8 +52,8 @@ pub fn read_from_boot_volume(root: &mut uefi::proto::media::file::Directory) {
         },
     };
     let Some(mut file) = handle.into_regular_file() else { return };
-    let mut info_buf = [0u8; 256];
-    let size = file.get_info::<FileInfo>(&mut info_buf).map(|i| i.file_size() as usize).unwrap_or(0);
+    let mut info_buf = crate::fs::bootfs::InfoBuf::new();
+    let size = file.get_info::<FileInfo>(info_buf.bytes()).map(|i| i.file_size() as usize).unwrap_or(0);
     if !usable_size(size) {
         crate::kprintln!("[firstboot] {} has an unusable size ({} bytes): ignored", ESP_PATH, size);
         return;

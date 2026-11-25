@@ -266,3 +266,15 @@ pub fn high_arrived() {
         }
     }
 }
+
+/// Whether `p` may be handed to the firmware: an identity address (the firmware's stack,
+/// its pool, bounce pages), not a higher-half one (the kernel's stack, statics or heap
+/// after the move: a real firmware's drivers use such addresses for DMA or cut them to 32
+/// bits). A higher-half pointer is recorded as a breadcrumb (`what`), so QEMU runs show it.
+pub fn fw_ptr_ok(p: *const u8, what: &str) -> bool {
+    if (p as u64) < 0xFFFF_8000_0000_0000 {
+        return true;
+    }
+    step_fmt(format_args!("HIGH POINTER {:#x} for the firmware: {}", p as u64, what));
+    false
+}

@@ -20,6 +20,25 @@ use uefi::mem::memory_map::MemoryType;
 use uefi::proto::media::file::{Directory, File, FileAttribute, FileInfo, FileMode};
 use uefi::CStr16;
 
+/// wave11 GH: a buffer for the firmware's file information and directory entries, aligned
+/// as they need (8 bytes: the `uefi` crate panics on a buffer that is not). A plain byte
+/// array happened to be aligned on the old stack and was not on the NUC's firmware stack.
+#[repr(C, align(8))]
+pub struct InfoBuf(pub [u8; 1024]);
+
+impl InfoBuf {
+    /// A zeroed buffer.
+    pub const fn new() -> Self {
+        InfoBuf([0; 1024])
+    }
+
+    /// The bytes, for the firmware (a higher-half buffer is recorded: `crumb::fw_ptr_ok`).
+    pub fn bytes(&mut self) -> &mut [u8] {
+        crate::arch::crumb::fw_ptr_ok(self.0.as_ptr(), "a file information buffer");
+        &mut self.0
+    }
+}
+
 /// Maximum size of a boot file loaded into memory by [`read_boot_file`] (16 MiB).
 pub const MAX_LOAD_SIZE: usize = 16 * 1024 * 1024;
 
@@ -50,6 +69,10 @@ pub fn path_to_cstr16<'a>(path: &str, buf: &'a mut [u16]) -> Option<&'a CStr16> 
         buf[i] = if b == b'/' { b'\\' as u16 } else { b as u16 };
     }
     buf[clean.len()] = 0;
+    // wave11 GH: the name goes to the firmware: never from a higher-half buffer
+    if !crate::arch::crumb::fw_ptr_ok(buf.as_ptr() as *const u8, "a file name") {
+        return None;
+    }
     CStr16::from_u16_with_nul(&buf[..=clean.len()]).ok()
 }
 
@@ -145,8 +168,8 @@ pub fn read_media_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> 
             Some(f) => f,
             None => continue,
         };
-        let mut info_buf = [0u8; 256];
-        let size = file.get_info::<FileInfo>(&mut info_buf).map_err(|_| "Failed to query file info")?.file_size() as usize;
+        let mut info_buf = InfoBuf::new();
+        let size = file.get_info::<FileInfo>(info_buf.bytes()).map_err(|_| "Failed to query file info")?.file_size() as usize;
         if size > MAX_MEDIA_FILE {
             return Err("File too large");
         }
@@ -192,8 +215,8 @@ pub fn read_boot_file(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
         .map_err(|_| "File not found on boot media")?;
     let mut file = file_handle.into_regular_file().ok_or("Path is directory, not file")?;
 
-    let mut info_buf = [0u8; 256];
-    let file_info = file.get_info::<FileInfo>(&mut info_buf).map_err(|_| "Failed to query file info")?;
+    let mut info_buf = InfoBuf::new();
+    let file_info = file.get_info::<FileInfo>(info_buf.bytes()).map_err(|_| "Failed to query file info")?;
     let file_size = file_info.file_size() as usize;
     if file_size == 0 || file_size > MAX_LOAD_SIZE {
         return Err("Invalid file size");

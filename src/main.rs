@@ -158,6 +158,9 @@ pub fn report_panic(info: &(impl core::fmt::Display + core::fmt::Debug)) {
             let _ = write!(com1, "[!] heap: {} KiB used, {} KiB free of {} KiB\n", h.used_bytes / 1024, h.free_bytes / 1024, h.total_bytes / 1024);
         }
     }
+    // wave11 GH: before ExitBootServices also a breadcrumb (\logs\steps.txt): the screen may
+    // still show the boot logo, and the serial port is not there on real machines
+    crate::arch::crumb::step_fmt(format_args!("KERNEL PANIC: {}", info));
     video::splash::panic_reveal();
     console::set_color(Color::LightRed, Color::Black);
     println!("\n[!] KERNEL PANIC: {:?}", info);

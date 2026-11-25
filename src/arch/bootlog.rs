@@ -262,7 +262,7 @@ pub fn prepare_file() {
         ok &= fw_write(&mut f, 0, &text, bounce);
     }
     let _ = f.flush();
-    let size = f.get_info::<FileInfo>(&mut [0u8; 256][..]).map(|i| i.file_size()).unwrap_or(0);
+    let size = f.get_info::<FileInfo>(crate::fs::bootfs::InfoBuf::new().bytes()).map(|i| i.file_size()).unwrap_or(0);
     f.close();
     // From the stick: the installed system's logs too, so one stick carries them all
     if crate::arch::bootdisk::info().live {
@@ -286,44 +286,12 @@ pub fn prepare_file() {
 /// the source changed since the last start: `\logs\disk\index.txt` keeps each copied file's
 /// name and fingerprint.
 fn collect_disk_logs(stick_logs: &mut uefi::proto::media::file::Directory, bounce: &mut [u8]) {
-    use uefi::proto::media::block::BlockIO;
     use uefi::proto::media::file::{File, FileAttribute, FileMode};
     use uefi::proto::media::fs::SimpleFileSystem;
     let own = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(uefi::boot::image_handle()).ok().and_then(|i| i.device());
-    // The firmware may have connected only the device it booted from. Its drivers for the
-    // mass-storage controllers on the root PCI bus first (class 01: SATA, NVMe; found by
-    // their device path, the class read from PCI configuration space), then the disks'
-    // partitions and file systems; at most 16 of each
-    if let Ok(all) = uefi::boot::locate_handle_buffer(uefi::boot::SearchType::from_proto::<uefi::proto::device_path::DevicePath>()) {
-        let mut n = 0;
-        for &h in all.iter() {
-            let Ok(path) = (unsafe {
-                uefi::boot::open_protocol::<uefi::proto::device_path::DevicePath>(
-                    uefi::boot::OpenProtocolParams { handle: h, agent: uefi::boot::image_handle(), controller: None },
-                    uefi::boot::OpenProtocolAttributes::GetProtocol,
-                )
-            }) else {
-                continue;
-            };
-            // An ACPI PciRoot node, then exactly one PCI node (function, device), nothing more
-            let nodes: Vec<(u8, u8, Vec<u8>)> = path.node_iter().take(3).map(|nd| (nd.full_type().0 .0, nd.full_type().1 .0, nd.data().to_vec())).collect();
-            let pci = match nodes.as_slice() {
-                [(2, 1, _), (1, 1, d)] if d.len() >= 2 => Some((d[1], d[0])),
-                _ => None,
-            };
-            drop(path);
-            let Some((dev, func)) = pci else { continue };
-            if n < 16 && crate::arch::pci::pci_read_u8(0, dev, func, 0x0B) == 0x01 {
-                n += 1;
-                let _ = uefi::boot::connect_controller(h, &[], None, true);
-            }
-        }
-    }
-    if let Ok(disks) = uefi::boot::locate_handle_buffer(uefi::boot::SearchType::from_proto::<BlockIO>()) {
-        for &h in disks.iter().take(16) {
-            let _ = uefi::boot::connect_controller(h, &[], None, true);
-        }
-    }
+    // Only the file systems the firmware already offers (connecting controllers, or opening
+    // a volume exclusively, makes a real firmware stop or reconnect its drivers: wave 11 NUC)
+    crate::arch::crumb::step("disk logs: looking for an installed Hydra");
     let Ok(handles) = uefi::boot::locate_handle_buffer(uefi::boot::SearchType::from_proto::<SimpleFileSystem>()) else { return };
     let mut hydra_volumes = 0;
     #[repr(C, align(8))]
@@ -334,7 +302,15 @@ fn collect_disk_logs(stick_logs: &mut uefi::proto::media::file::Directory, bounc
         if Some(h) == own {
             continue;
         }
-        let Ok(mut sfs) = uefi::boot::open_protocol_exclusive::<SimpleFileSystem>(h) else { continue };
+        let Ok(mut sfs) = (unsafe {
+            uefi::boot::open_protocol::<SimpleFileSystem>(
+                uefi::boot::OpenProtocolParams { handle: h, agent: uefi::boot::image_handle(), controller: None },
+                uefi::boot::OpenProtocolAttributes::GetProtocol,
+            )
+        }) else {
+            continue;
+        };
+        crate::arch::crumb::step("disk logs: a volume");
         let Ok(mut root) = sfs.open_volume() else { continue };
         let mut b = [0u16; 64];
         let is = |root: &mut uefi::proto::media::file::Directory, p: &str, b: &mut [u16; 64]| {

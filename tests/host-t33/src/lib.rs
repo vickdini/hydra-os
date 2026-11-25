@@ -32,6 +32,12 @@ macro_rules! kprintln {
 }
 
 pub mod arch {
+    /// *stub* wave11 GH: breadcrumbs (none on the host).
+    pub mod crumb {
+        pub fn fw_ptr_ok(_p: *const u8, _what: &str) -> bool {
+            true
+        }
+    }
     /// *stub*
     pub mod pit {
         pub use crate::fake::{clock_state, frequency_hz, now_ns, sleep_ms, tick_ns, ticks, uptime_ms};
