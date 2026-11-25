@@ -24,6 +24,8 @@
 #             kernel and boot files: on the stick's EFI partition and in its install set
 #             (/opt/hydra-install/esp in the live pool, what the installer copies to the disk).
 #             No pool snapshot and no cleaning: for a kernel-side change. Needs one VM boot.
+#             EXTRA="treepath=poolpath ..." also installs files of this tree into the live pool
+#             (mode 755), e.g. EXTRA="userland/hydra-logind/hydra-session=/usr/libexec/hydra-session".
 #   stick     out/hydra-live.img: GPT disk image, EFI partition (kernel, boot files, \hydra\live)
 #             + Hydra pool partition (work/live.raw)
 #
@@ -279,12 +281,33 @@ EOF
         esp_tree "$R$WORK/esptree"
         tar -C "$R$WORK/esptree" -cf "$R$OUT/esp.tar" .
         rm -rf "$R$WORK/esptree"
+        # Files of this tree for the live pool (EXTRA), and the list the VM installs from
+        rm -rf "$R$OUT/extra" && mkdir -p "$R$OUT/extra"
+        : > "$R$OUT/extra/list"
+        i=0
+        for pair in ${EXTRA:-}; do
+            src=${pair%%=*}; dst=${pair#*=}
+            [ -f "$TREE/$src" ] || die "EXTRA: no $TREE/$src"
+            cp "$TREE/$src" "$R$OUT/extra/f$i"
+            echo "f$i $dst" >> "$R$OUT/extra/list"
+            i=$((i + 1))
+        done
         cat > "$R$OUT/restick-inside.sh" <<'INSIDE'
 #!/bin/bash
 # Runs inside the stick's live pool (booted from the build's test ISO): replaces the install
-# set's EFI files with the build host's, then powers off. Prints RESTICK-OK or RESTICK-FAILED.
+# set's EFI files with the build host's, installs the EXTRA files, then powers off. Prints
+# RESTICK-OK or RESTICK-FAILED.
 D=/opt/hydra-install
 ok=1
+curl -sSf --retry 3 -o /tmp/extra.list "http://10.0.2.2:$PORT/extra/list" || ok=0
+while read -r f dst; do
+    [ -n "$f" ] || continue
+    if curl -sSf --retry 3 -o "$dst.new" "http://10.0.2.2:$PORT/extra/$f"; then
+        chmod 755 "$dst.new" && mv "$dst.new" "$dst" && echo "installed $dst" || ok=0
+    else
+        ok=0
+    fi
+done < /tmp/extra.list
 curl -sSf --retry 3 -o /tmp/esp.tar "http://10.0.2.2:$PORT/esp.tar" || ok=0
 if [ $ok = 1 ] && [ -d "$D" ]; then
     rm -rf "$D/esp.new" && mkdir -p "$D/esp.new" && tar -C "$D/esp.new" -xf /tmp/esp.tar --no-same-owner || ok=0
@@ -304,6 +327,8 @@ INSIDE
             "linux chroot /ubuntu /usr/bin/bash -c \"curl -s http://10.0.2.2:$PORT/restick-inside.sh -o /tmp/r.sh; PORT=$PORT bash /tmp/r.sh\""
         stop_serving
         rm -f "$R$OUT/restick-inside.sh"
+        rm -rf "$R$OUT/extra"
+        grep -a "^installed " "$R$OUT/restick.log.txt" || true
         grep -q "^RESTICK-OK" "$R$OUT/restick.log.txt" || die "the install set was not updated (see $OUT/restick.log.txt)"
         grep -a "BOOTX64.EFI" "$R$OUT/restick.log.txt" | head -2 || true
         sha256sum "$TREE/dist/x86_64/bootx64.efi"
