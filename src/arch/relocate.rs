@@ -28,6 +28,15 @@ static IMAGE_PHYS: AtomicU64 = AtomicU64::new(0);
 static IMAGE_SIZE: AtomicU64 = AtomicU64::new(0);
 /// The boot stack's physical range start.
 static STACK_PHYS: AtomicU64 = AtomicU64::new(0);
+/// wave11 GH (NUC diagnostics): move only the code and data high and keep running on the
+/// firmware's stack (its slot of the low half is then kept, as without the move).
+static KEEP_FW_STACK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Asks [`go_high`] to keep the firmware's stack (diagnostics: firmware code then never
+/// runs on a stack at a higher-half address).
+pub fn keep_firmware_stack() {
+    KEEP_FW_STACK.store(true, Ordering::SeqCst);
+}
 
 extern "C" {
     /// The image's DOS header (defined by the linker).
@@ -272,8 +281,22 @@ pub fn go_high(next: fn() -> !) {
         crate::memory::frame_allocator::enable_direct_map();
         IMAGE_PHYS.store(base, Ordering::SeqCst);
         IMAGE_SIZE.store(size, Ordering::SeqCst);
-        STACK_PHYS.store(stack, Ordering::SeqCst);
         let target = (next as usize as u64).wrapping_add(delta);
+        // wave11 GH: the first thing at the high target prints a line through the firmware
+        // with nothing but identity addresses (crumb::high_arrived)
+        crate::arch::crumb::prepare_arrival();
+        if KEEP_FW_STACK.load(Ordering::SeqCst) {
+            crate::arch::crumb::step("go_high: jumping to the high code on the firmware's stack");
+            core::arch::asm!(
+                "and rsp, -16",
+                "sub rsp, 32",
+                "call {target}",
+                "ud2",
+                target = in(reg) target,
+                options(noreturn)
+            );
+        }
+        STACK_PHYS.store(stack, Ordering::SeqCst);
         let top = STACK_BOTTOM + STACK_SIZE;
         // The Microsoft x64 convention of the UEFI target: 32 bytes of shadow space, the
         // stack 16-byte aligned at the call

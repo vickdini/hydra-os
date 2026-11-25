@@ -218,6 +218,7 @@ fn main() -> Status {
 
 /// The kernel's boot sequence, in the higher half (see [`arch::relocate`]).
 pub fn boot() -> ! {
+    arch::crumb::high_arrived(); // wave11 GH: identity-buffer print first (NUC diagnostics)
     arch::crumb::step("boot() running"); // wave11 GH
     arch::boottime::mark("entry (UEFI helpers)");
     uefi::helpers::init().unwrap();

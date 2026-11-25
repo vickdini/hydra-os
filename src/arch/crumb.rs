@@ -218,14 +218,62 @@ pub fn want_high() -> bool {
             break;
         }
     }
-    for _ in 0..20 {
+    uefi::system::with_stdout(|o| {
+        let _ = core::fmt::Write::write_str(o, "[hydra] or L to move only the code high and keep the firmware's stack\r\n");
+    });
+    for _ in 0..30 {
         if let Some(Key::Printable(c)) = uefi::system::with_stdin(|i| i.read_key().ok().flatten()) {
-            if matches!(char::from(c), 'n' | 'N') {
-                step("N pressed: staying at the load address");
-                return false;
+            match char::from(c) {
+                'n' | 'N' => {
+                    step("N pressed: staying at the load address");
+                    return false;
+                }
+                'l' | 'L' => {
+                    step("L pressed: code high, firmware's stack kept");
+                    crate::arch::relocate::keep_firmware_stack();
+                    return true;
+                }
+                _ => {}
             }
         }
         uefi::boot::stall(core::time::Duration::from_millis(100));
     }
     true
+}
+
+/// The identity address of the line [`high_arrived`] prints (0: none).
+static ARRIVAL: AtomicU64 = AtomicU64::new(0);
+
+/// Before the jump to the higher half: the arrival line in a firmware page (UCS-2, at an
+/// identity address), so that the first thing at the high target can show it without
+/// handing the firmware any higher-half address but its own stack frames.
+pub fn prepare_arrival() {
+    if STATE.load(Ordering::Relaxed) != 1 {
+        return;
+    }
+    let Ok(p) = uefi::boot::allocate_pages(uefi::boot::AllocateType::AnyPages, uefi::boot::MemoryType::LOADER_DATA, 1) else { return };
+    let text = "[hydra] 09a high code reached (identity-buffer print)\r\n";
+    let w = p.as_ptr() as *mut u16;
+    for (i, b) in text.bytes().enumerate() {
+        unsafe { w.add(i).write(b as u16) };
+    }
+    unsafe { w.add(text.len()).write(0) };
+    ARRIVAL.store(p.as_ptr() as u64, Ordering::Relaxed);
+}
+
+/// The first thing at the high target: the prepared line through the firmware's text
+/// output, called through the system table's raw pointers (all identity addresses).
+pub fn high_arrived() {
+    let msg = ARRIVAL.load(Ordering::Relaxed);
+    if msg == 0 {
+        return;
+    }
+    if let Some(st) = uefi::table::system_table_raw() {
+        unsafe {
+            let out = st.as_ref().stdout;
+            if !out.is_null() {
+                let _ = ((*out).output_string)(out, msg as *const u16);
+            }
+        }
+    }
 }

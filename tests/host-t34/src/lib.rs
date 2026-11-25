@@ -299,6 +299,7 @@ pub mod arch {
         pub fn step(_name: &str) {}
         pub fn step_fmt(_args: core::fmt::Arguments) {}
         pub fn end(_name: &str) {}
+        pub fn high_arrived() {}
         pub fn want_high() -> bool {
             true
         }
