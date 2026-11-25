@@ -95,6 +95,11 @@ with **F10**, and in the "how to start" menu press **2** (safe mode: one process
 no IOMMU, boot messages on screen). If that also stops, take a **photo of the screen**, and
 try entry **3** (safe mode, text console only).
 
+**If it stops while lines starting with `[hydra]` are on the screen** (before the "how to
+start" menu): take a **photo of the screen** (the last `[hydra]` line tells where it
+stopped). Switch off, start the stick again, and when the line **"Press N within 2 s ..."**
+appears, press **N** (this starts Hydra a slightly different way). Photo again if it stops.
+
 **If the screen shows "KERNEL PANIC"** (red text): take a photo. Hydra restarts by itself
 after 60 seconds to save its log; choose the stick again with F10 so it can write the log
 (otherwise the NUC starts the other system and the log is lost).
