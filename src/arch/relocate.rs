@@ -261,34 +261,40 @@ pub fn go_high(next: fn() -> !) {
         if (256..512).any(|i| *((fw + i * 8) as *const u64) & PRESENT != 0) {
             return;
         }
-        let Some(pml4) = page() else { return };
-        core::ptr::copy_nonoverlapping(fw as *const u64, pml4 as *mut u64, 512);
-        crate::arch::crumb::step("go_high: firmware's top-level table copied");
-        if direct_map(pml4).is_none() {
-            return;
-        }
-        crate::arch::crumb::step("go_high: direct map built");
+        // wave11 GH: the higher-half entries go into the FIRMWARE's own top-level table and CR3
+        // stays the firmware's: a real firmware (the NUC's) never returned from its first file
+        // read under a copy of its tables at another address. The upper half is unused by
+        // the firmware (checked above); its table pages may be write-protected (CR0.WP is
+        // cleared while they are written). Hydra's own tables come at the takeover.
+        let pml4 = fw;
         let size = (size + 4095) & !4095;
-        for off in (0..size).step_by(4096) {
-            if map(pml4, KERNEL_BASE + off, base + off).is_none() {
-                return;
-            }
-        }
-        crate::arch::crumb::step("go_high: image mapped high");
         let Some(stack) = stack_pages() else {
             return;
         };
-        for off in (0..STACK_SIZE).step_by(4096) {
-            if map(pml4, STACK_BOTTOM + off, stack + off).is_none() {
-                return;
-            }
-        }
-        crate::arch::crumb::step("go_high: stack mapped; switching CR3 next");
-        // Nothing can fail from here on
-        x86_64::instructions::interrupts::without_interrupts(|| {
-            core::arch::asm!("mov cr3, {}", in(reg) pml4, options(nostack, preserves_flags));
+        let built = x86_64::instructions::interrupts::without_interrupts(|| {
+            let cr0 = x86_64::registers::control::Cr0::read_raw();
+            x86_64::registers::control::Cr0::write_raw(cr0 & !(1 << 16));
+            let ok = (|| {
+                direct_map(pml4)?;
+                for off in (0..size).step_by(4096) {
+                    map(pml4, KERNEL_BASE + off, base + off)?;
+                }
+                for off in (0..STACK_SIZE).step_by(4096) {
+                    map(pml4, STACK_BOTTOM + off, stack + off)?;
+                }
+                Some(())
+            })();
+            x86_64::registers::control::Cr0::write_raw(cr0);
+            // (new entries only: one reload of CR3 drops whatever the TLB might hold)
+            core::arch::asm!("mov {0}, cr3", "mov cr3, {0}", out(reg) _, options(nostack, preserves_flags));
+            ok
         });
-        crate::arch::crumb::step("go_high: CR3 switched (Hydra's tables)");
+        if built.is_none() {
+            // (entries already written point at pages of ours and are never used: nothing runs high)
+            crate::arch::crumb::step("go_high: building the higher half failed; staying low");
+            return;
+        }
+        crate::arch::crumb::step_fmt(format_args!("go_high: higher half in the firmware's own table at {:#x} (CR3 unchanged)", pml4));
         let delta = KERNEL_BASE.wrapping_sub(base);
         // Written through the high alias: the firmware may have made the identity pages
         // of read-only sections read-only
