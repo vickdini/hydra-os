@@ -76,10 +76,13 @@ fn rd(table: u64, i: u64) -> u64 {
 }
 
 /// Kernel tables with the direct map's GiB slot 3 (0xc0000000..) in 2 MiB pages (`huge2m`)
-/// or as one 1 GiB page. Returns (pml4, pdpt).
-fn tables(huge1g: bool) -> (u64, u64) {
-    let (pml4, pdpt) = (alloc(), alloc());
+/// or as one 1 GiB page, and the firmware's identity map of slot 3 as one 1 GiB page.
+/// Returns (pml4, direct-map pdpt, identity pdpt).
+fn tables(huge1g: bool) -> (u64, u64, u64) {
+    let (pml4, pdpt, idpt) = (alloc(), alloc(), alloc());
     unsafe { at(pml4, (DIRECT_MAP_BASE >> 39) & 511).write(pdpt | P | W) };
+    unsafe { at(pml4, 0).write(idpt | P | W) };
+    unsafe { at(idpt, 3).write(0xC000_0000 | P | W | PS) };
     if huge1g {
         unsafe { at(pdpt, 3).write(0xC000_0000 | P | W | PS | G | NX) };
     } else {
@@ -89,7 +92,7 @@ fn tables(huge1g: bool) -> (u64, u64) {
         }
         unsafe { at(pdpt, 3).write(pd | P | W) };
     }
-    (pml4, pdpt)
+    (pml4, pdpt, idpt)
 }
 
 /// The 4 KiB leaf of direct-map address `DIRECT_MAP_BASE + phys` (None if a large page).
@@ -120,7 +123,7 @@ fn the_framebuffer_gets_a_write_combining_view_of_its_own_pages_only() {
     assert_eq!(hydra_hosttests_t32::host::rdmsr(pat::IA32_PAT), 0x0007_0406_0007_0106);
 
     for huge1g in [false, true] {
-        let (pml4, pdpt) = tables(huge1g);
+        let (pml4, pdpt, idpt) = tables(huge1g);
         KERNEL_PML4.store(pml4, std::sync::atomic::Ordering::SeqCst);
         // The NUC's framebuffer: 1920x1080x4 rounded up, 0x7e9000 bytes
         let (fb, len) = (0xE000_0000u64, 0x7E_9000u64);
@@ -130,7 +133,12 @@ fn the_framebuffer_gets_a_write_combining_view_of_its_own_pages_only() {
             assert_eq!(e & 0x000F_FFFF_FFFF_F000, fb + off, "same memory at {off:#x}");
             assert_eq!(e & PWT != 0, wc, "write-combining at {off:#x}");
             assert_eq!(e & (P | W | G | NX), P | W | G | NX, "rights kept at {off:#x}");
+            // The identity alias has the same type (no conflicting alias remains)
+            let i = leaf(idpt, fb + off).expect("identity split to 4 KiB");
+            assert_eq!(i & 0x000F_FFFF_FFFF_F000, fb + off);
+            assert_eq!(i & PWT != 0, wc, "identity write-combining at {off:#x}");
         }
+        assert_eq!(pat::identity_wc_pages(), 0x7E9);
         // Memory outside the framebuffer's 2 MiB pages stays as it was
         if huge1g {
             let e2 = rd(rd(pdpt, 3) & 0x000F_FFFF_FFFF_F000, 0);
