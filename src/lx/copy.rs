@@ -653,12 +653,75 @@ fn with_faults(addr: u64, n: usize, write: bool, mut copy: impl FnMut(usize) -> 
         }
         done = n - left;
         let at = addr + done as u64;
-        if at & !0xFFF == last || !fault_in(at, left as u64, write) {
+        if at & !0xFFF == last {
+            efault_note(at, write, true);
+            return Err(EFAULT);
+        }
+        if !fault_in(at, left as u64, write) {
+            efault_note(at, write, false);
             return Err(EFAULT);
         }
         last = at & !0xFFF;
     }
 }
+
+// wave11 GG begin
+/// `EFAULT`s noted so far ([`efault_note`]).
+static EFAULTS_NOTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// A copy between the kernel and user address `at` ends in `EFAULT` (`again`: the page
+/// was faulted in and the copy faulted there once more; otherwise it could not be faulted
+/// in). The first 16 per boot are logged with where the copy actually faulted and the
+/// page-table entries of both addresses, so a "Bad address" a program reports can be
+/// explained from the boot log (the NUC's useradd in wave 11: a user page present and
+/// allowed would point at the kernel side of the copy or a stale TLB entry).
+pub(crate) fn efault_note(at: u64, write: bool, again: bool) {
+    let n = EFAULTS_NOTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n >= 16 {
+        return;
+    }
+    let fault = crate::arch::idt::LAST_UACCESS_FAULT[crate::arch::percpu::cpu() % 16].load(core::sync::atomic::Ordering::Relaxed);
+    #[cfg(target_os = "uefi")]
+    let cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    #[cfg(not(target_os = "uefi"))]
+    let cr3 = 0u64; // (host tests: no page tables to show)
+    let (pid, _) = crate::compat::linux::proc::current_ids();
+    crate::console::serial_write(&alloc::format!(
+        "[uaccess] EFAULT {}: pid {} {} user {:#x} ({}), last fault at {:#x}, pte(user) {}, pte(fault) {}, cpu {}
+",
+        n + 1,
+        pid,
+        if write { "write to" } else { "read from" },
+        at,
+        if again { "faulted in, faulted again" } else { "could not be faulted in" },
+        fault,
+        pte_text(cr3, at),
+        pte_text(cr3, fault),
+        crate::arch::percpu::cpu()
+    ));
+}
+
+/// The leaf entry mapping `va` in the tables at `cr3`, as text ("none" if not mapped).
+fn pte_text(cr3: u64, va: u64) -> alloc::string::String {
+    const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
+    let mut table = cr3 & ADDR;
+    if table == 0 {
+        return alloc::string::String::from("none");
+    }
+    for (level, shift) in [39u64, 30, 21, 12].into_iter().enumerate() {
+        // SAFETY: page tables, read through the direct map
+        let e = unsafe { (crate::memory::frame_allocator::phys_to_virt(table) as *const u64).add(((va >> shift) & 511) as usize).read_volatile() };
+        if e & 1 == 0 {
+            return alloc::string::String::from("none");
+        }
+        if shift == 12 || (level > 0 && e & (1 << 7) != 0) {
+            return alloc::format!("{:#x}", e);
+        }
+        table = e & ADDR;
+    }
+    alloc::string::String::from("none")
+}
+// wave11 GG end
 
 /// Copies `dst.len()` bytes at user address `addr` of the calling task into `dst`.
 pub fn read_user(addr: u64, dst: &mut [u8]) -> Result<(), i64> {

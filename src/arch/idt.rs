@@ -420,6 +420,9 @@ static UACCESS_FIXUPS: [(unsafe extern "sysv64" fn(), unsafe extern "sysv64" fn(
     (hydra_uaccess_str_insn, hydra_uaccess_str_insn_end, hydra_uaccess_str_fix),
 ];
 
+/// wave11 GG: per CPU, the address of the last page fault resumed at a user-copy fix-up.
+pub static LAST_UACCESS_FAULT: [core::sync::atomic::AtomicU64; 16] = [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+
 /// Faults counted by [`uaccess_fixup`] (page faults resumed at a fix-up).
 pub static UACCESS_FAULTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -519,6 +522,8 @@ pub fn exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
     if (ctx.cs & 3) == 0 && (ctx.vector == 14 || ctx.vector == 1) {
         if let Some(fix) = uaccess_fixup(ctx.rip, ctx.vector == 1) {
             if ctx.vector == 14 {
+                // wave11 GG: where it faulted, for the EFAULT report (`lx::copy`)
+                LAST_UACCESS_FAULT[crate::arch::percpu::cpu() % LAST_UACCESS_FAULT.len()].store(Cr2::read_raw(), Ordering::Relaxed);
                 ctx.rip = fix;
             } else {
                 crate::arch::debugregs::take_dr6();

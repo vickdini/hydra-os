@@ -109,6 +109,59 @@ if [ "$(id -u)" = 0 ] && [ -x "$helper" ] && ! [ -d /usr/lib/python3/dist-packag
     ) >/dev/null 2>&1 < /dev/null &
 fi
 
+# wave 11, Group G: there is no systemd journal. The system log socket is read here and
+# the messages of the login path (PAM modules, SDDM's helper, useradd, passwd, sudo, polkit)
+# go to this script's output, the console and the boot log, so that the reason of a failed
+# login can be seen. Once per boot (the socket stays bound).
+if [ "$(id -u)" = 0 ] && command -v python3 >/dev/null 2>&1 && ! [ -e /run/hydra/syslog.pid ]; then
+    mkdir -p /run/systemd/journal /run/hydra
+    python3 -c '
+import os, re, selectors, socket
+# A stream socket: Hydra has no unconnected datagram Unix sockets, and syslog() (glibc)
+# and logger fall back to a stream when the datagram connect says EPROTOTYPE
+p = "/run/systemd/journal/dev-log"
+try:
+    os.unlink(p)
+except OSError:
+    pass
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(p)
+os.chmod(p, 0o666)
+srv.listen(16)
+if not os.path.lexists("/dev/log"):
+    try:
+        os.symlink(p, "/dev/log")
+    except OSError:
+        pass
+keep = re.compile(r"pam|sddm|useradd|usermod|groupadd|passwd|shadow|sudo|login|chkpwd|polkit|auth", re.I)
+sel = selectors.DefaultSelector()
+sel.register(srv, selectors.EVENT_READ)
+bufs = {}
+while True:
+    for key, _ in sel.select():
+        s = key.fileobj
+        if s is srv:
+            c, _ = srv.accept()
+            bufs[c] = b""
+            sel.register(c, selectors.EVENT_READ)
+            continue
+        d = s.recv(8192)
+        if not d:
+            sel.unregister(s)
+            s.close()
+            d = b"\0"
+        b = bufs.pop(s, b"") + d
+        *msgs, rest = re.split(b"[\0\n]", b)
+        if d != b"\0":
+            bufs[s] = rest
+        for m in msgs:
+            t = re.sub(r"^<[0-9]+>", "", m.decode("utf-8", "replace")).strip()
+            if t and keep.search(t):
+                print("[syslog] " + t, flush=True)
+' </dev/null &
+    echo $! > /run/hydra/syslog.pid
+fi
+
 if [ "$dm" = 1 ]; then
     # The live session's user and desktop, when Hydra runs from its USB stick (nothing
     # happens otherwise)
