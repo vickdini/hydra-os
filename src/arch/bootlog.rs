@@ -199,7 +199,7 @@ pub fn prepare_file() {
             }
         }
     }
-    let Ok(bounce) = allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, 16) else { return };
+    let Ok(bounce) = allocate_pages(AllocateType::MaxAddress(0xFFFF_FFFF), MemoryType::LOADER_DATA, 16) else { return };
     let bounce = unsafe { core::slice::from_raw_parts_mut(bounce.as_ptr(), 16 * 4096) };
     let open = |dir: &mut uefi::proto::media::file::Directory, n: u32, mode: FileMode| {
         let mut buf = [0u16; 32];

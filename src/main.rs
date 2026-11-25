@@ -487,6 +487,7 @@ pub fn boot() -> ! {
     crate::arch::rtc::init();
     crate::arch::mouse::init();
     arch::boottime::mark("reading the boot files");
+    arch::crumb::machine_state(); // wave11 GH
     arch::bootdisk::detect();
     arch::bootlog::prepare_file(); // wave11 GH: \logs\bootNNN.txt on the EFI partition
     arch::crumb::step_fmt(format_args!("boot log file: {}", if arch::bootlog::file_on() { "made" } else { "none" })); // wave11 GH

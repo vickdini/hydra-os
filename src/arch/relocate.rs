@@ -81,7 +81,7 @@ const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
 /// A zeroed page from the firmware (boot loader data: never handed to the frame allocator).
 #[cfg(target_os = "uefi")]
 fn page() -> Option<u64> {
-    let p = uefi::boot::allocate_pages(uefi::boot::AllocateType::AnyPages, uefi::boot::MemoryType::LOADER_DATA, 1).ok()?;
+    let p = uefi::boot::allocate_pages(uefi::boot::AllocateType::MaxAddress(0xFFFF_FFFF), uefi::boot::MemoryType::LOADER_DATA, 1).ok()?;
     unsafe { core::ptr::write_bytes(p.as_ptr(), 0, 4096) };
     Some(p.as_ptr() as u64)
 }
@@ -113,7 +113,7 @@ fn ram_top() -> Option<u64> {
 /// The kernel stack for the higher half, from the firmware.
 #[cfg(target_os = "uefi")]
 fn stack_pages() -> Option<u64> {
-    uefi::boot::allocate_pages(uefi::boot::AllocateType::AnyPages, uefi::boot::MemoryType::LOADER_DATA, (STACK_SIZE / 4096) as usize)
+    uefi::boot::allocate_pages(uefi::boot::AllocateType::MaxAddress(0xFFFF_FFFF), uefi::boot::MemoryType::LOADER_DATA, (STACK_SIZE / 4096) as usize)
         .ok()
         .map(|p| p.as_ptr() as u64)
 }

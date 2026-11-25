@@ -116,10 +116,11 @@ pub fn fw_read(file: &mut uefi::proto::media::file::RegularFile, buf: &mut [u8])
     }
     let mut bounce = FW_BOUNCE.load(core::sync::atomic::Ordering::Relaxed);
     if bounce == 0 {
-        bounce = allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, FW_BOUNCE_SIZE / 4096).map_err(|_| ())?.as_ptr() as u64;
+        bounce = allocate_pages(AllocateType::MaxAddress(0xFFFF_FFFF), MemoryType::LOADER_DATA, FW_BOUNCE_SIZE / 4096).map_err(|_| ())?.as_ptr() as u64;
         FW_BOUNCE.store(bounce, core::sync::atomic::Ordering::Relaxed);
     }
     let n = buf.len().min(FW_BOUNCE_SIZE);
+    crate::arch::crumb::quiet_fmt(format_args!("  firmware read: {} bytes into {:#x}", n, bounce)); // wave11 GH
     let tmp = unsafe { core::slice::from_raw_parts_mut(bounce as *mut u8, n) };
     let got = file.read(tmp).map_err(|_| ())?;
     buf[..got].copy_from_slice(&tmp[..got]);

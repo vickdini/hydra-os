@@ -182,6 +182,9 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     };
     let fb_virt = crate::video::get_video_info().map_or(0, |info| info.base_ptr as u64);
     // wave11 GH end
+    // Hydra's own gates for the hardware vectors (the firmware's served until ExitBootServices)
+    x86_64::instructions::interrupts::disable();
+    crate::arch::idt::take_hardware_vectors(); // wave11 GH
     let entries_count = memory_map.entries().count();
 
     // 3a. Which GiB slots of the low 512 GiB the kernel keeps in every address space: all

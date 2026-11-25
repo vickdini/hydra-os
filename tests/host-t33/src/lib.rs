@@ -37,6 +37,7 @@ pub mod arch {
         pub fn fw_ptr_ok(_p: *const u8, _what: &str) -> bool {
             true
         }
+        pub fn quiet_fmt(_args: core::fmt::Arguments) {}
     }
     /// *stub*
     pub mod pit {

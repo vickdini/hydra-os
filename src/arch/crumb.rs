@@ -31,6 +31,16 @@ pub fn step(name: &str) {
 
 /// Records a boot step with a formatted text (at most 150 characters are kept).
 pub fn step_fmt(args: core::fmt::Arguments) {
+    record(args, true);
+}
+
+/// A breadcrumb in the file only (no screen line, no pause): for the many small steps.
+pub fn quiet_fmt(args: core::fmt::Arguments) {
+    record(args, false);
+}
+
+/// Writes a breadcrumb line (and shows it when `show`).
+fn record(args: core::fmt::Arguments, show: bool) {
     match STATE.load(Ordering::Relaxed) {
         2 => return,
         0 => {
@@ -57,6 +67,9 @@ pub fn step_fmt(args: core::fmt::Arguments) {
     line[LINE - 1] = b'\n';
     if !write_line(n, &line) {
         STATE.store(2, Ordering::Relaxed);
+    }
+    if !show {
+        return;
     }
     // On the firmware's text console too, a moment long
     uefi::system::with_stdout(|o| {
@@ -91,7 +104,7 @@ fn decide() -> bool {
     if root.open(c, FileMode::Read, FileAttribute::empty()).is_err() {
         return false;
     }
-    let Ok(p) = uefi::boot::allocate_pages(uefi::boot::AllocateType::AnyPages, uefi::boot::MemoryType::LOADER_DATA, 1) else { return false };
+    let Ok(p) = uefi::boot::allocate_pages(uefi::boot::AllocateType::MaxAddress(0xFFFF_FFFF), uefi::boot::MemoryType::LOADER_DATA, 1) else { return false };
     BOUNCE.store(p.as_ptr() as u64, Ordering::Relaxed);
     // A fresh file for this start
     let mut b2 = [0u16; 32];
@@ -240,7 +253,7 @@ pub fn prepare_arrival() {
     if STATE.load(Ordering::Relaxed) != 1 {
         return;
     }
-    let Ok(p) = uefi::boot::allocate_pages(uefi::boot::AllocateType::AnyPages, uefi::boot::MemoryType::LOADER_DATA, 1) else { return };
+    let Ok(p) = uefi::boot::allocate_pages(uefi::boot::AllocateType::MaxAddress(0xFFFF_FFFF), uefi::boot::MemoryType::LOADER_DATA, 1) else { return };
     let text = "[hydra] 09a high code reached (identity-buffer print)\r\n";
     let w = p.as_ptr() as *mut u16;
     for (i, b) in text.bytes().enumerate() {
@@ -277,4 +290,23 @@ pub fn fw_ptr_ok(p: *const u8, what: &str) -> bool {
     }
     step_fmt(format_args!("HIGH POINTER {:#x} for the firmware: {}", p as u64, what));
     false
+}
+
+/// Once, at "reading the boot files": where the firmware is handed things while the kernel
+/// runs (the page-table root, the stack, the IDT): every one of them should be below 4 GiB.
+pub fn machine_state() {
+    let cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    let rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+    let idt = x86_64::instructions::tables::sidt();
+    let rflags = x86_64::registers::rflags::read_raw();
+    step_fmt(format_args!(
+        "state: CR3 {:#x}, stack {:#x}, IDT {:#x}+{:#x}, interrupts {}, high stack {:?}",
+        cr3,
+        rsp,
+        idt.base.as_u64(),
+        idt.limit,
+        if rflags & (1 << 9) != 0 { "on" } else { "off" },
+        crate::arch::relocate::stack_phys()
+    ));
 }

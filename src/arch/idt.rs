@@ -371,10 +371,46 @@ pub fn init() {
         idt.entries[MSI_VECTOR_BASE as usize + i].set_handler_addr(handler, kernel_cs);
     }
 
+    // wave11 GH: while the firmware runs (before ExitBootServices) its interrupts (timer,
+    // USB, ...) must reach its own handlers, or its timer events stop and a USB transfer
+    // waits for ever: the hardware vectors (32..=255) keep the firmware's gates until
+    // `take_hardware_vectors` (the takeover); Hydra's exception gates (0..=31) are used
+    // from now on
+    #[cfg(target_os = "uefi")]
+    if !crate::console::is_hardware_mode() {
+        let fw = x86_64::instructions::tables::sidt();
+        let fw_entries = (fw.limit as usize + 1) / core::mem::size_of::<IdtEntry>();
+        let mut saved = HYDRA_HW_VECTORS.lock();
+        if fw.base.as_u64() != 0 && fw_entries >= 33 && saved.is_none() {
+            let mut own = [IdtEntry::missing(); 224];
+            own.copy_from_slice(&idt.entries[32..256]);
+            *saved = Some(own);
+            let src = fw.base.as_u64() as *const IdtEntry;
+            for v in 32..fw_entries.min(256) {
+                idt.entries[v] = unsafe { core::ptr::read_unaligned(src.add(v)) };
+            }
+        }
+    }
     // Load IDT into CPU
     idt.load();
     drop(idt);
 }
+
+// wave11 GH begin
+/// Hydra's gates for the hardware vectors (32..=255) while the firmware's are in the IDT
+/// (see the end of [`init`]).
+static HYDRA_HW_VECTORS: Mutex<Option<[IdtEntry; 224]>> = Mutex::new(None);
+
+/// At the takeover (after `ExitBootServices`, interrupts off): Hydra's own gates for the
+/// hardware vectors, in place of the firmware's.
+pub fn take_hardware_vectors() {
+    if let Some(own) = HYDRA_HW_VECTORS.lock().take() {
+        let mut idt = IDT.lock();
+        idt.entries[32..256].copy_from_slice(&own);
+        idt.load();
+    }
+}
+// wave11 GH end
 
 /// Loads the shared IDT on the calling CPU (an application processor starting).
 pub fn load_on_this_cpu() {

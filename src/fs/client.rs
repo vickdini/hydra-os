@@ -1121,6 +1121,7 @@ impl ZfsClient {
                 Some(c) => c,
                 None => continue,
             };
+            crate::arch::crumb::quiet_fmt(format_args!("boot file {}", fat_path)); // wave11 GH
             let handle = match root.open(cstr, uefi::proto::media::file::FileMode::Read, uefi::proto::media::file::FileAttribute::empty()) {
                 Ok(h) => h,
                 Err(_) => continue,
