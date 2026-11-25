@@ -293,6 +293,13 @@ fn access_of(cx: &Cx, target: Target) -> i64 {
             Err(e) => return e,
         }
     }
+    // (wave11 GF, merge with GP: root of a user namespace of its own has no capability over
+    // the system's own `/proc` directories, whose owner its namespace does not map — Linux's
+    // `capable_wrt_inode_uidgid`: bubblewrap's `access("/newroot/proc/sys", W_OK)` is EACCES,
+    // so it leaves them alone)
+    if c.user_ns != 0 && mode & 2 != 0 && matches!(target, Target::Dir(Dir::Static(_)) | Target::Dir(Dir::Root)) {
+        return EACCES;
+    }
     // The process must exist; its files and directories are its effective user's
     let (perm, owner_uid) = match target {
         Target::Dir(d) => match dir_facts(cx.id, d) {
