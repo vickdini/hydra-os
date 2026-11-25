@@ -14,8 +14,20 @@ if ! getent passwd "$user" >/dev/null; then
     done
     uid=""
     getent passwd 1000 >/dev/null || uid="--uid 1000"
-    useradd --create-home $uid --shell /bin/bash --comment "Live session" --groups "$groups" "$user" || exit 1
-    passwd --quiet --delete "$user"
+    # (wave 11, Group G: on the NUC useradd failed now and then with "Bad address" while
+    # it locked /etc/group or /etc/gshadow, and SDDM's automatic login then failed for the
+    # missing user: a few tries, each after the locks a failed one left behind)
+    tries=0
+    until useradd --create-home $uid --shell /bin/bash --comment "Live session" --groups "$groups" "$user"; do
+        tries=$((tries + 1))
+        echo "hydra-live-setup: useradd failed (try $tries)" >&2
+        getent passwd "$user" >/dev/null && break
+        [ "$tries" -ge 5 ] && { echo "hydra-live-setup: no live user: the login screen will ask" >&2; exit 1; }
+        for f in passwd shadow group gshadow subuid subgid; do rm -f "/etc/$f.lock"; done
+        sleep 1
+    done
+    passwd --quiet --delete "$user" || echo "hydra-live-setup: passwd --delete failed" >&2
+    getent passwd "$user" >/dev/null && echo "hydra-live-setup: live user ready ($(getent passwd "$user" | cut -d: -f3))" >&2
 fi
 home=$(getent passwd "$user" | cut -d: -f6)
 [ -n "$home" ] || exit 1

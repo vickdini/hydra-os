@@ -1606,6 +1606,7 @@ fn call_and_wait(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, copies
             Err(copy::FillErr::Missing(at, len)) => {
                 tries += 1;
                 if tries > 16 || at & !0xFFF == last_missing || !copy::fault_in(at, len, false) {
+                    copy::efault_note(at, false, at & !0xFFF == last_missing); // wave11 GG
                     return EFAULT;
                 }
                 last_missing = at & !0xFFF;

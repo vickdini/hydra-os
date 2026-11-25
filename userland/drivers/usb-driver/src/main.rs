@@ -68,6 +68,8 @@ const STS_HCH: u32 = 1 << 0;
 const STS_HSE: u32 = 1 << 2;
 const STS_EINT: u32 = 1 << 3;
 const STS_CNR: u32 = 1 << 11;
+/// wave11 GG: host controller error (an internal error; the controller halted).
+const STS_HCE: u32 = 1 << 12;
 
 const PORT_CCS: u32 = 1 << 0;
 const PORT_PED: u32 = 1 << 1;
@@ -1204,6 +1206,21 @@ impl Xhci {
     /// Everything a request from the kernel starts with: events taken, plugged and
     /// unplugged devices handled, failed interrupt endpoints restarted.
     fn housekeeping(&mut self) {
+        // wave11 GG (NUC run 8): a controller that hit a host system error (a DMA the
+        // IOMMU refused, a bus error) or an internal error has halted: nothing comes in any
+        // more. The driver exits so the supervisor restarts it, which resets the controller
+        // and finds the devices again (the kernel's clients retry their calls), instead of
+        // leaving the keyboard and mouse dead.
+        let sts = rd(self.op, OP_USBSTS);
+        if sts != u32::MAX && sts & (STS_HSE | STS_HCE) != 0 {
+            println!(
+                "[usb-driver] controller error (USBSTS {:#x}: {}{}): restarting the driver to reset it",
+                sts,
+                if sts & STS_HSE != 0 { "host system error" } else { "" },
+                if sts & STS_HCE != 0 { " host controller error" } else { "" }
+            );
+            sys::exit(1);
+        }
         self.drain_events();
         if !self.port_changes.is_empty() || !self.hub_changes.is_empty() {
             self.handle_port_changes();
