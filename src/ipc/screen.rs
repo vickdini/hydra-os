@@ -103,6 +103,12 @@ impl MappedObject for ScreenObject {
         };
         (addr != 0).then(|| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
+
+    // wave11 GG: the framebuffer write-combining (never the status or scratch page)
+    fn write_combining(&self, frame: PhysFrame<Size4KiB>) -> bool {
+        let a = frame.start_address().as_u64();
+        a >= self.fb_phys && a < self.fb_phys + self.fb_pages * PAGE_SIZE
+    }
 }
 
 static OBJECT: Mutex<Option<Arc<ScreenObject>>> = Mutex::new(None);

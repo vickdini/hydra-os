@@ -220,6 +220,13 @@ pub mod arch {
         };
     }
     steps!(gdt::init, idt::init, rtc::init, mouse::init, bootdisk::detect);
+    /// *stub* wave11 GG: no write-combining view on the host (the console keeps its mapping).
+    pub mod pat {
+        pub fn alias_wc(_phys: u64, _len: u64) -> Option<u64> {
+            crate::fake::log("pat::alias_wc");
+            None
+        }
+    }
     /// *stub*
     pub mod relocate {
         /// *stub* The image is already in the higher half: returns (the caller boots).

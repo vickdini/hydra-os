@@ -186,6 +186,15 @@ pub trait MappedObject: Send + Sync {
     fn inode(&self) -> Option<u64> {
         None
     }
+
+    // wave11 GG begin
+    /// Whether `frame` (a page this object gave) is device memory to map write-combining
+    /// (`arch::pat`): the framebuffer's pages of the screen object. Other pages (and every
+    /// object by default) keep the normal memory type.
+    fn write_combining(&self, _frame: PhysFrame<Size4KiB>) -> bool {
+        false
+    }
+    // wave11 GG end
 }
 
 /// What a `Vma`'s pages are populated from.
@@ -1422,7 +1431,9 @@ impl Mm {
                     if write && tracks {
                         obj.page_written(index);
                     }
-                    entry.set_addr(source.start_address(), pte_flags_for(vma.prot, write || !tracks));
+                    // wave11 GG: the framebuffer's pages write-combining
+                    let wc = if obj.write_combining(source) { crate::arch::pat::wc_flags() } else { PageTableFlags::empty() };
+                    entry.set_addr(source.start_address(), pte_flags_for(vma.prot, write || !tracks) | wc);
                 } else if write {
                     let copy = alloc_user_frame().ok_or(FaultError::OutOfMemory)?;
                     unsafe {

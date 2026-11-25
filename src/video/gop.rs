@@ -172,3 +172,41 @@ pub fn get_video_info() -> Option<VideoModeInfo> {
         }
     })
 }
+
+// wave11 GG begin
+/// Whether the console reaches the framebuffer write-combining ([`use_write_combining`]).
+static FB_WC: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// At takeover (Hydra's tables loaded, the PAT set up): the console draws on a
+/// write-combining view of the framebuffer (`arch::pat::alias_wc`) instead of the
+/// firmware's identity mapping, which real hardware makes uncacheable (each line of text
+/// and each scroll was a slow bus write per pixel). Without that view nothing changes.
+pub fn use_write_combining() {
+    let Some((phys, bytes)) = framebuffer_phys() else { return };
+    let Some(va) = crate::arch::pat::alias_wc(phys, bytes) else {
+        crate::kprintln!("[video] framebuffer at {:#x}: no write-combining view, the console keeps the firmware's mapping", phys);
+        return;
+    };
+    super::console::move_framebuffer(va as *mut u8);
+    FB_WC.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// The banner's "Display & Input" text: the real mode and input devices.
+pub fn banner_text() -> alloc::string::String {
+    let mode = match (get_video_info(), framebuffer_phys()) {
+        (Some(i), Some((phys, _))) => alloc::format!(
+            "{}x{} framebuffer at {:#x} ({} pixels per line, {}{})",
+            i.width,
+            i.height,
+            phys,
+            i.stride,
+            if i.is_bgr { "BGR" } else { "RGB" },
+            if FB_WC.load(core::sync::atomic::Ordering::Acquire) { ", write-combining" } else { "" }
+        ),
+        _ => alloc::string::String::from("no framebuffer"),
+    };
+    // A legacy-free machine has no 8042 controller (its status port reads 0xFF)
+    let ps2 = unsafe { x86_64::instructions::port::Port::<u8>::new(0x64).read() } != 0xFF;
+    alloc::format!("{}; input: {}USB keyboards and pointers (listed by usb-driver)", mode, if ps2 { "8042 PS/2 keyboard (IRQ 1), " } else { "" })
+}
+// wave11 GG end
