@@ -606,6 +606,10 @@ pub mod console {
     pub fn clear_scrollback() {
         rec!("console::clear_scrollback");
     }
+    /// The takeover's screen lines (wave11 GH): to the serial record.
+    pub fn print_raw(s: &str) {
+        serial_write(s);
+    }
     pub fn clear_screen() {
         rec!("console::clear_screen");
     }
