@@ -948,6 +948,7 @@ extern "C" fn ap_main(cpu: u64) -> ! {
     // From here on it serves TLB flush requests (from its wait loops, then interrupts)
     LIVE[cpu].store(true, Ordering::Release);
     crate::arch::syscall::init();
+    crate::arch::cpu::paging_report(cpu); // wave11 GG: MAXPHYADDR and EFER of every CPU
     // x2APIC mode (the boot processor follows once every AP started)
     enable_x2apic();
     // Local APIC on, spurious interrupts to vector 0xFF
