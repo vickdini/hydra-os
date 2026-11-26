@@ -305,7 +305,7 @@ pub fn init() -> Result<HeapStats, &'static str> {
         // wave11 GH: from the firmware while it runs (its free memory is still its own)
         for floor in [4u64 << 30, 2u64 << 30] {
             if heap_start_ptr.is_none() && super::frame_allocator::is_early() {
-                heap_start_ptr = super::frame_allocator::firmware_block(page_count as u64, floor).map(|p| p as *mut u8);
+                heap_start_ptr = super::frame_allocator::firmware_block(page_count as u64, floor, u64::MAX).map(|p| p as *mut u8);
             }
         }
         let mut alloc = FRAME_ALLOCATOR.lock();

@@ -461,7 +461,7 @@ pub fn init_memory_from_uefi() {
     // their own from the firmware
     let entries = ram_end / PAGE_SIZE;
     let table_pages = (entries * 2).div_ceil(PAGE_SIZE);
-    let table = firmware_block(table_pages, floor);
+    let table = firmware_block(table_pages, floor, u64::MAX);
     let mut allocator = FRAME_ALLOCATOR.lock();
     EARLY.store(true, core::sync::atomic::Ordering::SeqCst);
     if let Some(pa) = table {
@@ -500,7 +500,9 @@ fn early_grow(alloc: &mut PhysicalMemoryManager) -> bool {
     if !EARLY.load(core::sync::atomic::Ordering::SeqCst) {
         return false;
     }
-    let Some(pa) = firmware_block(EARLY_BLOCK_PAGES, early_floor()) else { return false };
+    // Below 4 GiB first, where the frames came from before (the kernel's first page tables
+    // and structures; frames above it first made legacy interrupts of the restick VM late)
+    let Some(pa) = firmware_block(EARLY_BLOCK_PAGES, early_floor(), 4 << 30).or_else(|| firmware_block(EARLY_BLOCK_PAGES, early_floor(), u64::MAX)) else { return false };
     let total = alloc.total_usable_bytes;
     alloc.add_region(PhysAddr::new(pa), EARLY_BLOCK_PAGES);
     alloc.total_usable_bytes = total;
@@ -508,10 +510,9 @@ fn early_grow(alloc: &mut PhysicalMemoryManager) -> bool {
     true
 }
 
-/// `pages` contiguous pages the firmware allocates for Hydra (loader data) at or above
-/// `floor`: the top of the highest free region that has them, else anywhere above `floor`.
-/// Boot services only.
-pub fn firmware_block(pages: u64, floor: u64) -> Option<u64> {
+/// `pages` contiguous pages the firmware allocates for Hydra (loader data) in
+/// [`floor`, `ceiling`): the top of the highest free region that has them. Boot services only.
+pub fn firmware_block(pages: u64, floor: u64, ceiling: u64) -> Option<u64> {
     use uefi::boot::{allocate_pages, AllocateType, MemoryType as T};
     let bytes = pages * PAGE_SIZE;
     // Highest first: where the free regions end, as the firmware's map says now
@@ -519,7 +520,7 @@ pub fn firmware_block(pages: u64, floor: u64) -> Option<u64> {
     let mut n = 0;
     if let Ok(map) = uefi::boot::memory_map(T::LOADER_DATA) {
         for d in map.entries() {
-            let end = d.phys_start + d.page_count * PAGE_SIZE;
+            let end = (d.phys_start + d.page_count * PAGE_SIZE).min(ceiling);
             if d.ty == T::CONVENTIONAL && end >= bytes && end - bytes >= d.phys_start.max(floor) {
                 if n < tops.len() {
                     tops[n] = end - bytes;
