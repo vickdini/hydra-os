@@ -251,7 +251,11 @@ impl PhysicalMemoryManager {
 
     /// One past the highest physical address of usable RAM (0 before any region).
     pub fn max_phys_end(&self) -> u64 {
-        self.regions.iter().flatten().map(|r| r.start.as_u64() + r.page_count * PAGE_SIZE).max().unwrap_or(0)
+        let regions = self.regions.iter().flatten().map(|r| r.start.as_u64() + r.page_count * PAGE_SIZE).max().unwrap_or(0);
+        // wave11 GH: before ExitBootServices only the firmware's blocks are regions; the
+        // reference counts cover all RAM, which joins after it (the direct map must reach it:
+        // NUC run 11 stopped right after ExitBootServices when it covered only 4 GiB)
+        regions.max(self.refcount_entries * PAGE_SIZE)
     }
 
     /// Returns the total usable physical memory registered in bytes.
@@ -436,6 +440,22 @@ pub static FRAME_ALLOCATOR: Mutex<PhysicalMemoryManager> = Mutex::new(PhysicalMe
 /// Harvests usable `CONVENTIONAL` memory regions from the UEFI boot services memory map
 /// and initializes the global `FRAME_ALLOCATOR` and its per-frame reference count table.
 pub fn init_memory_from_uefi() {
+    // wave11 GH: the boot word fwmem=old: all free memory at once, as up to run 10
+    if OLD_PATH.load(core::sync::atomic::Ordering::SeqCst) {
+        let mut allocator = FRAME_ALLOCATOR.lock();
+        if let Ok(memory_map) = uefi::boot::memory_map(uefi::boot::MemoryType::LOADER_DATA) {
+            let floor = early_floor();
+            for desc in memory_map.entries() {
+                let end = desc.phys_start + desc.page_count * PAGE_SIZE;
+                if desc.ty == uefi::boot::MemoryType::CONVENTIONAL && end > floor {
+                    let start = desc.phys_start.max(floor);
+                    allocator.add_region(PhysAddr::new(start), (end - start) / PAGE_SIZE);
+                }
+            }
+        }
+        allocator.init_refcounts();
+        return;
+    }
     // wave11 GH: until ExitBootServices the firmware owns its free memory and keeps
     // allocating from it (its USB stack, its file reads): the frames handed out before then
     // come from blocks the firmware allocated for Hydra ([`EARLY_BLOCK_PAGES`] at a time),
@@ -475,6 +495,11 @@ pub fn init_memory_from_uefi() {
 }
 
 // wave11 GH begin
+/// The boot word `fwmem=old` (set by `main` before [`init_memory_from_uefi`]): the frame
+/// allocator takes all of the firmware's free memory at once and the heap is carved from it,
+/// as up to NUC run 10.
+pub static OLD_PATH: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Set from [`init_memory_from_uefi`] to [`add_after_firmware`]: boot services run, and new
 /// frames come from blocks the firmware allocated.
 static EARLY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);

@@ -155,8 +155,18 @@ pub fn menu_timeout(file: &[u8], default: u32) -> u32 {
     default
 }
 
-/// The words a start menu key adds: `1`/Enter none, `2` [`SAFE`], `3` [`SAFE_CONSOLE`];
-/// `None` for other keys.
+// wave11 GH begin: NUC run 11 bisect (the start after ExitBootServices)
+/// Start menu entry 7: Hydra's own interrupt gates while the firmware runs.
+pub const NO_FW_GATES: &str = "fwidt=off verbose";
+/// Entry 8: the frame allocator and heap as up to run 10 (the firmware's free memory taken
+/// at once).
+pub const OLD_MEMORY: &str = "fwmem=old verbose";
+/// Entry 9: both, as the run-10 stick.
+pub const RUN10_BOTH: &str = "fwidt=off fwmem=old verbose";
+// wave11 GH end
+
+/// The words a start menu key adds: `1`/Enter none, `2` [`SAFE`], `3` [`SAFE_CONSOLE`],
+/// `4`-`6` one safe-mode change, `7`-`9` the run-11 bisect; `None` for other keys.
 pub fn menu_choice(key: char) -> Option<&'static str> {
     match key {
         '1' | '\r' | '\n' => Some(""),
@@ -165,6 +175,9 @@ pub fn menu_choice(key: char) -> Option<&'static str> {
         '4' => Some(ONLY_CPUS1),   // wave11 GG
         '5' => Some(ONLY_NOPCID),  // wave11 GG
         '6' => Some(ONLY_NOIOMMU), // wave11 GG
+        '7' => Some(NO_FW_GATES),  // wave11 GH
+        '8' => Some(OLD_MEMORY),   // wave11 GH
+        '9' => Some(RUN10_BOTH),   // wave11 GH
         _ => None,
     }
 }

@@ -291,6 +291,8 @@ pub fn boot() -> ! {
     }
     arch::boottime::mark("memory map, frame allocator");
     println!("\n[*] Step 2: Discovering Memory & Initializing Frame Allocator...");
+    // wave11 GH: fwmem=old, the allocator as up to run 10 (NUC bisect)
+    memory::frame_allocator::OLD_PATH.store(arch::bootopts::say(&[b"fwmem=old"]), core::sync::atomic::Ordering::SeqCst);
     memory::frame_allocator::init_memory_from_uefi();
     arch::crumb::step("frame allocator ready"); // wave11 GH
 
@@ -543,6 +545,7 @@ static BOOT_FILES: spin::Mutex<Option<alloc::vec::Vec<fs::client::BootFile>>> = 
 
 /// The boot after `ExitBootServices`, on the kernel's own stack (see [`boot`]).
 fn boot_after_firmware() -> ! {
+    crate::arch::boot_services::mark(4, "on the kernel's stack"); // wave11 GH
     let boot_files = BOOT_FILES.lock().take().unwrap_or_default();
     if let Err(e) = crate::arch::boot_services::take_hardware_ownership() {
         console::set_color(Color::LightRed, Color::Black);
