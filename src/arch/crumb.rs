@@ -63,6 +63,14 @@ pub fn quiet_fmt(args: core::fmt::Arguments) {
     record(args, false);
 }
 
+/// A firmware read's breadcrumb: on the screen once the breadcrumbs are screen-only, else
+/// none (file writes between the firmware's reads stopped the NUC; wave 11).
+pub fn read_fmt(args: core::fmt::Arguments) {
+    if SCREEN_ONLY.load(Ordering::Relaxed) {
+        record(args, false);
+    }
+}
+
 /// Writes a breadcrumb line (and shows it when `show`).
 fn record(args: core::fmt::Arguments, show: bool) {
     match STATE.load(Ordering::Relaxed) {

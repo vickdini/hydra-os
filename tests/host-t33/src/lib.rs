@@ -44,6 +44,7 @@ pub mod arch {
             true
         }
         pub fn quiet_fmt(_args: core::fmt::Arguments) {}
+        pub fn read_fmt(_args: core::fmt::Arguments) {}
     }
     /// *stub*
     pub mod pit {

@@ -113,9 +113,9 @@ const FW_BOUNCE_SIZE: usize = 256 * 1024;
 pub fn fw_read(file: &mut uefi::proto::media::file::RegularFile, buf: &mut [u8]) -> Result<usize, ()> {
     if (buf.as_ptr() as u64) < 0x8000_0000_0000_0000 {
         // wave11 GH: each read on the screen too (where one stops: NUC run 9)
-        crate::arch::crumb::quiet_fmt(format_args!("  firmware read: {} bytes into {:#x}", buf.len(), buf.as_ptr() as u64));
+        crate::arch::crumb::read_fmt(format_args!("  firmware read: {} bytes into {:#x}", buf.len(), buf.as_ptr() as u64));
         let r = file.read(buf);
-        crate::arch::crumb::quiet_fmt(format_args!("  read returned: {}", match &r { Ok(n) => alloc::format!("{} bytes", n), Err(e) => alloc::format!("error {:?}", e.status()) }));
+        match &r { Ok(n) => crate::arch::crumb::read_fmt(format_args!("  read returned: {} bytes", n)), Err(e) => crate::arch::crumb::read_fmt(format_args!("  read returned: error {:?}", e.status())) } // (no heap: the boot words are read before it)
         return r.map_err(|_| ());
     }
     let mut bounce = FW_BOUNCE.load(core::sync::atomic::Ordering::Relaxed);
@@ -124,10 +124,10 @@ pub fn fw_read(file: &mut uefi::proto::media::file::RegularFile, buf: &mut [u8])
         FW_BOUNCE.store(bounce, core::sync::atomic::Ordering::Relaxed);
     }
     let n = buf.len().min(FW_BOUNCE_SIZE);
-    crate::arch::crumb::quiet_fmt(format_args!("  firmware read: {} bytes into {:#x}", n, bounce)); // wave11 GH
+    crate::arch::crumb::read_fmt(format_args!("  firmware read: {} bytes into {:#x}", n, bounce)); // wave11 GH
     let tmp = unsafe { core::slice::from_raw_parts_mut(bounce as *mut u8, n) };
     let r = file.read(tmp);
-    crate::arch::crumb::quiet_fmt(format_args!("  read returned: {}", match &r { Ok(n) => alloc::format!("{} bytes", n), Err(e) => alloc::format!("error {:?}", e.status()) })); // wave11 GH
+    match &r { Ok(n) => crate::arch::crumb::read_fmt(format_args!("  read returned: {} bytes", n)), Err(e) => crate::arch::crumb::read_fmt(format_args!("  read returned: error {:?}", e.status())) } // (no heap: the boot words are read before it) // wave11 GH
     let got = r.map_err(|_| ())?;
     buf[..got].copy_from_slice(&tmp[..got]);
     Ok(got)

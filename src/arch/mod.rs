@@ -64,6 +64,7 @@ pub mod crumb {
     pub fn high_arrived() {}
     pub fn step_fmt(_args: core::fmt::Arguments) {}
     pub fn quiet_fmt(_args: core::fmt::Arguments) {}
+    pub fn read_fmt(_args: core::fmt::Arguments) {}
     pub fn force_line(_args: core::fmt::Arguments) {}
     pub fn screen_only_from_now() {}
     pub fn machine_state() {}
