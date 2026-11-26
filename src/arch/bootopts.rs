@@ -51,6 +51,24 @@ pub fn max_cpus() -> Option<usize> {
 #[cfg(not(target_os = "uefi"))]
 pub fn init() {}
 
+// wave11 GH begin
+/// Host builds: no boot words.
+#[cfg(not(target_os = "uefi"))]
+pub fn early_word(_word: &[u8]) -> bool {
+    false
+}
+
+/// Whether `\hydra\options.txt` has `word`, read before anything else (before [`init`]
+/// and the start menu: for what must be decided first, the debug words of the
+/// execute-disable test). Firmware file reads only, no heap.
+#[cfg(target_os = "uefi")]
+pub fn early_word(word: &[u8]) -> bool {
+    let mut buf = [0u8; 2048];
+    let Some(n) = read_small("\\hydra\\options.txt", &mut buf) else { return false };
+    buf[..n].split(|c| c.is_ascii_whitespace()).any(|w| w == word)
+}
+// wave11 GH end
+
 /// Reads the boot words and shows the start menu. Called first at boot, while the
 /// firmware's services run and before the kernel's heap exists.
 #[cfg(target_os = "uefi")]

@@ -302,7 +302,17 @@ static RETIRED_MMS: Mutex<[Option<Arc<Mutex<Mm>>>; 64]> = Mutex::new([const { No
 /// # Returns
 ///
 /// `true` if CPU execute-disable bit 11 is enabled in EFER; `false` otherwise.
+// wave11 GH begin: the NUC's state without the fix, under QEMU (nxe=fw-off nxe=nofix)
+/// While set, [`nx_enabled`] says no: the boot processor builds its entries without NX, as
+/// with the NUC's firmware's EFER. Cleared by `arch::cpu::sim_nx_off_now`.
+pub static NX_SIM_OFF: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+// wave11 GH end
+
 pub(crate) fn nx_enabled() -> bool {
+    // wave11 GH: the NUC's boot processor without the fix, simulated (nxe=fw-off nxe=nofix)
+    if NX_SIM_OFF.load(core::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
     let efer = unsafe { crate::arch::syscall::rdmsr(0xC000_0080) };
     efer & (1 << 11) != 0
 }
