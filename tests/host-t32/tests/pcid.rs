@@ -185,3 +185,36 @@ fn global_kernel_pages() {
     assert!(!pcid::global_enabled());
     assert!(stubs::take_log()[0].contains("turned off by a test"));
 }
+
+// wave11 GG (NUC run 9): a root torn down while still in this CPU's CR3 and reused for a
+// new address space is reloaded with a flush, not skipped as "loaded already"
+#[test]
+fn a_torn_down_root_still_in_cr3_is_reloaded_with_a_flush() {
+    let _g = serial();
+    on(3, true);
+    let r = 0x0055_5000;
+    pcid::load_cr3(r);
+    let id = slot(r);
+    assert_eq!(hw::cr(3), r | id, "first load: taken over, flushed");
+    // Loaded again: nothing written
+    host::CR3_WRITES.with_borrow_mut(|w| w.clear());
+    pcid::load_cr3(r);
+    assert!(host::CR3_WRITES.with_borrow(|w| w.is_empty()));
+    // The address space ends while this CPU keeps its root in CR3; the frame becomes the
+    // root of a new address space
+    smp::LOADED_CR3[3].store(r, std::sync::atomic::Ordering::SeqCst);
+    let before = pcid::REUSED_ROOT_FLUSHES.load(std::sync::atomic::Ordering::Relaxed);
+    pcid::forget(r);
+    assert!(pcid::must_reload(r));
+    pcid::load_cr3(r);
+    let w = host::CR3_WRITES.with_borrow(|w| w.clone());
+    assert_eq!(w.len(), 1, "reloaded");
+    assert_eq!(w[0] & NOFLUSH, 0, "with a flush of its ID");
+    assert_eq!(w[0] & 0xFFF, id);
+    assert!(!pcid::must_reload(r));
+    assert_eq!(pcid::REUSED_ROOT_FLUSHES.load(std::sync::atomic::Ordering::Relaxed), before + 1);
+    // Then as usual: loaded already
+    host::CR3_WRITES.with_borrow_mut(|w| w.clear());
+    pcid::load_cr3(r);
+    assert!(host::CR3_WRITES.with_borrow(|w| w.is_empty()));
+}

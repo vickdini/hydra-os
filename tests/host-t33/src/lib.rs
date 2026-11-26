@@ -87,6 +87,10 @@ pub mod arch {
     }
     /// *stub* PCID is off on the host.
     pub mod pcid {
+        /// *stub* wave11 GG
+        pub fn must_reload(_pml4: u64) -> bool {
+            false
+        }
         pub fn enabled() -> bool {
             false
         }

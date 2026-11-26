@@ -234,6 +234,10 @@ pub mod arch {
     }
     /// *stub* PCID off; a CR3 load sets the thread's fake CR3 and is recorded.
     pub mod pcid {
+        /// *stub* wave11 GG
+        pub fn must_reload(_pml4: u64) -> bool {
+            false
+        }
         pub fn enabled() -> bool {
             false
         }

@@ -1449,16 +1449,28 @@ static DBusMessage *can_power(DBusMessage *m, const char *what) {
     char action[96];
     power_action(m, what, action, sizeof action);
     logmsg("can_power: what='%s' action='%s' sender='%s'", what, action, dbus_message_get_sender(m));
-    DBusMessage *q = polkit_check(m, action, 0);
+    /* wave 11, Group G: polkit may be slow to answer at the start of a session (the NUC
+     * on one CPU: NoReply after 5 s, and the desktop then hid Restart): one more try with
+     * a longer wait, and without an answer "challenge" (the action stays offered; the
+     * PowerOff call itself is checked again) instead of "no". */
+    DBusMessage *r = NULL;
     DBusError err;
-    dbus_error_init(&err);
-    DBusMessage *r = dbus_connection_send_with_reply_and_block(bus, q, 5000, &err);
-    dbus_message_unref(q);
+    int failed = 0;
+    for (int attempt = 0; attempt < 2 && !r; attempt++) {
+        DBusMessage *q = polkit_check(m, action, 0);
+        dbus_error_init(&err);
+        r = dbus_connection_send_with_reply_and_block(bus, q, attempt ? 15000 : 5000, &err);
+        dbus_message_unref(q);
+        if (!r) {
+            logmsg("can_power: polkit error (try %d): %s: %s", attempt + 1, err.name ? err.name : "?", err.message ? err.message : "?");
+            dbus_error_free(&err);
+            failed = 1;
+        }
+    }
     int challenge = 0;
     int ok = 0;
     if (!r) {
-        logmsg("can_power: polkit error: %s: %s", err.name ? err.name : "?", err.message ? err.message : "?");
-        dbus_error_free(&err);
+        challenge = failed;
     } else {
         ok = polkit_result(r, &challenge);
         logmsg("can_power: polkit reply ok=%d challenge=%d", ok, challenge);
