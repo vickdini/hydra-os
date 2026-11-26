@@ -302,8 +302,8 @@ pub fn boot() -> ! {
     }
     arch::boottime::mark("memory map, frame allocator");
     println!("\n[*] Step 2: Discovering Memory & Initializing Frame Allocator...");
-    // wave11 GH: fwmem=old, the allocator as up to run 10 (NUC bisect)
-    memory::frame_allocator::OLD_PATH.store(arch::bootopts::say(&[b"fwmem=old"]), core::sync::atomic::Ordering::SeqCst);
+    // wave11 GH: the allocator as up to run 10 unless the word fwmem=new (NUC run 13)
+    memory::frame_allocator::OLD_PATH.store(!arch::bootopts::say(&[b"fwmem=new"]), core::sync::atomic::Ordering::SeqCst);
     memory::frame_allocator::init_memory_from_uefi();
     arch::crumb::step("frame allocator ready"); // wave11 GH
 

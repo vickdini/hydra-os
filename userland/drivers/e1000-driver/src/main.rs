@@ -122,6 +122,35 @@ const BUF: usize = 2048;
 /// Size of the register window mapped.
 const MMIO_LEN: usize = 128 * 1024;
 
+// wave11 GH (NUC run 13: https timed out while ping worked): what Linux e1000e does for the
+// PCH LAN of Lynx Point (I217/I218) that this driver did not
+const REG_KMRNCTRLSTA: usize = 0x0034;
+const REG_FEXTNVM6: usize = 0x0010;
+const REG_TXDCTL0: usize = 0x3828;
+const REG_TARC0: usize = 0x3840;
+const REG_TARC1: usize = 0x3940;
+const REG_RFCTL: usize = 0x5008;
+const REG_PBECCSTS: usize = 0x100C;
+const KMRN_K1_CONFIG: u32 = 0x7;
+const KMRN_K1_ENABLE: u16 = 0x2;
+const FEXTNVM6_REQ_PLL_CLK: u32 = 1 << 8;
+const CTRL_MEHE: u32 = 1 << 19;
+const TCTL_MULR: u32 = 1 << 28;
+/// RX descriptor status: end of packet.
+const RXD_EOP: u8 = 1 << 1;
+/// RX descriptor errors that mean a bad frame (CRC, symbol, sequence, carrier extension,
+/// RX data error); the checksum errors (bits 5, 6) are left to the network stack.
+const RXD_FRAME_ERRORS: u8 = 0x01 | 0x02 | 0x04 | 0x10 | 0x80;
+/// The I218s of Lynx Point LP (and the later I218 variants) that need Linux's K1 workaround
+/// at 1 Gb/s (e1000_k1_workaround_lpt_lp, "I218 hang"): the NUC's I218-V is 0x1559.
+const K1_WORKAROUND_IDS: &[u16] = &[0x155A, 0x1559, 0x15A2, 0x15A3];
+/// Statistics registers (clear on read) for the periodic log line.
+const STATS: &[(usize, &str)] = &[
+    (0x4074, "rx"), (0x4080, "tx"), (0x4000, "crc-err"), (0x400C, "rx-err"), (0x4010, "missed"),
+    (0x40A0, "no-buf"), (0x40A4, "undersize"), (0x40AC, "oversize"), (0x4040, "len-err"),
+    (0x4018, "tx-excess-col"), (0x4020, "tx-late-col"),
+];
+
 const EIO: i64 = -5;
 const EINVAL: i64 = -22;
 
@@ -178,6 +207,19 @@ struct Nic {
     tx_cur: usize,
     rx_cur: usize,
     irq: Option<u8>,
+    // wave11 GH begin
+    /// The adapter's PCI device ID (the `dev=` argument; 0 without it).
+    dev_id: u16,
+    /// STATUS link bits (LU, speed, duplex) last seen.
+    link_bits: u32,
+    /// Totals of [`STATS`] since start, and frames this driver dropped for errors.
+    stats: [u64; 11],
+    dropped: u64,
+    /// When the statistics were last logged (uptime ticks).
+    stats_at: u64,
+    /// Inside a frame that spans descriptors (without EOP): its pieces are dropped.
+    in_long: bool,
+    // wave11 GH end
 }
 
 const RX_DESC_OFF: usize = 0;
@@ -437,6 +479,9 @@ impl Nic {
     /// Resets the adapter and sets up both rings.
     fn init(&mut self) {
         self.reset();
+        if self.model == Model::Pch {
+            self.pch_hw_bits();
+        }
         let (ral, rah) = (self.read(REG_RAL0), self.read(REG_RAH0));
         self.mac = [ral as u8, (ral >> 8) as u8, (ral >> 16) as u8, (ral >> 24) as u8, rah as u8, (rah >> 8) as u8];
 
@@ -481,7 +526,9 @@ impl Nic {
         self.write(REG_RDLEN, (NUM_RX * 16) as u32);
         self.write(REG_RDH, 0);
         self.write(REG_RDT, (NUM_RX - 1) as u32);
-        self.write(REG_RCTL, RCTL_EN | RCTL_SBP | RCTL_UPE | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
+        // wave11 GH: bad frames are not stored on PCH adapters (Linux never sets SBP)
+        let sbp = if self.model == Model::Pch { 0 } else { RCTL_SBP };
+        self.write(REG_RCTL, RCTL_EN | sbp | RCTL_UPE | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
 
         let ctrl = self.read(REG_CTRL) & !CTRL_RST;
         let ctrl = if self.model == Model::I82540 {
@@ -632,13 +679,22 @@ impl Nic {
                 break;
             }
             let len = desc.length as usize;
-            if at + 2 + len > out.len() {
-                break; // the rest waits for the next request
+            // wave11 GH: frames with errors, and frames over more than one descriptor (longer
+            // than a buffer), are dropped and counted instead of handed on
+            let eop = desc.status & RXD_EOP != 0;
+            let bad = self.in_long || !eop || desc.css_or_errors & RXD_FRAME_ERRORS != 0 || len > BUF;
+            if bad {
+                self.dropped += 1;
+                self.in_long = !eop;
+            } else {
+                if at + 2 + len > out.len() {
+                    break; // the rest waits for the next request
+                }
+                out[at..at + 2].copy_from_slice(&(len as u16).to_le_bytes());
+                unsafe { core::ptr::copy_nonoverlapping(self.mem.add(RX_BUF_OFF + self.rx_cur * BUF), out[at + 2..].as_mut_ptr(), len) };
+                at += 2 + len;
+                count += 1;
             }
-            out[at..at + 2].copy_from_slice(&(len as u16).to_le_bytes());
-            unsafe { core::ptr::copy_nonoverlapping(self.mem.add(RX_BUF_OFF + self.rx_cur * BUF), out[at + 2..].as_mut_ptr(), len) };
-            at += 2 + len;
-            count += 1;
             desc.status = 0;
             unsafe { d.write_volatile(desc) };
             self.write(REG_RDT, self.rx_cur as u32);
@@ -647,8 +703,117 @@ impl Nic {
         if let Some(irq) = self.irq {
             let _ = sys::irq_ack(irq);
         }
+        self.link_check();
+        self.log_stats(false);
         count
     }
+
+    // wave11 GH begin
+    /// The "hardware bits" Linux sets on ICH/PCH adapters after every reset
+    /// (e1000_initialize_hw_bits_ich8lan), and the Lynx Point packet-buffer ECC.
+    fn pch_hw_bits(&self) {
+        self.write(REG_CTRL_EXT, self.read(REG_CTRL_EXT) | 1 << 22);
+        self.write(REG_TXDCTL0, self.read(REG_TXDCTL0) | 1 << 22);
+        self.write(REG_TARC0, self.read(REG_TARC0) | 1 << 23 | 1 << 24 | 1 << 26 | 1 << 27);
+        let mut tarc1 = (self.read(REG_TARC1) & !(1 << 28 | 1 << 29)) | 1 << 22 | 1 << 24 | 1 << 26 | 1 << 30;
+        if self.read(REG_TCTL) & TCTL_MULR != 0 {
+            tarc1 &= !(1 << 28);
+        } else {
+            tarc1 |= 1 << 28;
+        }
+        self.write(REG_TARC1, tarc1);
+        // No NFS read/write filtering (e1000e: RFCTL NFSW_DIS | NFSR_DIS)
+        self.write(REG_RFCTL, self.read(REG_RFCTL) | 1 << 6 | 1 << 7);
+        self.write(REG_PBECCSTS, self.read(REG_PBECCSTS) | 1 << 16);
+        self.write(REG_CTRL, self.read(REG_CTRL) | CTRL_MEHE);
+    }
+
+    /// A Kumeran (MAC-PHY interconnect) register: read when `write` is `None`.
+    fn kmrn(&self, offset: u32, write: Option<u16>) -> u16 {
+        let off = (offset << 16) & 0x001F_0000;
+        match write {
+            Some(v) => {
+                self.write(REG_KMRNCTRLSTA, off | v as u32);
+                self.read(REG_STATUS);
+                for _ in 0..2000 {
+                    core::hint::spin_loop();
+                }
+                v
+            }
+            None => {
+                self.write(REG_KMRNCTRLSTA, off | 1 << 21);
+                self.read(REG_STATUS);
+                for _ in 0..2000 {
+                    core::hint::spin_loop();
+                }
+                self.read(REG_KMRNCTRLSTA) as u16
+            }
+        }
+    }
+
+    /// After a link change: on the Lynx Point LP I218s at 1 Gb/s, K1 (a power state of the
+    /// MAC-PHY link) off while the PLL clock request is set, as Linux does
+    /// (e1000_k1_workaround_lpt_lp: without it the I218 drops or stalls traffic); else the
+    /// request cleared. Logs the link.
+    fn link_check(&mut self) {
+        let status = self.read(REG_STATUS);
+        let bits = status & (STATUS_LU | 3 << 6 | 1);
+        if bits == self.link_bits {
+            return;
+        }
+        self.link_bits = bits;
+        let up = status & STATUS_LU != 0;
+        let speed = match (status >> 6) & 3 {
+            0 => 10,
+            1 => 100,
+            _ => 1000,
+        };
+        if up {
+            println!("[e1000-driver] link up: {} Mb/s, {} duplex", speed, if status & 1 != 0 { "full" } else { "half" });
+        } else {
+            println!("[e1000-driver] link down");
+        }
+        if self.model != Model::Pch || !K1_WORKAROUND_IDS.contains(&self.dev_id) {
+            return;
+        }
+        let fextnvm6 = self.read(REG_FEXTNVM6);
+        if up && speed == 1000 {
+            if !self.acquire_swflag() {
+                return;
+            }
+            let k1 = self.kmrn(KMRN_K1_CONFIG, None);
+            self.kmrn(KMRN_K1_CONFIG, Some(k1 & !KMRN_K1_ENABLE));
+            for _ in 0..20000 {
+                core::hint::spin_loop();
+            }
+            self.write(REG_FEXTNVM6, fextnvm6 | FEXTNVM6_REQ_PLL_CLK);
+            self.kmrn(KMRN_K1_CONFIG, Some(k1));
+            self.release_swflag();
+            println!("[e1000-driver] I218 at 1 Gb/s: K1 workaround applied (K1 config {:#x})", k1);
+        } else {
+            self.write(REG_FEXTNVM6, fextnvm6 & !FEXTNVM6_REQ_PLL_CLK);
+        }
+    }
+
+    /// Every 60 s (or when `now`): the adapter's statistics counters since start, and the
+    /// frames this driver dropped, in one log line.
+    fn log_stats(&mut self, now: bool) {
+        let t = sys::uptime_ticks();
+        for (i, (reg, _)) in STATS.iter().enumerate() {
+            self.stats[i] += self.read(*reg) as u64;
+        }
+        if !now && t < self.stats_at + 6000 {
+            return;
+        }
+        self.stats_at = t;
+        let mut line = alloc::string::String::from("[e1000-driver] counters:");
+        for (i, (_, name)) in STATS.iter().enumerate() {
+            line.push_str(&alloc::format!(" {} {}", name, self.stats[i]));
+        }
+        line.push_str(&alloc::format!(", dropped by the driver {}, rx ring head {} tail {} next {}", self.dropped, self.read(REG_RDH), self.read(REG_RDT), self.rx_cur));
+        println!("{}", line);
+    }
+    // wave11 GH end
 }
 
 /// Constructs a network service reply message.
@@ -708,7 +873,8 @@ fn main(args: &[&str]) {
     };
     // Test only (QEMU opt/hydra/iommu=test): accept MSG_NET_DMA_TEST
     let dma_test = arg(args, "dma_test") == Some(1);
-    let mut nic = Nic { model, regs, mem, mem_phys, mac: [0; 6], tx_cur: 0, rx_cur: 0, irq: None };
+    let dev_id = arg(args, "dev").unwrap_or(0) as u16;
+    let mut nic = Nic { model, regs, mem, mem_phys, mac: [0; 6], tx_cur: 0, rx_cur: 0, irq: None, dev_id, link_bits: u32::MAX, stats: [0; 11], dropped: 0, stats_at: 0, in_long: false };
     nic.init();
     if let Some(irq) = arg(args, "irq") {
         nic.enable_interrupts(irq as u8);
@@ -773,6 +939,8 @@ fn main(args: &[&str]) {
             reply([0, u32::from_le_bytes([m[0], m[1], m[2], m[3]]) as u64, u16::from_le_bytes([m[4], m[5]]) as u64, 0])
         }
         MSG_NET_GET_STATUS => {
+            nic.link_check(); // wave11 GH
+            nic.log_stats(false);
             let d = unsafe { nic.rx_desc(nic.rx_cur).read_volatile() };
             reply([0, nic.link_up() as u64, nic.read(REG_RDH) as u64 | (nic.read(REG_RDT) as u64) << 16, nic.rx_cur as u64 | (d.status as u64) << 16 | (d.length as u64) << 32 | (d.css_or_errors as u64) << 48])
         }

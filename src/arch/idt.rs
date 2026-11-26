@@ -377,7 +377,8 @@ pub fn init() {
     // `take_hardware_vectors` (the takeover); Hydra's exception gates (0..=31) are used
     // from now on
     #[cfg(target_os = "uefi")]
-    if !crate::console::is_hardware_mode() && !crate::arch::bootopts::say(&[b"fwidt=off"]) {
+    // wave11 GH: only with the word fwidt=on since NUC run 13 (the default hung there)
+    if !crate::console::is_hardware_mode() && crate::arch::bootopts::say(&[b"fwidt=on"]) {
         let fw = x86_64::instructions::tables::sidt();
         let fw_entries = (fw.limit as usize + 1) / core::mem::size_of::<IdtEntry>();
         let mut saved = HYDRA_HW_VECTORS.lock();

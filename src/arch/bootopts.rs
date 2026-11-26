@@ -138,10 +138,10 @@ fn menu(wait: u32) -> Option<&'static str> {
     out("    4  One processor only (cpus=1)\r\n");
     out("    5  No PCID only (pcid=off)\r\n");
     out("    6  No IOMMU only (iommu=off)\r\n");
-    // wave11 GH: the start's memory and interrupt changes one at a time (NUC run 11)
-    out("    7  Test: no firmware interrupt gates (fwidt=off)\r\n");
-    out("    8  Test: memory as in run 10 (fwmem=old)\r\n");
-    out("    9  Test: 7 and 8\r\n\r\n");
+    // wave11 GH: the newer start's memory and interrupt ways, one at a time (NUC runs 11-13)
+    out("    7  Test: firmware interrupt gates (fwidt=on)\r\n");
+    out("    8  Test: memory from firmware blocks (fwmem=new)\r\n");
+    out("    9  Test: 7 and 8 (as runs 11-13)\r\n\r\n");
     if wait == 0 {
         return None;
     }
