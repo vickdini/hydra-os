@@ -252,6 +252,7 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
         }
     }
     mark(10, "Hydra's page tables loaded; PCID next"); // wave11 GH
+    crate::arch::cpu::sim_nx_off_now(); // wave11 GH: the NXE debug words
     let cr3_frame = Cr3::read().0.start_address().as_u64();
     // Tagged TLB entries (before the other processors start: they copy this CPU's CR4)
     crate::arch::pcid::init();
@@ -331,6 +332,8 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
         }
     }
     // 9b. The other processors come online (and wait)
+    crate::arch::cpu::paging_report(0); // wave11 GG: the boot processor's MAXPHYADDR and EFER
+    crate::arch::cpu::check_tables(x86_64::registers::control::Cr3::read().0.start_address().as_u64());
     crate::arch::smp::start_aps();
     // Driver programs run from here on (the takeover lock is released first: they run
     // while their registration is awaited)

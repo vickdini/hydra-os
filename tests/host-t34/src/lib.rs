@@ -310,6 +310,10 @@ pub mod arch {
     /// *stub* The boot words: none (the tests give theirs to `discover_with`).
     pub mod bootopts {
         pub fn init() {}
+        /// *stub* wave11 GH: no early words.
+        pub fn early_word(_w: &[u8]) -> bool {
+            false
+        }
         pub fn words() -> &'static super::bootwords::Words {
             static NONE: super::bootwords::Words = super::bootwords::Words::new();
             &NONE
@@ -439,6 +443,11 @@ pub mod arch {
     }
     /// *stub* Control registers.
     pub mod cpu {
+        /// *stub* wave11 GG/GH: execute-disable on the boot processor.
+        pub static BSP_FIRMWARE_EFER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        pub fn enable_nx() -> bool {
+            true
+        }
         use x86_64::registers::control::{Cr0Flags, Cr4Flags};
         pub struct CpuState {
             pub cr0: Cr0Flags,
@@ -1194,6 +1203,8 @@ pub mod fs {
 pub mod memory {
     /// *stub*
     pub mod vm {
+        /// *stub* wave11 GH: the NXE debug words.
+        pub static NX_SIM_OFF: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
         pub fn prefault_current(_ptr: u64, _len: u64, _write: bool) -> bool {
             !crate::fake::with(|s| s.prefault_fails)
         }

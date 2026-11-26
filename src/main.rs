@@ -208,6 +208,17 @@ pub fn framebuffer_online(info: &video::VideoModeInfo) {
 /// Returns [`Status::SUCCESS`] if the shell ever terminates normally (in practice, the kernel runs until poweroff).
 #[cfg_attr(target_os = "uefi", entry)]
 fn main() -> Status {
+    // wave11 GG: execute-disable on the boot processor before any page table is built (the
+    // APs set it in their start-up code; the NUC's firmware leaves it off: NUC run 12)
+    arch::cpu::BSP_FIRMWARE_EFER.store(unsafe { arch::syscall::rdmsr(0xC000_0080) }, core::sync::atomic::Ordering::Relaxed);
+    // wave11 GH: debug words for QEMU, whose firmware turns NXE on and uses NX itself:
+    // "nxe=fw-off nxe=nofix" reproduces the NUC without the fix (the boot processor builds
+    // its entries without NX and runs with NXE off once the firmware is gone; the APs set it)
+    if arch::bootopts::early_word(b"nxe=fw-off") && arch::bootopts::early_word(b"nxe=nofix") {
+        memory::vm::NX_SIM_OFF.store(true, core::sync::atomic::Ordering::SeqCst);
+    } else {
+        arch::cpu::enable_nx();
+    }
     // First of all, before anything stores a pointer: the image moves to the higher half
     // (out of the low addresses programs need, wherever the firmware loaded it)
     // wave11 GH: breadcrumbs (diagnostic stick), and the word nohigh / key N to stay low

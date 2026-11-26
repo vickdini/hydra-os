@@ -566,6 +566,11 @@ extern "C" fn hydra_exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuS
 /// The body of [`hydra_exception_handler`] (a Rust function: the host tests call it, and
 /// their stand-ins for the kernel's halt unwind through it).
 pub fn exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
+    // wave11 GG: a reserved-bit page fault (err bit 3) shows the whole walk (NUC run 12)
+    #[cfg(target_os = "uefi")]
+    if ctx.vector == 14 && ctx.error_code & 8 != 0 {
+        crate::arch::cpu::report_rsvd_fault(Cr2::read_raw(), ctx.error_code, ctx.rip);
+    }
     // wave6 G22 begin: a fault in a user-memory copy of the forwarding path resumes at the
     // copy's fix-up (before anything that takes a lock: the copy may run without the kernel
     // lock, under the request table's lock); a user watchpoint hit by such a copy is cleared
