@@ -646,6 +646,8 @@ fn with_faults(addr: u64, n: usize, write: bool, mut copy: impl FnMut(usize) -> 
     let mut done = 0usize;
     // The page faulted in last: when it faults again at once, it cannot be had
     let mut last = u64::MAX;
+    // wave11 GG: whether the faulting address was flushed from this CPU's TLB already
+    let mut flushed = u64::MAX;
     loop {
         let left = copy(done);
         if left == 0 {
@@ -654,6 +656,12 @@ fn with_faults(addr: u64, n: usize, write: bool, mut copy: impl FnMut(usize) -> 
         done = n - left;
         let at = addr + done as u64;
         if at & !0xFFF == last {
+            // wave11 GG: present in the tables (faulted in) yet faulting again: a stale
+            // translation of this CPU (the NUC, run 9). Flush the address and try once more
+            if flushed != at & !0xFFF && stale_retry(at, write) {
+                flushed = at & !0xFFF;
+                continue;
+            }
             efault_note(at, write, true);
             return Err(EFAULT);
         }
@@ -666,6 +674,82 @@ fn with_faults(addr: u64, n: usize, write: bool, mut copy: impl FnMut(usize) -> 
 }
 
 // wave11 GG begin
+/// Stale translations flushed by [`stale_retry`].
+pub static STALE_FLUSHES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// A user copy faulted at `at` again right after the page was faulted in: when the page
+/// tables now allow the access, this CPU holds a stale translation (TLB or paging-structure
+/// cache) for its current PCID: flush the address (`invlpg`: the address's entries and every
+/// paging-structure-cache entry of the current PCID) and say the copy may be retried. Each
+/// such flush is logged (the first 16): they are the evidence of a missing invalidation.
+pub(crate) fn stale_retry(at: u64, write: bool) -> bool {
+    let cr3 = cr3_now();
+    let e = pte_of(cr3, at);
+    let allowed = e.is_some_and(|e| e & 1 != 0 && e & 4 != 0 && (!write || e & 2 != 0));
+    if !allowed {
+        return false;
+    }
+    x86_64::instructions::interrupts::without_interrupts(|| crate::arch::pcid::flush_current(Some(at & !0xFFF)));
+    let n = STALE_FLUSHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n < 16 {
+        crate::console::serial_write(&alloc::format!("[uaccess] stale translation {}: {} user {:#x} faulted on an allowed entry; flushed and retried ({})
+", n + 1, if write { "write to" } else { "read from" }, at, pcid_text(cr3)));
+    }
+    true
+}
+
+/// CR3 now and the PCID bookkeeping of this CPU, as text.
+fn pcid_text(cr3: u64) -> alloc::string::String {
+    let me = crate::arch::percpu::cpu();
+    let (id, slot) = crate::arch::pcid::slot_state(cr3);
+    alloc::format!(
+        "cr3 {:#x} (root {:#x}, id {}), last cr3 write {:#x}, slot {} = {:#x}, err {:#x}, cpu {}, reused-root flushes {}, spurious faults {}",
+        cr3,
+        cr3 & 0x000F_FFFF_FFFF_F000,
+        cr3 & 0xFFF,
+        crate::arch::pcid::LAST_CR3_WRITE[me].load(core::sync::atomic::Ordering::Relaxed),
+        id,
+        slot,
+        crate::arch::idt::LAST_UACCESS_ERR[me % 16].load(core::sync::atomic::Ordering::Relaxed),
+        me,
+        crate::arch::pcid::REUSED_ROOT_FLUSHES.load(core::sync::atomic::Ordering::Relaxed),
+        crate::memory::vm::SPURIOUS_FAULTS.load(core::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// CR3 now (0 in host tests: no page tables to show).
+fn cr3_now() -> u64 {
+    #[cfg(target_os = "uefi")]
+    {
+        crate::arch::pcid::cr3_now()
+    }
+    #[cfg(not(target_os = "uefi"))]
+    {
+        0
+    }
+}
+
+/// The leaf entry mapping `va` in the tables at `cr3`, if every level is present.
+fn pte_of(cr3: u64, va: u64) -> Option<u64> {
+    const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
+    let mut table = cr3 & ADDR;
+    if table == 0 {
+        return None;
+    }
+    for (level, shift) in [39u64, 30, 21, 12].into_iter().enumerate() {
+        // SAFETY: page tables, read through the direct map
+        let e = unsafe { (crate::memory::frame_allocator::phys_to_virt(table) as *const u64).add(((va >> shift) & 511) as usize).read_volatile() };
+        if e & 1 == 0 {
+            return None;
+        }
+        if shift == 12 || (level > 0 && e & (1 << 7) != 0) {
+            return Some(e);
+        }
+        table = e & ADDR;
+    }
+    None
+}
+
 /// `EFAULT`s noted so far ([`efault_note`]).
 static EFAULTS_NOTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
@@ -681,13 +765,10 @@ pub(crate) fn efault_note(at: u64, write: bool, again: bool) {
         return;
     }
     let fault = crate::arch::idt::LAST_UACCESS_FAULT[crate::arch::percpu::cpu() % 16].load(core::sync::atomic::Ordering::Relaxed);
-    #[cfg(target_os = "uefi")]
-    let cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
-    #[cfg(not(target_os = "uefi"))]
-    let cr3 = 0u64; // (host tests: no page tables to show)
+    let cr3 = cr3_now();
     let (pid, _) = crate::compat::linux::proc::current_ids();
     crate::console::serial_write(&alloc::format!(
-        "[uaccess] EFAULT {}: pid {} {} user {:#x} ({}), last fault at {:#x}, pte(user) {}, pte(fault) {}, cpu {}
+        "[uaccess] EFAULT {}: pid {} {} user {:#x} ({}), last fault at {:#x}, pte(user) {}, pte(fault) {}, {}
 ",
         n + 1,
         pid,
@@ -697,7 +778,7 @@ pub(crate) fn efault_note(at: u64, write: bool, again: bool) {
         fault,
         pte_text(cr3, at),
         pte_text(cr3, fault),
-        crate::arch::percpu::cpu()
+        pcid_text(cr3)
     ));
 }
 

@@ -115,7 +115,11 @@ fn menu(wait: u32) -> Option<&'static str> {
     out("\r\n  Hydra - how to start\r\n\r\n");
     out("    1  Start Hydra\r\n");
     out("    2  Safe mode: one processor, no IOMMU, no PCID, messages on screen\r\n");
-    out("    3  Safe mode, text console only (no desktop)\r\n\r\n");
+    out("    3  Safe mode, text console only (no desktop)\r\n");
+    // wave11 GG: one safe-mode change at a time (to find which one matters)
+    out("    4  One processor only (cpus=1)\r\n");
+    out("    5  No PCID only (pcid=off)\r\n");
+    out("    6  No IOMMU only (iommu=off)\r\n\r\n");
     if wait == 0 {
         return None;
     }
@@ -132,7 +136,7 @@ fn menu(wait: u32) -> Option<&'static str> {
         if m.counting && m.left / 10 != shown {
             shown = m.left / 10;
             let mut line = crate::console::FixedBuf::new();
-            let _ = core::fmt::Write::write_fmt(&mut line, format_args!("\r  Press 1, 2 or 3. Starting entry 1 in {} s ", shown));
+            let _ = core::fmt::Write::write_fmt(&mut line, format_args!("\r  Press 1 to 6. Starting entry 1 in {} s ", shown));
             out(line.as_str());
         }
         let key = uefi::system::with_stdin(|i| i.read_key().ok().flatten()).map(|k| match k {
@@ -142,7 +146,9 @@ fn menu(wait: u32) -> Option<&'static str> {
         if let Some(words) = m.step(key) {
             out("\r\n\r\n");
             if !words.is_empty() {
-                out("  Starting in safe mode.\r\n");
+                out("  Starting with: ");
+                out(words);
+                out("\r\n");
             }
             return (!words.is_empty()).then_some(words);
         }
@@ -150,7 +156,7 @@ fn menu(wait: u32) -> Option<&'static str> {
             was_counting = false;
             // (the firmware restarts the machine after 5 minutes in a boot program otherwise)
             let _ = uefi::boot::set_watchdog_timer(0, 0x10000, None);
-            out("\r  Press 1, 2 or 3 (entry 1 starts after 30 s without a key).   ");
+            out("\r  Press 1 to 6 (entry 1 starts after 30 s without a key).   ");
         }
         uefi::boot::stall(core::time::Duration::from_millis(100));
     }

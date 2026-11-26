@@ -1751,7 +1751,8 @@ impl Scheduler {
 
         // 6. Switch address space if the target task has a custom CR3 root
         let me = crate::arch::percpu::cpu();
-        if next_task.regs.cr3 != 0 && next_task.regs.cr3 != current_cr3 {
+        // wave11 GG: also when the root in CR3 was torn down and its frame reused
+        if next_task.regs.cr3 != 0 && (next_task.regs.cr3 != current_cr3 || crate::arch::pcid::must_reload(next_task.regs.cr3)) {
             self.loaded_cr3[me] = next_task.regs.cr3;
             // Records LOADED_CR3 too; keeps the TLB with PCID (arch::pcid)
             crate::arch::pcid::load_cr3(next_task.regs.cr3);

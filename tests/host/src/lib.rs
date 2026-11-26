@@ -85,6 +85,10 @@ pub mod arch {
     /// *stub* PCID (tagged TLB) is off on the host: CR3 is never loaded, and
     /// shootdowns are the single-CPU stub above.
     pub mod pcid {
+        /// *stub* wave11 GG
+        pub fn must_reload(_pml4: u64) -> bool {
+            false
+        }
         pub fn enabled() -> bool {
             false
         }

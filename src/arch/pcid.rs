@@ -312,9 +312,21 @@ pub fn load_cr3(pml4: u64) {
     debug_assert!(pml4 & !ADDR_MASK == 0);
     x86_64::instructions::interrupts::without_interrupts(|| {
         let me = super::percpu::cpu();
-        if read_cr3() & ADDR_MASK == pml4 {
+        // wave11 GG: "loaded already" only if the root was not torn down meanwhile: a CPU
+        // that kept a dead address space's root in CR3 (nothing else to load) and gets a
+        // new address space whose root is the same, reused frame must flush, or it keeps
+        // the dead one's translations and paging-structure caches (the NUC, run 9: user
+        // copies faulting on present entries)
+        let torn = FORGOTTEN[me].swap(0, Ordering::SeqCst) == pml4;
+        if read_cr3() & ADDR_MASK == pml4 && !torn {
             super::smp::LOADED_CR3[me].store(pml4, Ordering::SeqCst);
             return;
+        }
+        if torn {
+            REUSED_ROOT_FLUSHES.fetch_add(1, Ordering::Relaxed);
+            // A full reload below: the slot is taken over (no bit 63), or CR3 written
+            // without PCID, which flushes the non-global entries
+            SLOT[me][slot_of(pml4)].store(0, Ordering::SeqCst);
         }
         // First the record (shootdowns read it), then the slot: see the module comment
         super::smp::LOADED_CR3[me].store(pml4, Ordering::SeqCst);
@@ -341,8 +353,38 @@ pub fn load_cr3(pml4: u64) {
             pml4 | id as u64
         };
         unsafe { write_cr3(value) };
+        LAST_CR3_WRITE[me].store(value, Ordering::Relaxed); // wave11 GG
     });
 }
+
+// wave11 GG begin
+/// Per CPU: a root torn down ([`forget`]) while this CPU still had it in CR3; its next
+/// [`load_cr3`] of that root (a new address space in the reused frame) flushes.
+static FORGOTTEN: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Whether the calling CPU must reload root `pml4` although CR3 holds it (see
+/// [`FORGOTTEN`]): callers that skip loading a root that is "already loaded" ask this.
+pub fn must_reload(pml4: u64) -> bool {
+    FORGOTTEN[super::percpu::cpu()].load(Ordering::SeqCst) == pml4 & ADDR_MASK
+}
+
+/// Loads that flushed because of [`FORGOTTEN`].
+pub static REUSED_ROOT_FLUSHES: AtomicU64 = AtomicU64::new(0);
+
+/// Per CPU: the last value [`load_cr3`] wrote to CR3 (root | ID | bit 63), for the
+/// `[uaccess]` diagnostics.
+pub static LAST_CR3_WRITE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// CR3 as it is now (root, ID in bits 11:0).
+pub fn cr3_now() -> u64 {
+    read_cr3()
+}
+
+/// The state of root `pml4`'s slot on the calling CPU: (ID, slot word).
+pub fn slot_state(pml4: u64) -> (usize, u64) {
+    let id = slot_of(pml4 & ADDR_MASK);
+    (id, SLOT[super::percpu::cpu()][id].load(Ordering::SeqCst))
+}
+// wave11 GG end
 
 /// Flushes the calling CPU's cached translations of the CURRENT ID (all of them, or just
 /// `addr`). Interrupts off.
@@ -412,6 +454,12 @@ pub fn mark_remote(cpu: usize, pml4: u64) {
 /// forgets it, so a later root at the same address starts with a flush. Call before the
 /// table's frames can be reused.
 pub fn forget(pml4: u64) {
+    // wave11 GG: a CPU that still has the root in CR3 reloads it with a flush next time
+    for (cpu, loaded) in super::smp::LOADED_CR3.iter().enumerate() {
+        if loaded.load(Ordering::SeqCst) == pml4 {
+            FORGOTTEN[cpu].store(pml4, Ordering::SeqCst);
+        }
+    }
     if !enabled() {
         return;
     }
@@ -451,11 +499,11 @@ pub fn summary() -> alloc::string::String {
     let pge = if global_enabled() { "global kernel pages on" } else { "global kernel pages off" };
     if !enabled() {
         let why = OFF_BY.lock().unwrap_or("the CPU does not have it");
-        return alloc::format!("PCID off ({}), {}", why, pge);
+        return alloc::format!("PCID off ({}), {}; {} reloads of a torn-down root still in CR3", why, pge, REUSED_ROOT_FLUSHES.load(Ordering::Relaxed));
     }
     let sum = |f: fn(&Counters) -> &AtomicU64| COUNTERS.iter().map(|c| f(c).load(Ordering::Relaxed)).sum::<u64>();
     alloc::format!(
-        "{}; PCID on (INVPCID {}): CR3 loads kept the TLB {} times, flushed a taken-over ID {} times, a stale ID {} times; {} remote slots marked stale, {} INVPCID single-ID flushes, {} all-ID flushes",
+        "{}; PCID on (INVPCID {}): CR3 loads kept the TLB {} times, flushed a taken-over ID {} times, a stale ID {} times; {} remote slots marked stale, {} INVPCID single-ID flushes, {} all-ID flushes, {} reloads of a torn-down root still in CR3",
         pge,
         if INVPCID.load(Ordering::Relaxed) { "yes" } else { "no" },
         sum(|c| &c.hits),
@@ -464,5 +512,6 @@ pub fn summary() -> alloc::string::String {
         sum(|c| &c.marked),
         sum(|c| &c.invpcid),
         sum(|c| &c.flush_all),
+        REUSED_ROOT_FLUSHES.load(Ordering::Relaxed),
     )
 }

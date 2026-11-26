@@ -101,5 +101,5 @@ fn pcid_and_global_pages_off_switches() {
     x86_64::hw::clear_ports();
     pcid::enable_global();
     assert!(stubs::take_log().iter().any(|l| l.contains("QEMU fw_cfg opt/hydra/pge=off")));
-    assert_eq!(pcid::summary(), "PCID off (file \\hydra\\nopcid on the EFI partition), global kernel pages off");
+    assert_eq!(pcid::summary(), "PCID off (file \\hydra\\nopcid on the EFI partition), global kernel pages off; 0 reloads of a torn-down root still in CR3");
 }
