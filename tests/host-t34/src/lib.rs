@@ -268,6 +268,8 @@ pub mod arch {
     }
     /// *stub*
     pub mod boot_services {
+        /// *stub* wave11 GH: a takeover step's screen line.
+        pub fn mark(_n: u32, _what: &str) {}
         /// *stub* wave11 GH: the first half of the takeover.
         pub fn leave_firmware() -> Result<(), &'static str> {
             Ok(())
@@ -1230,6 +1232,8 @@ pub mod memory {
     /// *stub*
     pub mod frame_allocator {
         pub const PAGE_SIZE: u64 = 4096;
+        /// *stub* wave11 GH: the boot word fwmem=old.
+        pub static OLD_PATH: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
         pub struct FrameAllocator;
         impl FrameAllocator {
             pub fn total_usable_memory(&self) -> u64 {
