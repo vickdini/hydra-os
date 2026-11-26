@@ -13,6 +13,14 @@ pub const MAX: usize = 1024;
 pub const SAFE: &str = "safe iommu=off pcid=off cpus=1 verbose";
 /// Start menu entry 3: a safe start that stays on the text console (no desktop).
 pub const SAFE_CONSOLE: &str = "safe iommu=off pcid=off cpus=1 verbose nodesktop";
+// wave11 GG begin: one suspect at a time (the NUC's EFAULTs went away in safe mode)
+/// Start menu entry 4: one processor only.
+pub const ONLY_CPUS1: &str = "cpus=1 verbose";
+/// Start menu entry 5: no PCID only.
+pub const ONLY_NOPCID: &str = "pcid=off verbose";
+/// Start menu entry 6: no IOMMU only.
+pub const ONLY_NOIOMMU: &str = "iommu=off verbose";
+// wave11 GG end
 
 /// The boot words: lower-case ASCII, separated by spaces.
 #[derive(Clone, Copy)]
@@ -154,6 +162,9 @@ pub fn menu_choice(key: char) -> Option<&'static str> {
         '1' | '\r' | '\n' => Some(""),
         '2' => Some(SAFE),
         '3' => Some(SAFE_CONSOLE),
+        '4' => Some(ONLY_CPUS1),   // wave11 GG
+        '5' => Some(ONLY_NOPCID),  // wave11 GG
+        '6' => Some(ONLY_NOIOMMU), // wave11 GG
         _ => None,
     }
 }

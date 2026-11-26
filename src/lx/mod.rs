@@ -1599,12 +1599,17 @@ fn call_and_wait(x: &'static Host, me: u64, my_idx: usize, mut c: LxCall, copies
     // table's lock let go, and the call placed again (a page that faults again at once, or
     // that cannot be faulted in, is a bad pointer)
     let mut last_missing = u64::MAX;
+    let mut flushed = u64::MAX; // wave11 GG: see `copy::stale_retry`
     let mut tries = 0;
     let placed = loop {
         match x.lx(|s| place(x, s, me, my_idx, &mut c, copies)) {
             Ok(p) => break p,
             Err(copy::FillErr::Missing(at, len)) => {
                 tries += 1;
+                if tries <= 16 && at & !0xFFF == last_missing && flushed != last_missing && copy::stale_retry(at, false) {
+                    flushed = last_missing;
+                    continue;
+                }
                 if tries > 16 || at & !0xFFF == last_missing || !copy::fault_in(at, len, false) {
                     copy::efault_note(at, false, at & !0xFFF == last_missing); // wave11 GG
                     return EFAULT;

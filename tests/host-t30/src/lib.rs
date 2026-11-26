@@ -190,10 +190,24 @@ pub mod arch {
             pub rsp: u64,
         }
     }
+    /// *stub* wave11 GG: the PCID state the `[uaccess]` lines show.
+    pub mod pcid {
+        /// *stub* wave11 GG
+        pub fn must_reload(_pml4: u64) -> bool {
+            false
+        }
+        pub static LAST_CR3_WRITE: [core::sync::atomic::AtomicU64; 16] = [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+        pub static REUSED_ROOT_FLUSHES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        pub fn flush_current(_addr: Option<u64>) {}
+        pub fn slot_state(_pml4: u64) -> (usize, u64) {
+            (0, 0)
+        }
+    }
     pub mod idt {
         pub static UACCESS_FAULTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         /// *stub* wave11 GG: the last user-copy fault per CPU.
         pub static LAST_UACCESS_FAULT: [core::sync::atomic::AtomicU64; 16] = [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+        pub static LAST_UACCESS_ERR: [core::sync::atomic::AtomicU64; 16] = [const { core::sync::atomic::AtomicU64::new(0) }; 16];
         pub const MSI_VECTOR_BASE: u64 = 0x50;
     }
     pub mod fwcfg {
@@ -356,6 +370,8 @@ pub mod memory {
     }
 
     pub mod vm {
+        /// *stub* wave11 GG
+        pub static SPURIOUS_FAULTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         use alloc::sync::Arc;
         use x86_64::structures::paging::{PhysFrame, Size4KiB};
         use x86_64::PhysAddr;

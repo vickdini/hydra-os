@@ -211,6 +211,9 @@ pub enum Backing {
     },
 }
 
+/// wave11 GG: faults on page-table entries that already allowed the access.
+pub static SPURIOUS_FAULTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// A contiguous range of user virtual memory with uniform protection and backing.
 #[derive(Clone)]
 pub struct Vma {
@@ -1392,6 +1395,13 @@ impl Mm {
         let entry = self.pte(page, true).ok_or(FaultError::OutOfMemory)?;
 
         if pte_holds_frame(entry) {
+            // wave11 GG: a fault on an entry that already allows the access is a stale
+            // translation of this CPU (a permission upgrade not flushed, or worse: the NUC, run 9):
+            // counted (shown in the `[uaccess]` lines)
+            let f = entry.flags();
+            if f.contains(PageTableFlags::PRESENT) && (!write || f.contains(PageTableFlags::WRITABLE)) && !(exec && f.contains(PageTableFlags::NO_EXECUTE)) {
+                SPURIOUS_FAULTS.fetch_add(1, Ordering::Relaxed);
+            }
             let frame = PhysFrame::<Size4KiB>::containing_address(entry.addr());
             // wave11 GG: a write-combining page (the framebuffer) keeps its type
             let wc = entry.flags() & PageTableFlags::WRITE_THROUGH;

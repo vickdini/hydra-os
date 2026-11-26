@@ -353,6 +353,14 @@ fn menu_file_and_keys() {
     assert_eq!(menu_choice('2'), Some(SAFE));
     assert_eq!(menu_choice('3'), Some(SAFE_CONSOLE));
     assert_eq!(menu_choice('x'), None);
+    // wave11 GG: one suspect at a time
+    assert_eq!(menu_choice('4'), Some(ONLY_CPUS1));
+    assert_eq!(menu_choice('5'), Some(ONLY_NOPCID));
+    assert_eq!(menu_choice('6'), Some(ONLY_NOIOMMU));
+    assert_eq!(menu_choice('7'), None);
+    assert!(ONLY_CPUS1.contains("cpus=1") && !ONLY_CPUS1.contains("pcid") && !ONLY_CPUS1.contains("iommu"));
+    assert!(ONLY_NOPCID.contains("pcid=off") && !ONLY_NOPCID.contains("cpus") && !ONLY_NOPCID.contains("iommu"));
+    assert!(ONLY_NOIOMMU.contains("iommu=off") && !ONLY_NOIOMMU.contains("cpus") && !ONLY_NOIOMMU.contains("pcid"));
     assert!(SAFE_CONSOLE.contains("nodesktop") && SAFE.contains("cpus=1") && SAFE.contains("iommu=off") && SAFE.contains("pcid=off"));
 }
 
