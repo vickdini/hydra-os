@@ -36,7 +36,7 @@ use x86_64::PhysAddr;
 /// Size of a standard x86_64 physical page frame in bytes (4 KiB).
 pub const PAGE_SIZE: u64 = 4096;
 /// Maximum number of discontiguous UEFI conventional memory regions tracked.
-const MAX_REGIONS: usize = 64;
+const MAX_REGIONS: usize = 256;
 
 /// Describes a contiguous region of usable physical RAM discovered from the firmware memory map.
 #[derive(Debug, Clone, Copy)]
@@ -321,6 +321,10 @@ impl PhysicalMemoryManager {
             self.current_region_idx += 1;
             self.next_page_in_region = 0;
         }
+        // wave11 GH: before ExitBootServices, another block from the firmware
+        if early_grow(self) {
+            return self.allocate_frame_raw();
+        }
         None
     }
 
@@ -432,28 +436,133 @@ pub static FRAME_ALLOCATOR: Mutex<PhysicalMemoryManager> = Mutex::new(PhysicalMe
 /// Harvests usable `CONVENTIONAL` memory regions from the UEFI boot services memory map
 /// and initializes the global `FRAME_ALLOCATOR` and its per-frame reference count table.
 pub fn init_memory_from_uefi() {
-    let mut allocator = FRAME_ALLOCATOR.lock();
-
+    // wave11 GH: until ExitBootServices the firmware owns its free memory and keeps
+    // allocating from it (its USB stack, its file reads): the frames handed out before then
+    // come from blocks the firmware allocated for Hydra ([`EARLY_BLOCK_PAGES`] at a time),
+    // and the free memory of the final memory map is added after it ([`add_after_firmware`]).
+    // Writing to free memory the firmware had not given stopped the NUC in its boot-file
+    // reads, now and then (wave 11, run 9)
+    let floor = early_floor();
+    let mut total = 0u64;
+    let mut ram_end = 0u64;
     if let Ok(memory_map) = uefi::boot::memory_map(uefi::boot::MemoryType::LOADER_DATA) {
+        use uefi::boot::MemoryType as T;
         for desc in memory_map.entries() {
-            // Conventional memory is free memory available for operating system allocation
-            if desc.ty == uefi::boot::MemoryType::CONVENTIONAL {
-                // Memory below the low user window's end is never handed out when the kernel
-                // reaches frames at identity addresses: each process maps its own pages
-                // there (non-PIE executables live there). In the higher half (arch::relocate) every frame is reached through the
-                // direct map: only the first MiB stays out (frame 0, the start-up page and
-                // the legacy BIOS area)
-                let floor = if crate::arch::relocate::image_phys().is_some() { 0x10_0000 } else { crate::memory::vm::LOW_USER_END };
-                let end = desc.phys_start + desc.page_count * PAGE_SIZE;
-                if end > floor {
-                    let start = desc.phys_start.max(floor);
-                    allocator.add_region(PhysAddr::new(start), (end - start) / PAGE_SIZE);
+            let end = desc.phys_start + desc.page_count * PAGE_SIZE;
+            if matches!(desc.ty, T::CONVENTIONAL | T::BOOT_SERVICES_CODE | T::BOOT_SERVICES_DATA | T::LOADER_CODE | T::LOADER_DATA) {
+                ram_end = ram_end.max(end);
+            }
+            if desc.ty == T::CONVENTIONAL && end > floor {
+                total += end - desc.phys_start.max(floor);
+            }
+        }
+    }
+    // The reference counts cover all RAM (the final map's free memory too), in a block of
+    // their own from the firmware
+    let entries = ram_end / PAGE_SIZE;
+    let table_pages = (entries * 2).div_ceil(PAGE_SIZE);
+    let table = firmware_block(table_pages, floor);
+    let mut allocator = FRAME_ALLOCATOR.lock();
+    EARLY.store(true, core::sync::atomic::Ordering::SeqCst);
+    if let Some(pa) = table {
+        unsafe { core::ptr::write_bytes(phys_to_virt(pa), 0, (table_pages * PAGE_SIZE) as usize) };
+        allocator.refcounts = pa;
+        allocator.refcount_entries = entries;
+    }
+    early_grow(&mut allocator);
+    // What the kernel will have after the firmware (the heap's size is chosen from it)
+    allocator.total_usable_bytes = total;
+}
+
+// wave11 GH begin
+/// Set from [`init_memory_from_uefi`] to [`add_after_firmware`]: boot services run, and new
+/// frames come from blocks the firmware allocated.
+static EARLY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether new frames still come from the firmware (boot services run).
+pub fn is_early() -> bool {
+    EARLY.load(core::sync::atomic::Ordering::SeqCst)
+}
+
+/// The size of one block of frames from the firmware before `ExitBootServices` (64 MiB).
+pub const EARLY_BLOCK_PAGES: u64 = 16 * 1024;
+
+/// Below this the frame allocator hands out nothing: the first MiB in the higher half (all
+/// is reached through the direct map), else the programs' low window (frames are reached
+/// at identity addresses).
+fn early_floor() -> u64 {
+    if crate::arch::relocate::image_phys().is_some() { 0x10_0000 } else { crate::memory::vm::LOW_USER_END }
+}
+
+/// Before `ExitBootServices`: one more block of [`EARLY_BLOCK_PAGES`] from the firmware
+/// added to `alloc` (false after it, or when the firmware has none).
+fn early_grow(alloc: &mut PhysicalMemoryManager) -> bool {
+    if !EARLY.load(core::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    let Some(pa) = firmware_block(EARLY_BLOCK_PAGES, early_floor()) else { return false };
+    let total = alloc.total_usable_bytes;
+    alloc.add_region(PhysAddr::new(pa), EARLY_BLOCK_PAGES);
+    alloc.total_usable_bytes = total;
+    crate::kprintln!("[mem] {} MiB from the firmware at {:#x} (frames before ExitBootServices)", EARLY_BLOCK_PAGES * PAGE_SIZE >> 20, pa);
+    true
+}
+
+/// `pages` contiguous pages the firmware allocates for Hydra (loader data) at or above
+/// `floor`: the top of the highest free region that has them, else anywhere above `floor`.
+/// Boot services only.
+pub fn firmware_block(pages: u64, floor: u64) -> Option<u64> {
+    use uefi::boot::{allocate_pages, AllocateType, MemoryType as T};
+    let bytes = pages * PAGE_SIZE;
+    // Highest first: where the free regions end, as the firmware's map says now
+    let mut tops: [u64; 64] = [0; 64];
+    let mut n = 0;
+    if let Ok(map) = uefi::boot::memory_map(T::LOADER_DATA) {
+        for d in map.entries() {
+            let end = d.phys_start + d.page_count * PAGE_SIZE;
+            if d.ty == T::CONVENTIONAL && end >= bytes && end - bytes >= d.phys_start.max(floor) {
+                if n < tops.len() {
+                    tops[n] = end - bytes;
+                    n += 1;
                 }
             }
         }
     }
-    allocator.init_refcounts();
+    tops[..n].sort_unstable_by(|a, b| b.cmp(a));
+    for &start in &tops[..n] {
+        if allocate_pages(AllocateType::Address(start), T::LOADER_DATA, pages as usize).is_ok() {
+            return Some(start);
+        }
+    }
+    None
 }
+
+/// After `ExitBootServices`: the free memory of the firmware's final memory map
+/// (`entries`: type, start, pages) joins the frame allocator; the blocks taken before are
+/// loader data there and stay as they are.
+pub fn add_after_firmware(entries: impl Iterator<Item = (uefi::boot::MemoryType, u64, u64)>) {
+    let mut alloc = FRAME_ALLOCATOR.lock();
+    if !EARLY.swap(false, core::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let floor = early_floor();
+    let limit = alloc.refcount_entries * PAGE_SIZE;
+    for (ty, start, pages) in entries {
+        let end = (start + pages * PAGE_SIZE).min(if limit > 0 { limit } else { u64::MAX });
+        if ty == uefi::boot::MemoryType::CONVENTIONAL && end > floor {
+            let s = start.max(floor);
+            if end > s {
+                alloc.add_region(PhysAddr::new(s), (end - s) / PAGE_SIZE);
+            }
+        }
+    }
+    let mut total = 0;
+    for r in alloc.regions.iter().flatten() {
+        total += r.page_count * PAGE_SIZE;
+    }
+    alloc.total_usable_bytes = total;
+}
+// wave11 GH end
 
 /// Allocates a zeroed, reference-counted frame from the global allocator.
 ///

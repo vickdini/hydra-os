@@ -160,6 +160,11 @@ pub fn leave_firmware() -> Result<(), &'static str> {
     crate::arch::crumb::end("takeover: ExitBootServices next (last breadcrumb)"); // wave11 GH
     // 3. Terminate UEFI Boot Services
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
+    // Hydra's own gates for the hardware vectors (the firmware's served until here)
+    x86_64::instructions::interrupts::disable();
+    crate::arch::idt::take_hardware_vectors();
+    // The firmware's free memory is Hydra's now: the frame allocator takes it
+    crate::memory::frame_allocator::add_after_firmware(memory_map.entries().map(|d| (d.ty, d.phys_start, d.page_count)));
     *FINAL_MAP.lock() = Some(FinalMap(memory_map));
     Ok(())
 }

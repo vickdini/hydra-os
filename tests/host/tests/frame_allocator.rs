@@ -58,17 +58,17 @@ fn add_region_accounts_usable_memory_and_ignores_empty_regions() {
 }
 
 #[test]
-fn region_table_is_capped_at_64() {
+fn region_table_is_capped_at_256() {
     let mut m = PhysicalMemoryManager::new();
-    for i in 0..70 {
+    for i in 0..270 {
         m.add_region(PhysAddr::new(GIB + i * 0x10_0000), 1);
     }
-    assert_eq!(m.total_usable_memory(), 64 * PAGE_SIZE);
+    assert_eq!(m.total_usable_memory(), 256 * PAGE_SIZE);
     let mut n = 0;
     while m.allocate_frame().is_some() {
         n += 1;
     }
-    assert_eq!(n, 64);
+    assert_eq!(n, 256);
 }
 
 #[test]

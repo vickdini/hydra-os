@@ -57,6 +57,8 @@ pub fn force_line(args: core::fmt::Arguments) {
 }
 
 /// A breadcrumb in the file only (no screen line, no pause): for the many small steps.
+/// Once the breadcrumbs are on the screen only, these show there too, without the pause
+/// (where a boot-file read stops: wave 11, run 9).
 pub fn quiet_fmt(args: core::fmt::Arguments) {
     record(args, false);
 }
@@ -79,9 +81,9 @@ fn record(args: core::fmt::Arguments, show: bool) {
     }
     // (the start menu's test entries 5-7: screen lines only, no file writes)
     let screen_only = SCREEN_ONLY.load(Ordering::Relaxed) && !FORCE.load(Ordering::Relaxed);
-    if screen_only && !show {
-        return;
-    }
+    // wave11 GH: screen-only, the small steps show too, without the pause
+    let pause = show;
+    let show = show || screen_only;
     let n = COUNT.fetch_add(1, Ordering::Relaxed);
     let mut text = crate::console::FixedBuf::new();
     let _ = core::fmt::Write::write_fmt(&mut text, format_args!("{:02} ", n));
@@ -104,7 +106,9 @@ fn record(args: core::fmt::Arguments, show: bool) {
         let _ = core::fmt::Write::write_str(o, core::str::from_utf8(&t[..k]).unwrap_or("?"));
         let _ = core::fmt::Write::write_str(o, "\r\n");
     });
-    uefi::boot::stall(core::time::Duration::from_millis(SHOW_MS));
+    if pause {
+        uefi::boot::stall(core::time::Duration::from_millis(SHOW_MS));
+    }
 }
 
 /// Boot services end next: no more breadcrumbs.

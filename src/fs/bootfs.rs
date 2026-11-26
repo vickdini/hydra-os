@@ -112,7 +112,11 @@ const FW_BOUNCE_SIZE: usize = 256 * 1024;
 /// The bytes read (0 at the end of the file), or `Err` on an I/O error.
 pub fn fw_read(file: &mut uefi::proto::media::file::RegularFile, buf: &mut [u8]) -> Result<usize, ()> {
     if (buf.as_ptr() as u64) < 0x8000_0000_0000_0000 {
-        return file.read(buf).map_err(|_| ());
+        // wave11 GH: each read on the screen too (where one stops: NUC run 9)
+        crate::arch::crumb::quiet_fmt(format_args!("  firmware read: {} bytes into {:#x}", buf.len(), buf.as_ptr() as u64));
+        let r = file.read(buf);
+        crate::arch::crumb::quiet_fmt(format_args!("  read returned: {}", match &r { Ok(n) => alloc::format!("{} bytes", n), Err(e) => alloc::format!("error {:?}", e.status()) }));
+        return r.map_err(|_| ());
     }
     let mut bounce = FW_BOUNCE.load(core::sync::atomic::Ordering::Relaxed);
     if bounce == 0 {
