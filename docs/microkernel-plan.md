@@ -299,6 +299,10 @@ Chosen by the user over starting FreeBSD at once: close what waves 6–10 left o
 - **Low memory:** the heap is a sixth of the memory (was half, up to 1 GiB; KDE uses 40-60 MiB), and when the image stays low (loaded into the 2-4 GiB slot) the RAM below 1 GiB is used once the direct map is on. QEMU 2.5 GB: 1,496 -> 2,503 MiB usable; KDE + Firefox + Dolphin + sound run. Out-of-memory kills get a `[mem]` log line.
 - **Carried to wave 12:** the higher-half move after `ExitBootServices` ("go_high option A") for an image the firmware loaded into the 2-4 GiB slot: today such a kernel stays low and keeps GiB slots 1-3, so programs get a 1 GiB low window and Wine (which needs `0x7ffe0000`) does not start (seen at QEMU 2.5 GB). Also: lx-proc following magic links and walking from kernel `/proc` directories, vfs-server deciding bubblewrap's named mounts and Landlock's lexical checks, after which the kernel walk and its `/proc` text can go.
 
+**NUC run 17 (2026-11-27, 11-C stick):** clearly faster under Firefox. Idle CPU now 4 %, the network rate shows, Firefox has the Breeze close button, and the power-off abort is gone. Pointer moves mostly under 5 ms, with spikes of 25-30 ms. The display copy averages 3-5 ms with a worst case of 145 ms, and the longest flip-to-screen is 247 ms (full-frame software copies at 1920x1080).
+- **Carried to wave 12 (user's choice):** Firefox videos on YouTube and Dailymotion get stuck loading on the NUC. The boot log shows no crash, kill line or error. To check: the audio output (cubeb to PulseAudio/PipeWire; a missing audio clock stalls playback), the RDD/media sandbox process, the codecs (VP9/AV1 built in, H.264 through the system's libavcodec) and Media Source Extensions. Reproduce in QEMU on YouTube and on a plain `.webm`/`.mp4` file.
+- **Still open:** System Monitor's Applications view (design note: `docs/system-monitor-applications.md`, about 2-3 days).
+
 Also carried, if a group has room: lx-ipc's SysV `shmget`/`IPC_STAT` cost (+4 µs; per-segment kept records instead of the whole-table rewrite), the 1-CPU forwarded signal shortfall.
 
 About 15–20 agent-days.
