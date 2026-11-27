@@ -1295,7 +1295,10 @@ impl Kms {
                 self.scanout = Some(fb);
                 self.stats.flips += 1;
                 // wave11 GD: copied by the screen thread (the caller kicks it); completed at
-                // the first blank after the copy
+                // the first blank after the copy. A flip without the event flag asks for no
+                // completion: it returns at once too and its picture goes out with the bands
+                // (the next flip, with or without an event, takes over the copy; its own
+                // completion still waits for the whole picture)
                 self.damage((0, 0, self.width, self.height));
                 if flags & 1 != 0 {
                     let p = Pending { file: id, kind: EV_FLIP, user_data };

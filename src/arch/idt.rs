@@ -598,7 +598,9 @@ pub fn exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
     if ctx.vector == crate::arch::smp::TLB_VECTOR {
         crate::arch::smp::serve_tlb();
         crate::arch::smp::lapic_eoi();
-        resched = (ctx.cs & 3) == 3 && crate::arch::smp::take_resched();
+        // (the request is taken in any mode: from kernel mode the next tick looks)
+        let asked = crate::arch::smp::take_resched();
+        resched = (ctx.cs & 3) == 3 && asked;
         // A kick for a task retired while running here in user mode: on to the full path,
         // which switches away from it (below)
         if !((ctx.cs & 3) == 3 && crate::task::current_retired()) && !resched {

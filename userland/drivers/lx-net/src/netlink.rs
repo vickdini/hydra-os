@@ -320,7 +320,10 @@ fn ethernet(isolated: bool) -> Option<([u8; 6], [u8; 4], [u8; 4], [u8; 4])> {
 
 fn links(isolated: bool) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
-    // wave11 GD: with their traffic counters (System Monitor's network rates)
+    // wave11 GD: with their traffic counters (System Monitor's network rates): 296 bytes
+    // more per link (IFLA_STATS 100, IFLA_STATS64 196 with headers); the whole dump (lo and
+    // eth0, about 0.8 KiB) is one datagram, far below the 4 KiB+ that glibc's getifaddrs
+    // and libnl start their receive buffers at
     let traffic = netc::traffic();
     let link = |kind: u16, index: i32, flags: u32, name: &[u8], mac: &[u8], broadcast: &[u8], mtu: u32| {
         let mut b = Vec::new();

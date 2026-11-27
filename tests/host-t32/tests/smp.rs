@@ -549,4 +549,31 @@ fn a_high_priority_wakeup_preempts_the_cpu_with_the_least_urgent_work() {
     host::set_cpu(0);
     smp::host_bring_online(1);
 }
+
+#[test]
+fn a_preemption_request_ends_at_the_next_switch_or_tick() {
+    // (review: a request whose kick arrived in kernel mode stayed set, and its CPU was never
+    // chosen again)
+    let _g = serial();
+    smp::host_bring_online(2);
+    let _l = lapic(0);
+    host::set_cpu(1);
+    smp::idle_halt_ended();
+    smp::set_cur_prio(2, 0);
+    host::set_cpu(0);
+    let sent = smp::RESCHED_SENT.load(SeqCst);
+    smp::kick_for(3, 0);
+    smp::kick_for(3, 0);
+    assert_eq!(smp::RESCHED_SENT.load(SeqCst), sent + 1, "asked already");
+    // CPU 1's tick (or a switch) refreshes its task's facts: the request is done
+    host::set_cpu(1);
+    smp::set_cur_prio(2, 0);
+    host::set_cpu(0);
+    smp::kick_for(3, 0);
+    assert_eq!(smp::RESCHED_SENT.load(SeqCst), sent + 2, "chosen again");
+    host::set_cpu(1);
+    assert!(smp::take_resched());
+    host::set_cpu(0);
+    smp::host_bring_online(1);
+}
 // wave11 GD end

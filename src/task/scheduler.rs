@@ -1611,14 +1611,15 @@ impl Scheduler {
         // First pass: high-priority service tasks (the network task) run as soon as they
         // are ready; then non-idle Ready tasks in round-robin order
         // (wave11 GD: the highest priority first: input and display before other services)
-        // (the current task last, as in round-robin order: a yield lets the others go first)
+        // (the current task last, as in round-robin order: a yield lets others of its
+        // priority go first, never a lower priority)
         if next_idx.is_none() {
             let mut best: Option<usize> = None;
             for offset in 1..=num_tasks {
                 let idx = (curr_idx + offset) % num_tasks;
                 if self.can_run(idx, me)
                     && self.tasks[idx].priority >= TaskPriority::High
-                    && best.is_none_or(|b| self.tasks[idx].priority > self.tasks[b].priority && (idx != curr_idx || b == curr_idx))
+                    && best.is_none_or(|b| self.tasks[idx].priority > self.tasks[b].priority)
                 {
                     best = Some(idx);
                 }
@@ -2297,6 +2298,9 @@ impl Scheduler {
         let idx = self.cur[crate::arch::percpu::cpu()];
         crate::compat::linux::prof::sample(self.tasks[idx].id.0, ctx.rip, ctx.cs);
         self.charge(idx, ctx);
+        // wave11 GD: what other CPUs' wakeup preemption sees of this one, fresh (a busy
+        // thread's use grows while it runs); a pending request is answered by this tick
+        crate::arch::smp::set_cur_prio(self.tasks[idx].priority as u8, self.tasks[idx].recent);
         if crate::arch::percpu::cpu() == 0 {
             self.update_load();
             self.decay_recent();

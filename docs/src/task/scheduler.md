@@ -226,7 +226,12 @@ machine without a GPU driver where everything is drawn in software):
   rather than at its next tick: for a high or real-time priority thread any CPU running
   lower priority work; for a normal one only a CPU running a busy normal thread
   (`PREEMPT_BUSY`, used 4 x more lately: `PREEMPT_RATIO`). A system call's kick waits for
-  its end and is dropped when the caller's own CPU runs the woken thread.
+  its end and is dropped when the caller's own CPU runs the woken thread. What other CPUs
+  see of a CPU (its task's priority and recent use) is refreshed at every switch and tick,
+  and a pending request ends there too (a kick arriving in kernel mode is answered by the
+  next tick).
+- Of ready tasks of the highest priority the current one goes last (a yield lets its
+  equals run), but a real-time task never gives way to a high one at the end of its slice.
 - **Priorities**: the highest ready priority among services runs first; display-server and
   input-server run at `Realtime` (above the other services), so a cursor move waits for no
   file or network work. Linux threads asking for `SCHED_FIFO`/`SCHED_RR` or nice <= -10 run

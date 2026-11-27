@@ -301,6 +301,13 @@ fn the_highest_priority_ready_service_runs_first_and_wakes_are_kicked_by_priorit
     SCHEDULER.lock().preempt_check(&mut ctx);
     assert_eq!(SCHEDULER.lock().current_task_id().0, r);
     assert_eq!(with(r, |t| t.timeslice_remaining), left);
+    // A real-time task whose slice ends keeps the CPU over a ready high one (review)
+    with(r, |t| t.timeslice_remaining = 1);
+    SCHEDULER.lock().schedule(&mut ctx);
+    assert_eq!(SCHEDULER.lock().current_task_id().0, r, "not to the high priority task");
+    // ...and yields to it when it blocks
+    block(r);
+    assert_eq!(yield_on(0), h);
 }
 // wave11 GD end
 

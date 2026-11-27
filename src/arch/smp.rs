@@ -483,10 +483,16 @@ pub fn preempt_victim(me: usize, online: usize, prio: u8, recent: u32, cpu: impl
         .map(|(_, _, c)| c)
 }
 
-/// The calling CPU switched to a task of priority `prio` that used `recent` CPU lately.
+/// The calling CPU switched to (or, at a tick, still runs) a task of priority `prio` that
+/// used `recent` CPU lately. A preemption request for this CPU is done with: a switch or a
+/// tick's scheduling pass looked at the ready tasks (review: a request whose kick arrived
+/// in kernel mode, or found the kernel lock busy, would otherwise stay set and keep this
+/// CPU out of [`preempt_victim`] for good).
 pub fn set_cur_prio(prio: u8, recent: u32) {
-    CUR_PRIO[super::percpu::cpu()].store(prio, Ordering::Relaxed);
-    CUR_RECENT[super::percpu::cpu()].store(recent, Ordering::Relaxed);
+    let c = super::percpu::cpu();
+    CUR_PRIO[c].store(prio, Ordering::Relaxed);
+    CUR_RECENT[c].store(recent, Ordering::Relaxed);
+    RESCHED[c].store(false, Ordering::Relaxed);
 }
 
 /// Whether another CPU asked this one to look for a task of higher priority (cleared).
