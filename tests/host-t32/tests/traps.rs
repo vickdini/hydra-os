@@ -598,3 +598,38 @@ fn xsave_setup() {
     assert_eq!(idt::xcr0(), 0b011);
     assert_eq!(idt::xsave_size(), 576);
 }
+
+// wave11 GD begin
+#[test]
+fn a_wakeup_preemption_kick_runs_a_scheduling_pass_from_user_mode() {
+    let _g = serial();
+    smp::host_bring_online(2);
+    host::set_cpu(1);
+    smp::idle_halt_ended();
+    smp::set_cur_prio(2, 0);
+    host::set_cpu(0);
+    smp::kick_for(4, 0);
+    host::set_cpu(1);
+    task::ACTIVE.set(true);
+    let mut c = ctx(smp::TLB_VECTOR, true);
+    trap(&mut c);
+    let k = calls();
+    assert!(has(&k, "sched::preempt_check 66"), "{k:?}");
+    // A plain flush request afterwards: none
+    let mut c = ctx(smp::TLB_VECTOR, true);
+    trap(&mut c);
+    assert!(!has(&calls(), "sched::preempt_check 66"));
+    // A request arriving in kernel mode is taken (the next tick looks), not left behind
+    host::set_cpu(0);
+    smp::kick_for(4, 0);
+    host::set_cpu(1);
+    let mut c = ctx(smp::TLB_VECTOR, false);
+    let mut fpu = FpuState::new();
+    unsafe { hydra_exception_handler(&mut c, &mut fpu) };
+    assert!(!has(&calls(), "sched::preempt_check 66"));
+    assert!(!smp::take_resched(), "cleared by the kick itself");
+    task::ACTIVE.set(false);
+    host::set_cpu(0);
+    smp::host_bring_online(1);
+}
+// wave11 GD end

@@ -304,7 +304,7 @@ fn report(last: kms::Stats) -> kms::Stats {
     let presents = d(s.presents, last.presents);
     let avg = if presents > 0 { d(s.copy_ns, last.copy_ns) / presents / 1000 } else { 0 };
     println!(
-        "[display] 60s: ioctls {} ({} behind the console), flips {}, pictures {}, completions {}, held {}, copy avg {} us max {} us, cursor {} (avg {} us max {} us), written {} of {} kpx{}",
+        "[display] 60s: ioctls {} ({} behind the console), flips {}, pictures {}, completions {}, held {}, copy avg {} us max {} us, flip to screen max {} us, cursor {} (avg {} us max {} us), written {} of {} kpx{}",
         d(s.ioctls, last.ioctls),
         d(s.ioctls_hidden, last.ioctls_hidden),
         d(s.flips, last.flips),
@@ -313,6 +313,7 @@ fn report(last: kms::Stats) -> kms::Stats {
         d(s.held, last.held),
         avg,
         s.copy_max_ns / 1000,
+        s.lat_max_ns / 1000,
         d(s.cursor_updates, last.cursor_updates),
         // wave11 GG: the cursor's time and how much of what was composed reached the screen
         d(s.cursor_ns, last.cursor_ns) / d(s.cursor_updates, last.cursor_updates).max(1) / 1000,
@@ -324,10 +325,12 @@ fn report(last: kms::Stats) -> kms::Stats {
     if let Some(k) = KMS.lock().as_mut() {
         k.stats.copy_max_ns = 0;
         k.stats.cursor_max_ns = 0;
+        k.stats.lat_max_ns = 0;
     }
     let mut s = s;
     s.copy_max_ns = 0;
     s.cursor_max_ns = 0;
+    s.lat_max_ns = 0;
     s
 }
 
@@ -352,8 +355,13 @@ fn start_screen_thread() {
 extern "C" fn screen_thread(_arg: u64) -> ! {
     let mut gen = 0u64;
     loop {
-        let due = KMS.lock().as_ref().and_then(|k| k.next_due(now_ns()));
-        let r = sys::screen(SCREEN_WAIT, gen, due.unwrap_or(0));
+        // wave11 GD: while a flip's copy goes on, no wait (a deadline in the past only
+        // reads the state): one band per round, the lock free in between
+        let (due, copying) = match KMS.lock().as_ref() {
+            Some(k) => (k.next_due(now_ns()), k.copy_pending()),
+            None => (None, false),
+        };
+        let r = sys::screen(SCREEN_WAIT, gen, if copying { 1 } else { due.unwrap_or(0) });
         if r < 0 {
             sys::sleep_ms(10);
             continue;
@@ -373,6 +381,8 @@ extern "C" fn screen_thread(_arg: u64) -> ! {
             k.vblank_tick(now);
         }
         k.check_gone(now);
+        // wave11 GD: the next band of a flip's picture
+        k.copy_band();
         let woke = core::mem::take(&mut k.woke);
         drop(guard);
         deliver(&woke);
@@ -523,11 +533,12 @@ fn drm_call(cx: &Cx, slot: u32, nr: u64) -> Answer {
                 let Some(k) = g.as_mut() else { return (ENODEV, 0) };
                 let before = k.pending.len();
                 let r = k.ioctl(&env, slot, cx.args[1], cx.args[2]);
-                (r, k.pending.len() > before, core::mem::take(&mut k.woke))
+                // (wave11 GD: or a flip's copy to make)
+                (r, k.pending.len() > before || k.copy_pending(), core::mem::take(&mut k.woke))
             };
             deliver(&woke);
             if flip {
-                // The screen thread waits for the next blank now
+                // The screen thread copies the picture and waits for the next blank now
                 sys::screen(SCREEN_KICK, 0, 0);
             }
             (r, 0)

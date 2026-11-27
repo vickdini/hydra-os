@@ -185,12 +185,131 @@ fn yield_switches_registers_stack_and_markers_to_the_next_task() {
 fn round_robin_skips_the_idle_task_and_wraps() {
     let _w = booted();
     let a = spawn("a", TaskPriority::Normal);
-    let b = spawn("b", TaskPriority::Low);
+    let b = spawn("b", TaskPriority::Normal);
     assert_eq!(yield_on(0), a);
     assert_eq!(yield_on(0), b);
     assert_eq!(yield_on(0), 0);
     assert_eq!(yield_on(0), a);
 }
+
+// wave11 GD begin
+#[test]
+fn a_low_priority_task_waits_for_normal_ones_until_passed_over_too_often() {
+    let _w = booted();
+    let a = spawn("a", TaskPriority::Normal);
+    let b = spawn("b", TaskPriority::Low);
+    let mut order = Vec::new();
+    for _ in 0..14 {
+        order.push(yield_on(0));
+    }
+    let first_b = order.iter().position(|&t| t == b).expect("the low priority task never ran");
+    assert!(first_b >= 9, "normal work first: {order:?}");
+    assert!(order[..first_b].iter().all(|&t| t == a || t == 0), "{order:?}");
+}
+
+#[test]
+fn of_equal_tasks_the_least_used_lately_runs_first() {
+    let _w = booted();
+    let busy = spawn("busy", TaskPriority::Normal);
+    let light = spawn("light", TaskPriority::Normal);
+    with(busy, |t| t.recent = 40 * scheduler::RECENT_TICK);
+    with(0, |t| t.recent = 20 * scheduler::RECENT_TICK);
+    with(light, |t| t.recent = scheduler::RECENT_TICK);
+    assert_eq!(yield_on(0), light, "round-robin order would pick busy");
+    assert_eq!(yield_on(0), 0);
+    assert_eq!(yield_on(0), light);
+    // Pure rules
+    use TaskPriority::*;
+    assert!(scheduler::runs_before((High, 9_999), (Normal, 0)));
+    assert!(scheduler::runs_before((Normal, 1), (Normal, 2)));
+    assert!(!scheduler::runs_before((Normal, 2), (Normal, 2)));
+    assert!(scheduler::woken_preempts((Normal, 0), (Normal, 3 * scheduler::RECENT_TICK)));
+    assert!(!scheduler::woken_preempts((Normal, 0), (Normal, scheduler::RECENT_MARGIN)), "not by the margin");
+    assert!(!scheduler::woken_preempts((Normal, 0), (High, 9_999)));
+    assert!(scheduler::woken_preempts((High, 9_999), (Normal, 0)));
+    assert_eq!(scheduler::decayed(100), 75);
+    assert_eq!(scheduler::decayed(1), 1);
+}
+
+#[test]
+fn recent_use_grows_with_ticks_run_and_decays() {
+    let _w = booted();
+    let a = spawn("a", TaskPriority::Normal);
+    assert_eq!(yield_on(0), a);
+    let user = uctx();
+    for _ in 0..10 {
+        fake::set_ticks(fake::ticks() + 1);
+        SCHEDULER.lock().account_tick(&user);
+    }
+    let r = with(a, |t| t.recent);
+    assert!(r >= 9 * scheduler::RECENT_TICK, "{r}");
+    // Idle for a while: a quarter less every RECENT_DECAY_TICKS
+    block(a);
+    assert_eq!(yield_on(0), 0);
+    for _ in 0..(4 * scheduler::RECENT_DECAY_TICKS) {
+        fake::set_ticks(fake::ticks() + 1);
+        SCHEDULER.lock().account_tick(&kctx());
+    }
+    let r2 = with(a, |t| t.recent);
+    assert!(r2 <= r * 3 / 4 * 3 / 4 * 3 / 4 + 1 && r2 > 0, "{r} -> {r2}");
+    // The idle task's time adds nothing
+    block(0);
+    assert_eq!(yield_on(0), 1);
+    let idle = with(1, |t| t.recent);
+    fake::set_ticks(fake::ticks() + 3);
+    SCHEDULER.lock().account_tick(&kctx());
+    assert_eq!(with(1, |t| t.recent), idle);
+}
+
+#[test]
+fn a_woken_busier_task_waits_for_the_slice_but_a_lighter_one_preempts() {
+    let _w = booted();
+    let b = spawn("b", TaskPriority::Normal);
+    block(b);
+    // b used more than the running shell: woken, it waits for the slice to end
+    with(b, |t| t.recent = 30 * scheduler::RECENT_TICK);
+    with(0, |t| t.recent = 10 * scheduler::RECENT_TICK);
+    assert!(task::unblock_task(TaskId(b)));
+    assert_eq!(tick_on(0), 0, "a busier woken task does not preempt");
+    for _ in 1..DEFAULT_TIMESLICE_TICKS - 1 {
+        assert_eq!(tick_on(0), 0);
+    }
+    assert_eq!(tick_on(0), b, "it runs when the slice ends");
+}
+
+#[test]
+fn the_highest_priority_ready_service_runs_first_and_wakes_are_kicked_by_priority() {
+    let _w = booted();
+    let h = spawn("h", TaskPriority::High);
+    let r = spawn("r", TaskPriority::Realtime);
+    // Round-robin order would pick h
+    assert_eq!(yield_on(0), r);
+    block(r);
+    assert_eq!(yield_on(0), h);
+    fake::KICK_PRIOS.lock().unwrap().clear();
+    assert!(task::unblock_task(TaskId(r)));
+    assert_eq!(fake::KICK_PRIOS.lock().unwrap().as_slice(), &[TaskPriority::Realtime as u8]);
+    // A preemption pass from another CPU's kick: switches to the higher priority task
+    // without using up a slice
+    let mut ctx = kctx();
+    with(h, |t| t.timeslice_remaining = 3);
+    SCHEDULER.lock().preempt_check(&mut ctx);
+    assert_eq!(SCHEDULER.lock().current_task_id().0, r);
+    assert!(with(h, |t| t.preempted));
+    // Nothing more urgent ready: the pass keeps the task and its slice
+    let left = with(r, |t| t.timeslice_remaining);
+    SCHEDULER.lock().preempt_check(&mut ctx);
+    assert_eq!(SCHEDULER.lock().current_task_id().0, r);
+    assert_eq!(with(r, |t| t.timeslice_remaining), left);
+    // A real-time task whose slice ends keeps the CPU over a ready high one (review)
+    with(r, |t| t.timeslice_remaining = 1);
+    SCHEDULER.lock().schedule(&mut ctx);
+    assert_eq!(SCHEDULER.lock().current_task_id().0, r, "not to the high priority task");
+    // ...and yields to it when it blocks
+    block(r);
+    assert_eq!(yield_on(0), h);
+}
+// wave11 GD end
 
 #[test]
 fn a_tick_keeps_the_task_until_its_timeslice_ends() {
@@ -255,6 +374,8 @@ fn woken_tasks_run_first_then_the_task_they_preempted() {
     let a = spawn("a", TaskPriority::Normal);
     let b = spawn("b", TaskPriority::Normal);
     block(b);
+    // (wave11 GD: the running shell is the busier one)
+    with(0, |t| t.recent = 10 * scheduler::RECENT_TICK);
     assert!(task::unblock_task(TaskId(b)));
     assert_eq!(tick_on(0), b, "the woken task preempts mid-slice");
     // b yields: the shell it preempted goes before a, which is next in round-robin order
@@ -1328,6 +1449,40 @@ fn ticks_are_charged_to_the_task_and_the_cpu_by_mode() {
     charge(&kernel, 2);
     assert_eq!(times(scheduler::CPU_IDLE) - i1, 2);
 }
+
+// wave11 GD begin
+#[test]
+fn a_task_preempted_on_one_cpu_is_left_there_for_a_few_passes() {
+    let _w = booted();
+    add_cpus(2);
+    let a = spawn("a", TaskPriority::Normal);
+    with(a, |t| {
+        t.preempted = true;
+        t.preempted_on = 1; // CPU 0's
+    });
+    // CPU 1 passes over it while it waits for CPU 0 (its idle task runs instead)
+    for _ in 0..scheduler::PREEMPTED_WAIT {
+        assert_ne!(yield_on(1), a);
+    }
+    // ...then takes it
+    assert_eq!(yield_on(1), a);
+    assert_eq!(with(a, |t| t.preempted_on), 0);
+}
+
+#[test]
+fn a_threads_own_cpu_time_and_state() {
+    let _w = booted();
+    let a = spawn("a", TaskPriority::Normal);
+    with(a, |t| {
+        t.ticks_run = 30;
+        t.ticks_sys = 10;
+    });
+    assert_eq!(SCHEDULER.lock().thread_cpu(a), Some((30, 10, true)), "ready: runnable");
+    block(a);
+    assert_eq!(SCHEDULER.lock().thread_cpu(a), Some((30, 10, false)));
+    assert_eq!(SCHEDULER.lock().thread_cpu(9_999), None);
+}
+// wave11 GD end
 
 #[test]
 fn load_averages_follow_the_runnable_tasks_every_five_seconds() {

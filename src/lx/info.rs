@@ -393,7 +393,7 @@ pub mod glue {
         if !visible(pid, init, p) {
             return ESRCH;
         }
-        match fill_task(pid, tid, init, who & LX_INFO_TASK_NOMEM == 0) {
+        match fill_task(pid, tid, init, who & LX_INFO_TASK_NOMEM == 0).map(|i| if t != 0 { thread_view(i, tid) } else { i }) {
             Some(mut info) => {
                 // wave11 GP: the tree and the ids as the caller's namespaces show them
                 if init.is_some() {
@@ -423,6 +423,22 @@ pub mod glue {
         in_view(pid, &inits, init, who)
     }
     // wave11 GP end
+
+    // wave11 GD begin
+    /// `/proc/<pid>/task/<tid>/stat`: the thread's own state and CPU time, not its
+    /// process's (top -H showed every thread of a process with the process's whole time
+    /// and running while any thread ran).
+    fn thread_view(mut i: LxTaskInfo, tid: u64) -> LxTaskInfo {
+        if let Some((run, sys, runnable)) = crate::task::SCHEDULER.lock().thread_cpu(tid) {
+            let ct = lx::proc::to_clock_ticks;
+            (i.utime, i.stime, i.cutime, i.cstime) = (ct(run - sys.min(run)), ct(sys), 0, 0);
+            if i.state != b'Z' as u64 {
+                i.state = if runnable { b'R' as u64 } else { b'S' as u64 };
+            }
+        }
+        i
+    }
+    // wave11 GD end
 
     /// The facts of process `pid`, thread `tid`, for a caller whose namespace's init is
     /// `init` (the kernel's `/proc/<pid>/{stat,status,statm}` sources).

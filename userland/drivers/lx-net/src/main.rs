@@ -39,6 +39,7 @@ mod obj;
 mod timeout;
 
 mod inet;
+mod linkstats; // wave11 GD
 #[allow(dead_code)] // (ping_rtt: linux-server's test call)
 mod netc;
 #[allow(dead_code)] // (pin/deliver: message queues co-located in linux-server)

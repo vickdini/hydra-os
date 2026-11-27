@@ -206,9 +206,15 @@ pub mod arch {
         pub fn kick_pending() -> bool {
             fake::KICK_PENDING.load(Ordering::SeqCst)
         }
-        pub fn switch_kick(others: bool) {
+        pub fn switch_kick(others: bool, _others_prio: u8) {
             fake::SWITCH_KICKS.lock().unwrap().push(others);
         }
+        // wave11 GD: wakeup preemption
+        pub fn kick_for(prio: u8, _recent: u32) {
+            fake::KICK_IDLE.fetch_add(1, Ordering::SeqCst);
+            fake::KICK_PRIOS.lock().unwrap().push(prio);
+        }
+        pub fn set_cur_prio(_p: u8, _recent: u32) {}
         pub fn serve_tlb() {
             fake::SERVE_TLB.fetch_add(1, Ordering::SeqCst);
         }

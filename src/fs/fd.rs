@@ -981,11 +981,29 @@ impl FdTable {
     fn readiness_at(&self, desc: &FileDescriptor, depth: u32) -> u32 {
         match desc {
             FileDescriptor::Epoll(ep) if depth < 4 => {
-                use crate::compat::linux::epoll::{EPOLLERR, EPOLLHUP, EPOLLONESHOT};
-                let watches: Vec<(i32, u32)> =
-                    ep.lock().watches.values().filter(|w| w.events != EPOLLONESHOT && !w.reported).map(|w| (w.fd, w.events)).collect();
-                let ready = watches.iter().any(|&(fd, events)| {
-                    self.get(fd as usize).map_or(false, |d| self.readiness_at(d, depth + 1) & (events | EPOLLERR | EPOLLHUP) != 0)
+                use crate::compat::linux::epoll::{EPOLLERR, EPOLLET, EPOLLHUP, EPOLLONESHOT};
+                // wave11 GD: ready exactly when epoll_wait would report something
+                // (`epoll_collect_ready`): not for an edge-triggered watch whose object saw
+                // no new edge, nor for a watch whose file is gone. Otherwise a poll on the
+                // epoll descriptor says "ready" while epoll_wait finds nothing, forever:
+                // kded6, plasmashell and udisksd spun at 80,000 ppoll + epoll_wait calls a
+                // second each on an idle desktop (System Monitor's constant 100 %)
+                let watches: Vec<crate::compat::linux::epoll::EpollWatch> =
+                    ep.lock().watches.values().filter(|w| w.events != EPOLLONESHOT && !w.reported).copied().collect();
+                let ready = watches.iter().any(|w| {
+                    self.get(w.fd as usize).map_or(false, |d| {
+                        if w.file != 0 && d.object_id() != w.file {
+                            return false;
+                        }
+                        if w.events & EPOLLET != 0 {
+                            if let FileDescriptor::Device(dev) = d {
+                                if dev.edges().is_some_and(|e| e == w.seen) {
+                                    return false;
+                                }
+                            }
+                        }
+                        self.readiness_at(d, depth + 1) & (w.events | EPOLLERR | EPOLLHUP) != 0
+                    })
                 });
                 if ready { 0x0001 } else { 0 }
             }

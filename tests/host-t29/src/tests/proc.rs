@@ -747,7 +747,9 @@ fn default_actions_terminate_or_stop() {
     post_process(3321, SIGQUIT);
     panics_with("task::exit_group", || deliver_on_syscall_return(&mut f, &mut fpu, 39));
     assert_eq!(with_proc(3321, |p| p.exit_status), Some(SIGQUIT as i32 | 0x80));
-    assert!(fake::called("log:[linux] pid 3321 killed by signal 3 (core dumped)"));
+    // (wave11 GD: with the thread's name and executable)
+    assert!(fake::called("log:[linux] pid 3321 ("));
+    assert!(fake::CALLS.with_borrow(|v| v.iter().any(|c| c.starts_with("log:[linux] pid 3321 (") && c.trim_end().ends_with("killed by signal 3 (core dumped)"))));
     // A handler for SIGKILL never runs (it cannot be set; forced here): still killed
     with_proc(3321, |p| {
         p.exit_status = None;

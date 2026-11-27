@@ -61,6 +61,8 @@ pub static SIGNALLED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 pub static KICKED_CPUS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 /// What `smp::kick_pending` answers.
 pub static KICK_PENDING: AtomicBool = AtomicBool::new(false);
+/// wave11 GD: `smp::kick_for` priorities.
+pub static KICK_PRIOS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 /// `smp::switch_kick` arguments.
 pub static SWITCH_KICKS: Mutex<Vec<bool>> = Mutex::new(Vec::new());
 /// `smp::serve_tlb` calls (each one a spin while the scheduler lock was busy).

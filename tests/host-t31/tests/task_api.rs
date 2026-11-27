@@ -318,6 +318,18 @@ fn spawn_linux_chroot_runs_a_program_inside_its_root() {
     assert!(task::spawn_linux_chroot("/srv/root", "/bin/dyn", &["dyn"], 0, 0).is_ok());
 }
 
+// wave11 GD begin
+#[test]
+fn the_display_and_input_services_run_at_the_highest_priority() {
+    let _w = booted();
+    frames();
+    for ep in [hydra_hosttests_t31::ipc::protocol::ENDPOINT_DISPLAY_DEV, hydra_hosttests_t31::ipc::protocol::ENDPOINT_INPUT_SERVER] {
+        let s = task::spawn_service("ui", &static_pie(), &["/drivers/ui"], ep).unwrap().0;
+        assert_eq!(with(s, |t| t.priority), TaskPriority::Realtime);
+    }
+}
+// wave11 GD end
+
 #[test]
 fn spawn_service_starts_a_driver_as_a_native_server() {
     let _w = booted();

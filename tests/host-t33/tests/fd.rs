@@ -527,3 +527,65 @@ fn a_shared_offset_moves_in_whole_steps() {
     assert_eq!(v.len(), 2000);
     assert_eq!(c.get(), 2000);
 }
+
+// wave11 GD begin
+/// A device that is always readable, with an edge count.
+struct EdgeDev(u64);
+
+impl CharDevice for EdgeDev {
+    fn read(&self, _buf: &mut [u8]) -> i64 {
+        0
+    }
+    fn poll_events(&self) -> u32 {
+        EPOLLIN
+    }
+    fn add_wait_queues(&self, waits: &mut WaitSet) {
+        waits.polled = true;
+    }
+    fn rdev(&self) -> u64 {
+        0
+    }
+    fn path(&self) -> String {
+        "/dev/edge".into()
+    }
+    fn set_nonblock(&self, _on: bool) {}
+    fn nonblock(&self) -> bool {
+        false
+    }
+    fn edges(&self) -> Option<u64> {
+        Some(self.0)
+    }
+}
+
+#[test]
+fn an_epoll_descriptor_is_ready_only_when_epoll_wait_would_report() {
+    use hydra_hosttests_t33::compat::linux::epoll::EPOLLET;
+    setup();
+    let mut t = FdTable::new_default();
+    let d = t.alloc_fd(FileDescriptor::Device(Arc::new(EdgeDev(5)))).unwrap();
+    let ep = Arc::new(Mutex::new(EpollInstance::default()));
+    ep.lock().watch(d as i32, EPOLLIN | EPOLLET);
+    let epd = FileDescriptor::Epoll(ep.clone());
+    // Never reported yet: ready
+    assert_eq!(t.readiness(&epd), 0x1);
+    // Reported at edge 5, no new edge since: not ready (epoll_wait would find nothing;
+    // a poll saying "ready" made the caller spin)
+    ep.lock().watches.values_mut().for_each(|w| w.seen = 5);
+    assert_eq!(t.readiness(&epd), 0);
+    // A new edge: ready again
+    ep.lock().watches.values_mut().for_each(|w| w.seen = 4);
+    assert_eq!(t.readiness(&epd), 0x1);
+    // Level-triggered: the edge count does not matter
+    ep.lock().watches.values_mut().for_each(|w| {
+        w.events = EPOLLIN;
+        w.seen = 5;
+    });
+    assert_eq!(t.readiness(&epd), 0x1);
+    // The watched file was closed and the number reused: not that watch's file
+    let id = t.get(d).unwrap().object_id();
+    ep.lock().watches.values_mut().for_each(|w| w.file = id + 1);
+    assert_eq!(t.readiness(&epd), 0);
+    ep.lock().watches.values_mut().for_each(|w| w.file = id);
+    assert_eq!(t.readiness(&epd), 0x1);
+}
+// wave11 GD end

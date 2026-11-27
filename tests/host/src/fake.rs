@@ -123,6 +123,11 @@ pub struct Task {
 pub struct TaskId(pub u64);
 
 impl Task {
+    /// *stub* wave11 GD: the executable (the name here).
+    pub fn exe_path(&self) -> &str {
+        self.name
+    }
+
     /// Another thread of the current process, for [`SIBLINGS`].
     pub fn sibling(tid: u64) -> Task {
         Task {

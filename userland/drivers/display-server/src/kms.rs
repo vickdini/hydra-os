@@ -69,6 +69,14 @@ pub const FMT_XRGB8888: u32 = 0x3432_5258;
 pub const FMT_ARGB8888: u32 = 0x3432_5241;
 
 pub const CURSOR_SIZE: u32 = 64;
+/// wave11 GD: rows the screen thread copies per band (1920-pixel rows: about 0.2 ms a band
+/// on the NUC).
+pub const BAND_ROWS: u32 = 64;
+
+/// wave11 GD: the smallest rectangle holding `a` and `b` (`x0, y0, x1, y1`).
+pub fn union_rect(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
+    (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+}
 const PAGE: u64 = 4096;
 /// `DRM_EVENT_VBLANK`, `DRM_EVENT_FLIP_COMPLETE`.
 pub const EV_VBLANK: u32 = 1;
@@ -236,6 +244,9 @@ pub struct Stats {
     pub composed_px: u64,
     pub written_px: u64,
     // wave11 GG end
+    /// wave11 GD: the longest wait from a flip to the end of its picture's copy (the copy
+    /// runs in bands on the screen thread, cursor moves served in between).
+    pub lat_max_ns: u64,
 }
 
 /// The device's state.
@@ -262,6 +273,14 @@ pub struct Kms {
     /// The screen was taken for a session (until given back).
     taken: bool,
     pub pending: Vec<Pending>,
+    /// wave11 GD: the part of the screen (`x0, y0, x1, y1`) a flip changed and the screen
+    /// thread has not copied yet ([`Kms::copy_band`]), when that began, and the copy's time
+    /// so far.
+    dirty: Option<(u32, u32, u32, u32)>,
+    dirty_since: u64,
+    dirty_ns: u64,
+    /// wave11 GD: flip completions waiting for that copy to end (then for the next blank).
+    flip_wait: Vec<Pending>,
     /// Since when no file is open, no master, the screen still taken (the grace timer).
     gone_since: Option<u64>,
     pub screen: Box<dyn Screen>,
@@ -366,6 +385,10 @@ impl Kms {
             next_map_pgoff: 0x10_0000,
             taken: false,
             pending: Vec::new(),
+            dirty: None,
+            dirty_since: 0,
+            dirty_ns: 0,
+            flip_wait: Vec::new(),
             gone_since: None,
             screen,
             vblank: dcore::Vblank::new(refresh_mhz),
@@ -403,6 +426,7 @@ impl Kms {
             self.scanout = None;
         }
         self.pending.retain(|p| p.file != id);
+        self.flip_wait.retain(|p| p.file != id);
         if self.master == Some(id) {
             self.master = None;
             self.cursor_bo = None;
@@ -538,8 +562,16 @@ impl Kms {
         if !self.shown() || self.dpms != 0 {
             return;
         }
+        let dt = self.draw_part(r);
+        self.stats.presents += 1;
+        self.stats.copy_ns += dt;
+        self.stats.copy_max_ns = self.stats.copy_max_ns.max(dt);
+    }
+
+    /// Draws rectangle `r` of the picture, then the cursor's areas; the time it took.
+    fn draw_part(&mut self, r: (u32, u32, u32, u32)) -> u64 {
         let t0 = self.screen.now_ns();
-        let Some(t) = self.screen.begin() else { return };
+        let Some(t) = self.screen.begin() else { return 0 };
         let src = self.scanout.as_ref().map(|f| f.src());
         // wave11 GG: rows composed with the cursor in RAM, only changed blocks written
         let cur = self.cursor_bo.as_ref().map(|(bo, w, h)| dcore::Cursor { base: bo.mem.ptr(), len: bo.size, w: *w, h: *h });
@@ -560,11 +592,66 @@ impl Kms {
         }
         self.drawn_cursor = now;
         self.screen.end();
-        let dt = self.screen.now_ns().saturating_sub(t0);
-        self.stats.presents += 1;
-        self.stats.copy_ns += dt;
-        self.stats.copy_max_ns = self.stats.copy_max_ns.max(dt);
+        self.screen.now_ns().saturating_sub(t0)
     }
+
+    // wave11 GD begin: the flip's copy in bands
+    /// A flip changed rectangle `r`: the screen thread copies it ([`Self::copy_band`]), so
+    /// the flip returns at once and the compositor goes on (input, cursor moves) while the
+    /// picture goes out. Nothing to copy while the session does not show (it is repainted
+    /// whole when it shows again).
+    fn damage(&mut self, r: (u32, u32, u32, u32)) {
+        if !self.shown() || self.dpms != 0 {
+            return;
+        }
+        self.dirty = Some(match self.dirty {
+            None => {
+                self.dirty_since = self.screen.now_ns();
+                self.dirty_ns = 0;
+                r
+            }
+            Some(d) => union_rect(d, r),
+        });
+    }
+
+    /// Whether a copy waits for the screen thread.
+    pub fn copy_pending(&self) -> bool {
+        self.dirty.is_some()
+    }
+
+    /// The screen thread copies the next band of at most [`BAND_ROWS`] rows of the changed
+    /// part (the lock is released between bands: a cursor move waits for one band at most,
+    /// never for a whole picture). Returns whether more remains. At the end the waiting
+    /// flips complete at the next blank.
+    pub fn copy_band(&mut self) -> bool {
+        let Some((x0, y0, x1, y1)) = self.dirty else { return false };
+        if !self.shown() || self.dpms != 0 {
+            self.dirty = None;
+            self.flips_copied();
+            return false;
+        }
+        let yb = y0.saturating_add(BAND_ROWS).min(y1);
+        self.dirty_ns += self.draw_part((x0, y0, x1, yb));
+        if yb < y1 {
+            self.dirty = Some((x0, yb, x1, y1));
+            return true;
+        }
+        self.dirty = None;
+        self.stats.presents += 1;
+        self.stats.copy_ns += self.dirty_ns;
+        self.stats.copy_max_ns = self.stats.copy_max_ns.max(self.dirty_ns);
+        let lat = self.screen.now_ns().saturating_sub(self.dirty_since);
+        self.stats.lat_max_ns = self.stats.lat_max_ns.max(lat);
+        self.flips_copied();
+        false
+    }
+
+    /// The flips whose picture is out complete at the next blank.
+    fn flips_copied(&mut self) {
+        let w = core::mem::take(&mut self.flip_wait);
+        self.pending.extend(w);
+    }
+    // wave11 GD end
 
     /// Repaints the whole screen from the picture.
     pub fn present(&mut self) {
@@ -1199,7 +1286,7 @@ impl Kms {
                 if flags & !0x3 != 0 {
                     return Err(EINVAL);
                 }
-                if self.pending.iter().any(|p| p.file == id && p.kind == EV_FLIP) {
+                if self.pending.iter().chain(self.flip_wait.iter()).any(|p| p.file == id && p.kind == EV_FLIP) {
                     return Err(EBUSY);
                 }
                 let fb = self.fbs.get(&fb_id).cloned().ok_or(ENOENT)?;
@@ -1207,9 +1294,19 @@ impl Kms {
                 self.file(id)?.last_scanout = Some(fb.clone());
                 self.scanout = Some(fb);
                 self.stats.flips += 1;
-                self.present();
+                // wave11 GD: copied by the screen thread (the caller kicks it); completed at
+                // the first blank after the copy. A flip without the event flag asks for no
+                // completion: it returns at once too and its picture goes out with the bands
+                // (the next flip, with or without an event, takes over the copy; its own
+                // completion still waits for the whole picture)
+                self.damage((0, 0, self.width, self.height));
                 if flags & 1 != 0 {
-                    self.pending.push(Pending { file: id, kind: EV_FLIP, user_data });
+                    let p = Pending { file: id, kind: EV_FLIP, user_data };
+                    if self.dirty.is_some() {
+                        self.flip_wait.push(p);
+                    } else {
+                        self.pending.push(p);
+                    }
                 }
                 Ok(0)
             }

@@ -536,6 +536,10 @@ pub mod task {
         pub fn schedule_now(&mut self, ctx: &mut ExceptionContext) {
             rec!("sched::schedule_now {}", ctx.vector);
         }
+        /// wave11 GD: a wakeup preemption's pass.
+        pub fn preempt_check(&mut self, ctx: &mut ExceptionContext) {
+            rec!("sched::preempt_check {}", ctx.vector);
+        }
         pub fn apply_wakes(&mut self) {
             rec!("sched::apply_wakes");
         }
