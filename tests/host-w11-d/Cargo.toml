@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w11_d"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group D host unit tests (wave 11): lx-net's link traffic counters in netlink link messages (linkstats.rs), compiled from their own sources"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

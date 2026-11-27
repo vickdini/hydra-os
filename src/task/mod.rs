@@ -385,7 +385,10 @@ pub fn spawn_service(name: &'static str, image: &[u8], args: &[&str], endpoint: 
     let loaded = scheduler::load_linux_image(source, path, args, 0, 0, None)?;
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut sched = SCHEDULER.lock();
-        let id = sched.spawn_linux_process(name, loaded, path, args, TaskPriority::High, 0, 0, None)?;
+        // wave11 GD: the pointer's and the screen's services before the other services (a
+        // cursor move waits for no file or network work)
+        let priority = if endpoint == crate::ipc::protocol::ENDPOINT_DISPLAY_DEV || endpoint == crate::ipc::protocol::ENDPOINT_INPUT_SERVER { TaskPriority::Realtime } else { TaskPriority::High };
+        let id = sched.spawn_linux_process(name, loaded, path, args, priority, 0, 0, None)?;
         sched.with_task_mut(id, |t| {
             t.personality = TaskPersonality::Hydra;
             t.service = Some(endpoint);

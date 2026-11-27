@@ -314,11 +314,11 @@ fn kicks_from_a_system_call_wait_for_its_end() {
     assert!(smp::idle_halting(smp::runnable_gen()));
     host::set_cpu(0);
     smp::kick_idle();
-    smp::switch_kick(false);
+    smp::switch_kick(false, 0);
     assert!(!smp::kick_pending());
     assert!(stubs::take_calls().is_empty());
     smp::kick_idle();
-    smp::switch_kick(true);
+    smp::switch_kick(true, 0);
     assert_eq!(stubs::take_calls(), vec!["prof::ipi_sent true"]);
     stubs::task::CURRENT_SYSCALL.store(u64::MAX, SeqCst);
     smp::bkl_exit();
@@ -483,3 +483,70 @@ fn per_cpu_blocks_and_counters() {
     assert!(P.load(SeqCst).is_null());
     assert!(P.swap(&mut x, SeqCst).is_null());
 }
+
+// wave11 GD begin
+#[test]
+fn a_high_priority_wakeup_preempts_the_cpu_with_the_least_urgent_work() {
+    // The choice: another live CPU running lower priority work, the lowest
+    let cpus = [(true, 2u8, 0u32), (true, 0, 0), (true, 3, 0), (false, 0, 0)];
+    assert_eq!(smp::preempt_victim(0, 4, 3, 0, |c| cpus[c]), Some(1));
+    assert_eq!(smp::preempt_victim(1, 4, 3, 0, |c| cpus[c]), Some(0));
+    assert_eq!(smp::preempt_victim(1, 3, 2, 0, |c| cpus[c]), None, "nothing less urgent elsewhere");
+    assert_eq!(smp::preempt_victim(0, 1, 4, 0, |c| cpus[c]), None, "only this CPU");
+    // A normal task: only a CPU running a busy normal thread that used far more
+    let busy = smp::PREEMPT_BUSY;
+    let cpus = [(true, 2u8, busy * 2), (true, 2, busy * 3), (true, 2, busy / 2), (false, 2, busy * 9)];
+    assert_eq!(smp::preempt_victim(9, 4, 2, 64, |c| cpus[c]), Some(1), "the busiest");
+    assert_eq!(smp::preempt_victim(9, 4, 2, busy, |c| cpus[c]), None, "not light enough");
+    assert_eq!(smp::preempt_victim(9, 3, 1, 0, |c| cpus[c]), None, "a low priority task never");
+    // The machinery: two CPUs, none halted, both running normal work
+    let _g = serial();
+    smp::host_bring_online(2);
+    let _l = lapic(0);
+    host::set_cpu(1);
+    smp::idle_halt_ended();
+    smp::set_cur_prio(2, 0);
+    host::set_cpu(0);
+    smp::set_cur_prio(2, 0);
+    let sent = smp::RESCHED_SENT.load(SeqCst);
+    // A normal task woken: it waits for a tick
+    smp::kick_for(2, 0);
+    assert_eq!(smp::RESCHED_SENT.load(SeqCst), sent);
+    // ...unless the other CPU runs a busy normal thread
+    host::set_cpu(1);
+    smp::set_cur_prio(2, smp::PREEMPT_BUSY * 4);
+    host::set_cpu(0);
+    smp::kick_for(2, 0);
+    assert_eq!(smp::RESCHED_SENT.load(SeqCst), sent + 1);
+    smp::kick_for(2, 0);
+    assert_eq!(smp::RESCHED_SENT.load(SeqCst), sent + 1, "asked already");
+    host::set_cpu(1);
+    assert!(smp::take_resched());
+    smp::set_cur_prio(2, 0);
+    host::set_cpu(0);
+    let sent = sent + 1;
+    // A high priority one: CPU 1 is asked once
+    smp::kick_for(3, 0);
+    assert_eq!(smp::RESCHED_SENT.load(SeqCst), sent + 1);
+    assert!(!smp::take_resched(), "not this CPU");
+    host::set_cpu(1);
+    assert!(smp::take_resched());
+    assert!(!smp::take_resched());
+    // Deferred in a system call: sent at its end only if high work is left over
+    host::set_cpu(0);
+    stubs::task::CURRENT_SYSCALL.store(39, SeqCst);
+    smp::bkl_enter();
+    smp::kick_for(3, 0);
+    smp::switch_kick(true, 2);
+    assert_eq!(smp::RESCHED_SENT.load(SeqCst), sent + 1, "this CPU ran the woken task");
+    smp::kick_for(3, 0);
+    smp::flush_kick();
+    assert_eq!(smp::RESCHED_SENT.load(SeqCst), sent + 2);
+    stubs::task::CURRENT_SYSCALL.store(u64::MAX, SeqCst);
+    smp::bkl_exit();
+    host::set_cpu(1);
+    assert!(smp::take_resched());
+    host::set_cpu(0);
+    smp::host_bring_online(1);
+}
+// wave11 GD end

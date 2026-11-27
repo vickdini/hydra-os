@@ -949,10 +949,16 @@ pub mod linux_stubs {
         pub const EPOLLERR: u32 = 0x008;
         pub const EPOLLHUP: u32 = 0x010;
         pub const EPOLLONESHOT: u32 = 1 << 30;
+        pub const EPOLLET: u32 = 1 << 31;
+        /// (wave11 GD: the kernel's name, with the file and the edge count seen)
+        pub type EpollWatch = Watch;
+        #[derive(Clone, Copy)]
         pub struct Watch {
             pub fd: i32,
             pub events: u32,
             pub reported: bool,
+            pub file: usize,
+            pub seen: u64,
         }
         #[derive(Default)]
         pub struct EpollInstance {
@@ -961,7 +967,7 @@ pub mod linux_stubs {
         impl EpollInstance {
             pub fn watch(&mut self, fd: i32, events: u32) {
                 let k = self.watches.len() as u64;
-                self.watches.insert(k, Watch { fd, events, reported: false });
+                self.watches.insert(k, Watch { fd, events, reported: false, file: 0, seen: u64::MAX });
             }
         }
     }

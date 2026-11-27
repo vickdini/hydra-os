@@ -17,7 +17,7 @@
 //! and enables its local APIC; the CPU is then online and waits.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use spin::Mutex;
 
@@ -403,27 +403,118 @@ static KICK_DEFERRED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }
 /// not have run before the call ended anyway: it resumes in the kernel, which needs the
 /// kernel lock the caller holds.
 pub fn kick_idle() {
+    kick_for(0, u32::MAX);
+}
+
+// wave11 GD begin: wakeup preemption across CPUs
+/// The priority (`TaskPriority as u8`) of the task each CPU runs (set at every switch).
+static CUR_PRIO: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
+/// Per CPU: the highest priority among the tasks its system call woke while the kick
+/// waited ([`KICK_DEFERRED`]).
+static KICK_PRIO: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
+/// The recent CPU use (`Task::recent`) of the task each CPU runs, when it was switched to.
+static CUR_RECENT: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+/// Per CPU: the least recent CPU use among the tasks its system call woke while the kick
+/// waited.
+static KICK_RECENT: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(u32::MAX) }; MAX_CPUS];
+/// A normal task preempts another CPU's normal one only if that one used at least this
+/// much CPU lately (`Task::recent`: 16 ticks' worth, a busy thread) ...
+pub const PREEMPT_BUSY: u32 = 16 * 64;
+/// ... and the woken one less than a quarter of it.
+pub const PREEMPT_RATIO: u32 = 4;
+/// Per CPU: another CPU woke a task of higher priority than this one runs: its next
+/// interrupt from user mode (the kick) looks for it ([`take_resched`]).
+static RESCHED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+/// Wakeup preemptions sent (for the diagnostics).
+pub static RESCHED_SENT: AtomicU64 = AtomicU64::new(0);
+
+/// [`kick_idle`] for a task of priority `prio` that used `recent` CPU lately: when no CPU
+/// is idle, the CPU running the least urgent work is interrupted to run it at once, not at
+/// its next tick (up to 10 ms later, more when other woken work queues there too): for a
+/// high priority task (the input and display services, the compositor's real-time
+/// thread) any CPU running lower priority work; for a normal one (the shell drawing the
+/// start menu) a CPU running a busy normal thread ([`PREEMPT_BUSY`], [`PREEMPT_RATIO`]).
+pub fn kick_for(prio: u8, recent: u32) {
     RUNNABLE_GEN.fetch_add(1, Ordering::SeqCst);
     if DEFER_KICKS.load(Ordering::Relaxed) && crate::task::CURRENT_SYSCALL.load(Ordering::Relaxed) != u64::MAX && bkl_held() {
-        KICK_DEFERRED[super::percpu::cpu()].store(true, Ordering::Relaxed);
+        let c = super::percpu::cpu();
+        KICK_DEFERRED[c].store(true, Ordering::Relaxed);
+        KICK_PRIO[c].fetch_max(prio, Ordering::Relaxed);
+        KICK_RECENT[c].fetch_min(recent, Ordering::Relaxed);
         return;
     }
-    kick_now();
+    kick_now_for(prio, recent);
 }
+
+/// Wakes a halted CPU, else asks the CPU that runs the least urgent work to preempt it
+/// (see [`kick_for`]).
+fn kick_now_for(prio: u8, recent: u32) {
+    if kick_now() || prio == 0 {
+        return;
+    }
+    let me = super::percpu::cpu();
+    let online = online().min(MAX_CPUS);
+    if let Some(c) = preempt_victim(me, online, prio, recent, |c| {
+        (LIVE[c].load(Ordering::Acquire) && !RESCHED[c].load(Ordering::Relaxed), CUR_PRIO[c].load(Ordering::Relaxed), CUR_RECENT[c].load(Ordering::Relaxed))
+    }) {
+        RESCHED[c].store(true, Ordering::SeqCst);
+        RESCHED_SENT.fetch_add(1, Ordering::Relaxed);
+        let apic = CPU_APIC[c].load(Ordering::Acquire);
+        if apic != u32::MAX {
+            x86_64::instructions::interrupts::without_interrupts(|| send_ipi_now(apic, TLB_VECTOR as u32));
+        }
+    }
+}
+
+/// Which CPU (not `me`, of `0..online`) to interrupt for a woken task of priority `prio`
+/// and recent use `recent`: a live one (not asked already) running lower priority work, or
+/// (high and normal priorities) a busy task of the same priority that used far more CPU
+/// lately; the lowest priority first, then the busiest. `None` when no CPU qualifies.
+/// `cpu(c)` = (live and not asked, priority of its task, that task's recent use).
+pub fn preempt_victim(me: usize, online: usize, prio: u8, recent: u32, cpu: impl Fn(usize) -> (bool, u8, u32)) -> Option<usize> {
+    (0..online)
+        .filter(|&c| c != me)
+        .filter_map(|c| {
+            let (live, p, r) = cpu(c);
+            let lighter = p == prio && prio >= 2 && r >= PREEMPT_BUSY && recent.saturating_mul(PREEMPT_RATIO) < r;
+            (live && (p < prio || lighter)).then_some((p, u32::MAX - r, c))
+        })
+        .min()
+        .map(|(_, _, c)| c)
+}
+
+/// The calling CPU switched to a task of priority `prio` that used `recent` CPU lately.
+pub fn set_cur_prio(prio: u8, recent: u32) {
+    CUR_PRIO[super::percpu::cpu()].store(prio, Ordering::Relaxed);
+    CUR_RECENT[super::percpu::cpu()].store(recent, Ordering::Relaxed);
+}
+
+/// Whether another CPU asked this one to look for a task of higher priority (cleared).
+pub fn take_resched() -> bool {
+    RESCHED[super::percpu::cpu()].load(Ordering::Relaxed) && RESCHED[super::percpu::cpu()].swap(false, Ordering::SeqCst)
+}
+// wave11 GD end
 
 /// Sends the wakeup kick the calling CPU's system call deferred, if any (the call is
 /// returning to user mode: the woken task needs another CPU).
 pub fn flush_kick() {
-    if KICK_DEFERRED[super::percpu::cpu()].swap(false, Ordering::Relaxed) {
-        kick_now();
+    let c = super::percpu::cpu();
+    if KICK_DEFERRED[c].swap(false, Ordering::Relaxed) {
+        kick_now_for(KICK_PRIO[c].swap(0, Ordering::Relaxed), KICK_RECENT[c].swap(u32::MAX, Ordering::Relaxed));
     }
 }
 
 /// The calling CPU switches tasks: a kick its system call deferred is sent only if
-/// `others_ready` (tasks made runnable remain after this CPU picked its next task).
-pub fn switch_kick(others_ready: bool) {
-    if KICK_DEFERRED[super::percpu::cpu()].swap(false, Ordering::Relaxed) && others_ready {
-        kick_now();
+/// `others_ready` (tasks made runnable remain after this CPU picked its next task), for
+/// work of priority `others_prio` at most (the highest among them; wave11 GD).
+pub fn switch_kick(others_ready: bool, others_prio: u8) {
+    let c = super::percpu::cpu();
+    if KICK_DEFERRED[c].swap(false, Ordering::Relaxed) {
+        let prio = KICK_PRIO[c].swap(0, Ordering::Relaxed);
+        let recent = KICK_RECENT[c].swap(u32::MAX, Ordering::Relaxed);
+        if others_ready {
+            kick_now_for(prio.min(others_prio), recent);
+        }
     }
 }
 
@@ -432,13 +523,13 @@ pub fn kick_pending() -> bool {
     KICK_DEFERRED[super::percpu::cpu()].load(Ordering::Relaxed)
 }
 
-/// Wakes one halted idle CPU other than this one (see [`kick_idle`]).
-fn kick_now() {
+/// Wakes one halted idle CPU other than this one (see [`kick_idle`]); whether there was one.
+fn kick_now() -> bool {
     let me = 1u64 << super::percpu::cpu();
     loop {
         let halted = HALTED.load(Ordering::SeqCst) & !me;
         if halted == 0 {
-            return;
+            return false;
         }
         let c = halted.trailing_zeros() as usize;
         // Its bit is cleared by whoever wakes it: one IPI per halt (the TLB vector's
@@ -451,7 +542,7 @@ fn kick_now() {
                 x86_64::instructions::interrupts::without_interrupts(|| send_ipi_now(apic, TLB_VECTOR as u32));
                 crate::compat::linux::prof::ipi_sent(true, t0);
             }
-            return;
+            return true;
         }
     }
 }

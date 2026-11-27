@@ -63,6 +63,10 @@ fn addfb2(k: &mut Kms, env: &FakeEnv, f: u32, handle: u32, pitch: u32, w: u32, h
 }
 
 fn setcrtc(k: &mut Kms, env: &FakeEnv, f: u32, fb: u32) -> i64 {
+    setcrtc_wh(k, env, f, fb, W, H)
+}
+
+fn setcrtc_wh(k: &mut Kms, env: &FakeEnv, f: u32, fb: u32, w: u32, h: u32) -> i64 {
     let conn = [CONNECTOR_ID];
     let mut b = [0u8; 104];
     put64(&mut b, 0, conn.as_ptr() as u64);
@@ -70,11 +74,19 @@ fn setcrtc(k: &mut Kms, env: &FakeEnv, f: u32, fb: u32) -> i64 {
     put32(&mut b, 12, CRTC_ID);
     put32(&mut b, 16, fb);
     put32(&mut b, 32, 1);
-    b[36..104].copy_from_slice(&mode_info(W, H));
+    b[36..104].copy_from_slice(&mode_info(w, h));
     call(k, env, f, 0xA2, &mut b)
 }
 
+/// A flip, its picture then copied as display-server's screen thread does (wave11 GD).
 fn flip(k: &mut Kms, env: &FakeEnv, f: u32, fb: u32, data: u64) -> i64 {
+    let r = flip_only(k, env, f, fb, data);
+    while k.copy_band() {}
+    r
+}
+
+/// A flip alone: its copy waits for [`Kms::copy_band`].
+fn flip_only(k: &mut Kms, env: &FakeEnv, f: u32, fb: u32, data: u64) -> i64 {
     let mut b = [0u8; 24];
     put32(&mut b, 0, CRTC_ID);
     put32(&mut b, 4, fb);
@@ -595,3 +607,118 @@ fn dumb_buffers_are_limited_per_file_and_in_all() {
     k.close(7);
     assert_eq!(call(&mut k, &env, 8, 0xB2, &mut b), 0);
 }
+
+// wave11 GD begin: flips copied in bands by the screen thread
+
+const TH: u32 = 200;
+
+/// A 64 x 200 screen (four bands) with a compositor showing a picture of `v`, and a second
+/// buffer for flips: (kms, view, env, second framebuffer, its map offset, size).
+fn tall_desktop(v: u32) -> (Kms, Arc<ScreenView>, FakeEnv, u32, u64, u64) {
+    let (s, view) = FakeScreen::new(W, TH, true);
+    let mut k = Kms::new(s, "0000:00:02.0".into(), 60_000);
+    let env = FakeEnv::default();
+    k.open(7);
+    let (h, pitch, size) = dumb(&mut k, &env, 7, W, TH);
+    let off = map_off(&mut k, &env, 7, h);
+    fill(&k, off, size, v);
+    let fb = addfb2(&mut k, &env, 7, h, pitch, W, TH) as u32;
+    assert_eq!(setcrtc_wh(&mut k, &env, 7, fb, W, TH), 0);
+    let (h2, pitch2, size2) = dumb(&mut k, &env, 7, W, TH);
+    let off2 = map_off(&mut k, &env, 7, h2);
+    let fb2 = addfb2(&mut k, &env, 7, h2, pitch2, W, TH) as u32;
+    (k, view, env, fb2, off2, size2)
+}
+
+#[test]
+fn a_flip_returns_at_once_and_is_copied_band_by_band() {
+    assert_eq!(union_rect((1, 2, 3, 4), (0, 3, 5, 4)), (0, 2, 5, 4));
+    let (mut k, v, env, fb2, off2, size2) = tall_desktop(1);
+    assert_eq!(v.pixel(0, TH - 1), 1);
+    fill(&k, off2, size2, 2);
+    let presents = k.stats.presents;
+    assert_eq!(flip_only(&mut k, &env, 7, fb2, 0xAB), 0);
+    // Nothing copied yet, nothing to complete yet
+    assert!(k.copy_pending());
+    assert_eq!(v.pixel(0, 0), 1);
+    assert!(k.next_due(0).is_none(), "the completion waits for the copy");
+    // A second flip meanwhile: busy, as while its completion waits
+    assert_eq!(flip_only(&mut k, &env, 7, fb2, 0xAC), EBUSY);
+    // Four bands of at most BAND_ROWS rows
+    assert!(k.copy_band());
+    assert_eq!((v.pixel(0, BAND_ROWS - 1), v.pixel(0, BAND_ROWS)), (2, 1));
+    assert!(k.copy_band());
+    assert!(k.copy_band());
+    assert_eq!(v.pixel(0, TH - 1), 1);
+    assert!(!k.copy_band());
+    assert_eq!(v.pixel(0, TH - 1), 2);
+    assert!(!k.copy_pending());
+    assert!(!k.copy_band(), "nothing more");
+    assert_eq!(k.stats.presents, presents + 1, "one picture");
+    // Completed at the next blank after the copy
+    let now = 50 * PERIOD + 7;
+    let due = k.next_due(now).unwrap();
+    assert_eq!(due, 51 * PERIOD);
+    assert_eq!(k.vblank_tick(due), 1);
+    let ev = k.take_events(7, 64).unwrap().unwrap();
+    assert_eq!(get64(&ev, 8), 0xAB);
+    assert_eq!(v.open.load(std::sync::atomic::Ordering::SeqCst), 0, "begin/end balanced");
+}
+
+#[test]
+fn a_cursor_move_during_a_copy_shows_at_once() {
+    let (mut k, v, env, fb2, off2, size2) = tall_desktop(0x0101_0101);
+    let (ch, _p, csize) = dumb(&mut k, &env, 7, 64, 64);
+    let coff = map_off(&mut k, &env, 7, ch);
+    fill(&k, coff, csize, 0xFFFF_FFFF);
+    fill(&k, off2, size2, 0x0202_0202);
+    assert_eq!(flip_only(&mut k, &env, 7, fb2, 1), 0);
+    assert!(k.copy_band());
+    // The pointer moves into the part not copied yet: drawn now, over the old picture
+    let mut b = [0u8; 36];
+    put32(&mut b, 0, 3); // BO | MOVE
+    put32(&mut b, 4, CRTC_ID);
+    put32(&mut b, 8, 10);
+    put32(&mut b, 12, 150);
+    put32(&mut b, 16, 4);
+    put32(&mut b, 20, 4);
+    put32(&mut b, 24, ch);
+    assert_eq!(call(&mut k, &env, 7, 0xBB, &mut b), 0);
+    assert_eq!(v.pixel(10, 150) & 0xFF_FFFF, 0xFF_FFFF);
+    assert_eq!(v.pixel(14, 150), 0x0101_0101, "beside it: still the old picture");
+    while k.copy_band() {}
+    // The rest of the new picture came, with the cursor kept where it is
+    assert_eq!(v.pixel(10, 150) & 0xFF_FFFF, 0xFF_FFFF);
+    assert_eq!(v.pixel(14, 150), 0x0202_0202);
+    assert_eq!(v.pixel(0, TH - 1), 0x0202_0202);
+}
+
+#[test]
+fn a_copy_stops_when_the_console_shows_and_closing_drops_waiting_flips() {
+    let (mut k, v, env, fb2, off2, size2) = tall_desktop(1);
+    fill(&k, off2, size2, 2);
+    assert_eq!(flip_only(&mut k, &env, 7, fb2, 1), 0);
+    assert!(k.copy_band());
+    // Ctrl+Alt+F1: the rest is not drawn; the completion is held back as before
+    v.state.store(SCREEN_HIDDEN, std::sync::atomic::Ordering::SeqCst);
+    assert!(!k.copy_band());
+    assert!(!k.copy_pending());
+    assert_eq!(v.pixel(0, TH - 1), 1, "the console's screen is not touched");
+    assert!(k.next_due(0).is_none());
+    assert_eq!(k.vblank_tick(PERIOD), 0);
+    assert_eq!(k.stats.held, 1);
+    // Shown again: repainted whole, then completed
+    v.state.store(SCREEN_SHOWN, std::sync::atomic::Ordering::SeqCst);
+    k.state_changed();
+    assert_eq!(v.pixel(0, TH - 1), 2);
+    let due = k.next_due(3 * PERIOD + 1).unwrap();
+    assert_eq!(k.vblank_tick(due), 1);
+    assert!(k.take_events(7, 64).is_some());
+    // A flip whose copy is under way, then the compositor closes: nothing completes
+    assert_eq!(flip_only(&mut k, &env, 7, fb2, 2), 0);
+    assert!(k.copy_pending());
+    k.close(7);
+    while k.copy_band() {}
+    assert!(k.next_due(0).is_none(), "no completion for a closed file");
+}
+// wave11 GD end

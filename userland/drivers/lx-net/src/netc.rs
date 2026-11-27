@@ -287,6 +287,17 @@ pub fn iface() -> Iface {
     }
 }
 
+/// wave11 GD: traffic of the loopback interface and the card (net-server's counters), as
+/// (rx packets, rx bytes, tx packets, tx bytes).
+pub fn traffic() -> [(u64, u64, u64, u64); 2] {
+    if status(NETS_ST_MAGIC) != NETS_MAGIC {
+        return [(0, 0, 0, 0); 2];
+    }
+    let (lo_bytes, lo_packets) = (status(NETS_ST_LO_COUNTERS), status(NETS_ST_LO_COUNTERS + 1));
+    let e = |i: usize| status(NETS_ST_ETH_COUNTERS + i);
+    [(lo_packets, lo_bytes, lo_packets, lo_bytes), (e(0), e(1), e(2), e(3))]
+}
+
 /// The card's link-local IPv6 address (`fe80::` + modified EUI-64 of the MAC).
 pub fn link_local6() -> Option<[u8; 16]> {
     let i = iface();

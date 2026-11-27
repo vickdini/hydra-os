@@ -2212,7 +2212,12 @@ fn die(sig: u32) -> ! {
     let (_, pid) = current_ids();
     let core = matches!(sig, SIGQUIT | SIGILL | SIGTRAP | SIGABRT | SIGBUS | SIGFPE | SIGSEGV | SIGSYS);
     if sig != SIGPIPE && sig != SIGTERM && sig != SIGINT && sig != SIGKILL {
-        crate::kprintln!("[linux] pid {} killed by signal {}{}", pid, sig, if core { " (core dumped)" } else { "" });
+        // wave11 GD: with the thread's name (which program aborted at power-off, NUC run 16)
+        let (tid, _) = current_ids();
+        let exe = crate::task::with_current_task_mut(|t| alloc::string::String::from(t.exe_path())).unwrap_or_default();
+        let comm = crate::lx::proc::comm_or_exe(tid, &exe);
+        let name = core::str::from_utf8(&comm[..comm.iter().position(|&b| b == 0).unwrap_or(16)]).unwrap_or("?");
+        crate::kprintln!("[linux] pid {} ({}, {}) killed by signal {}{}", pid, name, exe, sig, if core { " (core dumped)" } else { "" });
     }
     set_exit_status(pid, (sig as i32) | if core { 0x80 } else { 0 });
     crate::task::exit_group();

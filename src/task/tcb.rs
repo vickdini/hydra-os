@@ -415,6 +415,11 @@ pub struct Task {
     /// preempted tasks go first, so under a steady stream of events plain ready tasks (a
     /// new thread, a computation) would wait indefinitely; past a limit they go first.
     pub passed_over: u32,
+    /// wave11 GD: recent CPU use (ticks run, decaying; see `scheduler::RECENT_TICK`): of
+    /// ready tasks of one priority the least used runs first, and only a less used one
+    /// preempts a running task when woken (a mostly sleeping thread, the shell's or the
+    /// compositor's, goes ahead of a browser's busy ones).
+    pub recent: u32,
     /// Saved x87/SSE register state while the task is not running.
     pub fpu: Box<crate::arch::idt::FpuState>,
 }
@@ -483,6 +488,7 @@ impl Task {
             wake_ns: 0,
             preempted: false,
             passed_over: 0,
+            recent: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),

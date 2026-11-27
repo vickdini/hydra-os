@@ -592,12 +592,16 @@ pub fn exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
     // An NMI (QEMU's `nmi` monitor command, on every CPU): note where this CPU was and ask
     // for a task dump (at the next tick); nothing else, it may arrive anywhere
     // A TLB flush request: served without the kernel lock (its sender holds it)
+    // wave11 GD: or another CPU woke a task of higher priority than this one runs (a
+    // wakeup preemption, arch::smp::kick_for): from user mode, a scheduling pass
+    let mut resched = false;
     if ctx.vector == crate::arch::smp::TLB_VECTOR {
         crate::arch::smp::serve_tlb();
         crate::arch::smp::lapic_eoi();
+        resched = (ctx.cs & 3) == 3 && crate::arch::smp::take_resched();
         // A kick for a task retired while running here in user mode: on to the full path,
         // which switches away from it (below)
-        if !((ctx.cs & 3) == 3 && crate::task::current_retired()) {
+        if !((ctx.cs & 3) == 3 && crate::task::current_retired()) && !resched {
             return;
         }
     }
@@ -638,6 +642,11 @@ pub fn exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
             crate::task::TICK_DEFERRED.store(1, Ordering::Relaxed);
             return;
         }
+    } else if resched && !crate::task::current_retired() {
+        // (wave11 GD: a preemption never waits for the kernel lock; the next tick looks)
+        if !crate::arch::smp::bkl_try_enter() {
+            return;
+        }
     } else {
         crate::arch::smp::bkl_enter();
     }
@@ -674,6 +683,13 @@ pub fn exception_handler(ctx: &mut ExceptionContext, fpu: *mut FpuState) {
             if sched.handoff_server_ready() {
                 sched.schedule_now(ctx);
             }
+        }
+    }
+    // wave11 GD: a wakeup preemption from another CPU (a task retired here instead is
+    // switched away from below)
+    if resched && crate::task::is_active() && !crate::task::current_retired() && !crate::task::scheduler::handoff_active() {
+        if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+            sched.preempt_check(ctx);
         }
     }
     // A task retired while it ran here never returns to user mode: switch away (as the

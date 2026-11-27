@@ -33,6 +33,36 @@ use super::tcb::{PrivilegeMode, Task, TaskId, TaskPriority, TaskRegisters, TaskS
 
 /// Default timeslice granted to a scheduled task in PIT timer ticks (50 ms at 100 Hz).
 pub const DEFAULT_TIMESLICE_TICKS: u32 = 5; // 50ms at 100 Hz PIT timer
+
+// wave11 GD begin: recent CPU use
+/// What a tick of CPU time adds to a task's [`Task::recent`].
+pub const RECENT_TICK: u32 = 64;
+/// Every this many ticks every task's `recent` loses a quarter (a thread busy all the time
+/// settles at 4 x `RECENT_TICK` x this; one that stops is light again within a second).
+pub const RECENT_DECAY_TICKS: u64 = 25;
+/// How much less a woken task must have used than the running one to preempt it mid-slice
+/// (no ping-pong between two equally busy threads).
+pub const RECENT_MARGIN: u32 = 2 * RECENT_TICK;
+/// The tick `recent` was last decayed at.
+static RECENT_DECAYED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Whether ready task `a` (priority, recent use) goes before `b`: the higher priority, then
+/// the less used.
+pub fn runs_before(a: (TaskPriority, u32), b: (TaskPriority, u32)) -> bool {
+    a.0 > b.0 || (a.0 == b.0 && a.1 < b.1)
+}
+
+/// Whether a woken task (priority, recent use) preempts the running one mid-slice: a
+/// higher priority, or the same and clearly less CPU used lately.
+pub fn woken_preempts(woken: (TaskPriority, u32), running: (TaskPriority, u32)) -> bool {
+    woken.0 > running.0 || (woken.0 == running.0 && woken.1.saturating_add(RECENT_MARGIN) < running.1)
+}
+
+/// `recent` after a decay step.
+pub fn decayed(recent: u32) -> u32 {
+    recent - (recent >> 2)
+}
+// wave11 GD end
 /// Scheduling decisions a ready task may lose before it goes first (about 100 ms when
 /// woken tasks take every tick).
 const STARVATION_LIMIT: u32 = 10;
@@ -733,6 +763,7 @@ impl Scheduler {
             wake_ns: 0,
             preempted: false,
             passed_over: 0,
+            recent: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -845,6 +876,7 @@ impl Scheduler {
             wake_ns: 0,
             preempted: false,
             passed_over: 0,
+            recent: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -943,6 +975,7 @@ impl Scheduler {
             wake_ns: 0,
             preempted: false,
             passed_over: 0,
+            recent: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -1044,6 +1077,7 @@ impl Scheduler {
             wake_ns: 0,
             preempted: false,
             passed_over: 0,
+            recent: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -1159,6 +1193,7 @@ impl Scheduler {
             wake_ns: 0,
             preempted: false,
             passed_over: 0,
+            recent: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -1355,6 +1390,7 @@ impl Scheduler {
             wake_ns: 0,
             preempted: false,
             passed_over: 0,
+            recent: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(child_fpu),
@@ -1470,9 +1506,13 @@ impl Scheduler {
             // Also preempted: the idle task by any ready work, and any task by ready work of
             // higher priority (a timed sleep that ended, such as the timer daemons'); equal
             // priority tasks woken from timed sleeps still wait for the slice to end
-            let current_priority = self.tasks[curr_idx].priority;
+            // (wave11 GD: a woken task of the same priority only when it used clearly less
+            // CPU lately: interactive threads preempt busy ones, not the other way round)
+            let current = (self.tasks[curr_idx].priority, self.tasks[curr_idx].recent);
             let woken_waiting = self.tasks.iter().any(|t| {
-                t.state == TaskState::Ready && t.priority > TaskPriority::Idle && (t.woken || t.priority > current_priority)
+                t.state == TaskState::Ready
+                    && t.priority > TaskPriority::Idle
+                    && (t.priority > current.0 || (t.woken && (current.0 == TaskPriority::Idle || woken_preempts((t.priority, t.recent), current))))
             });
             if !woken_waiting {
                 return;
@@ -1570,15 +1610,20 @@ impl Scheduler {
 
         // First pass: high-priority service tasks (the network task) run as soon as they
         // are ready; then non-idle Ready tasks in round-robin order
-        for offset in 1..=num_tasks {
-            if next_idx.is_some() {
-                break;
+        // (wave11 GD: the highest priority first: input and display before other services)
+        // (the current task last, as in round-robin order: a yield lets the others go first)
+        if next_idx.is_none() {
+            let mut best: Option<usize> = None;
+            for offset in 1..=num_tasks {
+                let idx = (curr_idx + offset) % num_tasks;
+                if self.can_run(idx, me)
+                    && self.tasks[idx].priority >= TaskPriority::High
+                    && best.is_none_or(|b| self.tasks[idx].priority > self.tasks[b].priority && (idx != curr_idx || b == curr_idx))
+                {
+                    best = Some(idx);
+                }
             }
-            let idx = (curr_idx + offset) % num_tasks;
-            if self.can_run(idx, me) && self.tasks[idx].priority >= TaskPriority::High {
-                next_idx = Some(idx);
-                break;
-            }
+            next_idx = best;
         }
         // A ready task passed over too often runs now (the longest-waiting one), so the
         // tiers below cannot starve it
@@ -1590,12 +1635,15 @@ impl Scheduler {
                 })
                 .max_by_key(|&i| self.tasks[i].passed_over);
         }
-        // (event-woken tasks first, then tasks they preempted, then the rest)
+        // (event-woken tasks first, then tasks they preempted, then the rest; wave11 GD:
+        // within a tier the higher priority, then the least CPU used lately, then
+        // round-robin order)
         for tier in 0..3 {
+            if next_idx.is_some() {
+                break;
+            }
+            let mut best: Option<usize> = None;
             for offset in 1..=num_tasks {
-                if next_idx.is_some() {
-                    break;
-                }
                 let idx = (curr_idx + offset) % num_tasks;
                 let t = &self.tasks[idx];
                 let eligible = match tier {
@@ -1603,10 +1651,17 @@ impl Scheduler {
                     1 => t.preempted,
                     _ => true,
                 };
-                if self.can_run(idx, me) && t.priority > TaskPriority::Idle && eligible {
-                    next_idx = Some(idx);
+                // (the current task comes last in the order; it is taken only if nothing
+                // else is eligible in the tier: a yield lets the others go first)
+                if self.can_run(idx, me)
+                    && t.priority > TaskPriority::Idle
+                    && eligible
+                    && (best.is_none() || (idx != curr_idx && runs_before((t.priority, t.recent), (self.tasks[best.unwrap()].priority, self.tasks[best.unwrap()].recent))))
+                {
+                    best = Some(idx);
                 }
             }
+            next_idx = best;
         }
 
         // Second pass: If no standard task is ready, allow Idle task (priority 0); also
@@ -1646,10 +1701,8 @@ impl Scheduler {
         // A wakeup kick this CPU's system call deferred: needed only if other woken work
         // remains besides the task picked here
         if crate::arch::smp::kick_pending() {
-            let others = self.tasks.iter().enumerate().any(|(i, t)| {
-                i != next_idx && t.state == TaskState::Ready && t.priority > TaskPriority::Idle
-            });
-            crate::arch::smp::switch_kick(others);
+            let others = self.others_ready(next_idx);
+            crate::arch::smp::switch_kick(others.is_some(), others.unwrap_or(0));
         }
         self.tasks[next_idx].woken = false;
         self.tasks[next_idx].preempted = false;
@@ -1720,6 +1773,7 @@ impl Scheduler {
         let next_task = &mut self.tasks[next_idx];
         next_task.state = TaskState::Running;
         next_task.timeslice_remaining = timeslice;
+        crate::arch::smp::set_cur_prio(next_task.priority as u8, next_task.recent); // wave11 GD
         crate::memory::vm::set_current_mm(next_task.mm.as_ref());
 
         // 4b. Update hardware TSS RSP0 and SYSCALL kernel RSP for the incoming task
@@ -1864,8 +1918,8 @@ impl Scheduler {
         let slice = curr_task.timeslice_remaining.max(1);
         curr_task.timeslice_remaining = 0;
         if crate::arch::smp::kick_pending() {
-            let others = self.tasks.iter().enumerate().any(|(i, t)| i != next_idx && t.state == TaskState::Ready && t.priority > TaskPriority::Idle);
-            crate::arch::smp::switch_kick(others);
+            let others = self.others_ready(next_idx);
+            crate::arch::smp::switch_kick(others.is_some(), others.unwrap_or(0));
         }
         crate::compat::linux::prof::switched_in(self.tasks[next_idx].id.0);
         self.tasks[next_idx].woken = false;
@@ -1938,8 +1992,8 @@ impl Scheduler {
         let slice = curr_task.timeslice_remaining.max(1);
         // A wakeup kick the call deferred: needed only if other woken work remains
         if crate::arch::smp::kick_pending() {
-            let others = self.tasks.iter().enumerate().any(|(i, t)| i != next_idx && t.state == TaskState::Ready && t.priority > TaskPriority::Idle);
-            crate::arch::smp::switch_kick(others);
+            let others = self.others_ready(next_idx);
+            crate::arch::smp::switch_kick(others.is_some(), others.unwrap_or(0));
         }
         crate::compat::linux::prof::switched_in(self.tasks[next_idx].id.0);
         self.tasks[next_idx].woken = false;
@@ -2245,8 +2299,59 @@ impl Scheduler {
         self.charge(idx, ctx);
         if crate::arch::percpu::cpu() == 0 {
             self.update_load();
+            self.decay_recent();
         }
     }
+
+    // wave11 GD begin
+    /// Every [`RECENT_DECAY_TICKS`] the recent CPU use of every task loses a quarter.
+    fn decay_recent(&mut self) {
+        let now = crate::arch::pit::ticks();
+        let last = RECENT_DECAYED.load(core::sync::atomic::Ordering::Relaxed);
+        if now < last {
+            RECENT_DECAYED.store(now, core::sync::atomic::Ordering::Relaxed); // (a new clock)
+            return;
+        }
+        if now < last + RECENT_DECAY_TICKS {
+            return;
+        }
+        RECENT_DECAYED.store(now, core::sync::atomic::Ordering::Relaxed);
+        // (after a long gap, interrupts off: a few steps at most)
+        let steps = ((now - last) / RECENT_DECAY_TICKS).min(8);
+        for t in self.tasks.iter_mut() {
+            for _ in 0..steps {
+                t.recent = decayed(t.recent);
+            }
+        }
+    }
+
+    /// Whether ready work other than task `next` remains, and its highest priority (for
+    /// the wakeup kick a system call deferred: a high priority task left over may preempt
+    /// another CPU, [`crate::arch::smp::switch_kick`]).
+    fn others_ready(&self, next: usize) -> Option<u8> {
+        self.tasks
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| *i != next && t.state == TaskState::Ready && t.priority > TaskPriority::Idle)
+            .map(|(_, t)| t.priority as u8)
+            .max()
+    }
+
+    /// Another CPU's wakeup preemption ([`crate::arch::smp::take_resched`]): a pass as at a
+    /// tick, without using up the running task's timeslice; it switches only if a task of
+    /// higher priority (or a woken, less used one) is ready.
+    pub fn preempt_check(&mut self, ctx: &mut ExceptionContext) {
+        if !self.initialized || self.cur[crate::arch::percpu::cpu()] >= self.tasks.len() {
+            return;
+        }
+        let idx = self.cur[crate::arch::percpu::cpu()];
+        let t = &mut self.tasks[idx];
+        if t.state == TaskState::Running && t.timeslice_remaining > 0 {
+            t.timeslice_remaining += 1;
+        }
+        self.schedule(ctx);
+    }
+    // wave11 GD end
 
     /// Charges the time since this CPU's last accounting to task `idx`, which the timer
     /// tick interrupted (a tick that found the scheduler lock busy loses nothing: the next
@@ -2272,6 +2377,10 @@ impl Scheduler {
         if !waiting {
             let t = &mut self.tasks[idx];
             t.ticks_run += n;
+            // wave11 GD: recent use (the idle task's does not matter)
+            if self.idle_of[cpu] != Some(t.id) {
+                t.recent = t.recent.saturating_add((n.min(1000) as u32) * RECENT_TICK);
+            }
             if kernel {
                 t.ticks_sys += n;
             }
@@ -2288,6 +2397,15 @@ impl Scheduler {
     /// Whether a thread of process `tgid` is running on a CPU or ready to (`R` in `/proc`).
     pub fn process_runnable(&self, tgid: u64) -> bool {
         self.tasks.iter().any(|t| t.tgid == tgid && matches!(t.state, TaskState::Running | TaskState::Ready))
+    }
+
+    /// wave11 GD: thread `tid`'s CPU time `(ticks run, of which in the kernel)` and whether
+    /// it runs or is ready to.
+    pub fn thread_cpu(&self, tid: u64) -> Option<(u64, u64, bool)> {
+        self.tasks
+            .iter()
+            .find(|t| t.id.0 == tid && t.state != TaskState::Dead)
+            .map(|t| (t.ticks_run, t.ticks_sys, matches!(t.state, TaskState::Running | TaskState::Ready)))
     }
 
     /// CPU time of the live threads of process `tgid`: `(ticks run, of which in the kernel)`.
@@ -2347,7 +2465,8 @@ impl Scheduler {
                 TaskState::Blocked | TaskState::Sleeping { .. } if task.event_wait => {
                     crate::compat::linux::prof::wake_applied(id);
                     task.state = TaskState::Ready;
-                    crate::arch::smp::kick_idle();
+                    // (wave11 GD: a high priority task may preempt another CPU's work)
+                    crate::arch::smp::kick_for(task.priority as u8, task.recent);
                     task.event_wait = false;
                     task.woken = true;
                 }
@@ -2459,7 +2578,7 @@ impl Scheduler {
         for task in self.tasks.iter_mut() {
             if task.id == id && task.state == TaskState::Blocked {
                 task.state = TaskState::Ready;
-                crate::arch::smp::kick_idle();
+                crate::arch::smp::kick_for(task.priority as u8, task.recent); // wave11 GD
                 task.woken = true;
                 return true;
             }

@@ -709,6 +709,14 @@ pub mod lx {
         use alloc::vec::Vec;
         #[path = "../../../../../src/lx/proc_rules.rs"]
         pub mod rules;
+        /// *stub* wave11 GD: the executable's file name as `comm`.
+        pub fn comm_or_exe(_tid: u64, exe: &str) -> [u8; 16] {
+            let mut out = [0u8; 16];
+            let name = exe.rsplit('/').next().unwrap_or("").as_bytes();
+            let n = name.len().min(15);
+            out[..n].copy_from_slice(&name[..n]);
+            out
+        }
         /// *stub* wave10 G7b-1: lx-proc's prctl records (none on the host).
         pub fn attrs_on_exit(_tgid: u64) {}
         pub fn clear_approval(_tid: u64) {}

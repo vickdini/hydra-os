@@ -320,6 +320,8 @@ fn ethernet(isolated: bool) -> Option<([u8; 6], [u8; 4], [u8; 4], [u8; 4])> {
 
 fn links(isolated: bool) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
+    // wave11 GD: with their traffic counters (System Monitor's network rates)
+    let traffic = netc::traffic();
     let link = |kind: u16, index: i32, flags: u32, name: &[u8], mac: &[u8], broadcast: &[u8], mtu: u32| {
         let mut b = Vec::new();
         b.extend_from_slice(&[0, 0]);
@@ -332,6 +334,15 @@ fn links(isolated: bool) -> Vec<Vec<u8>> {
         attr(&mut b, 1, mac);
         attr(&mut b, 2, broadcast);
         attr(&mut b, 16, &[6]);
+        // (a process in a network namespace of its own sees no traffic, as /proc/net/dev)
+        let t = if isolated {
+            crate::linkstats::Traffic::default()
+        } else {
+            let (rx_packets, rx_bytes, tx_packets, tx_bytes) = traffic[(index as usize - 1).min(1)];
+            crate::linkstats::Traffic { rx_packets, rx_bytes, tx_packets, tx_bytes }
+        };
+        attr(&mut b, crate::linkstats::IFLA_STATS, &crate::linkstats::stats32(t));
+        attr(&mut b, crate::linkstats::IFLA_STATS64, &crate::linkstats::stats64(t));
         b
     };
     out.push(link(772, 1, 0x1 | 0x8 | 0x40 | 0x10000, b"lo\0", &[0; 6], &[0; 6], 65536));
