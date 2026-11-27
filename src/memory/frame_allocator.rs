@@ -539,6 +539,104 @@ fn early_grow(alloc: &mut PhysicalMemoryManager) -> bool {
 }
 
 // wave11 GK begin
+/// Whether free memory is under the reserve tmpfs and shared memory keep (1/64 of memory,
+/// at least 16 MiB): a page they need is refused then (`SIGBUS` for a mapping).
+pub fn memory_low() -> bool {
+    let fa = FRAME_ALLOCATOR.lock();
+    fa.free_memory() < (fa.total_usable_memory() / 64).max(16 << 20)
+}
+
+/// Usable memory (MiB) under which the boot log warns that the
+/// KDE desktop may not fit (measured: QEMU 2.5 GB = 2,503 MiB usable runs KDE, Firefox and
+/// Dolphin with 335 MiB free).
+pub const DESKTOP_MIN_MB: u64 = 1400;
+
+/// Free RAM below the frame allocator's floor in the low layout (the kernel image stayed in
+/// the 2-4 GiB slot, wave 11 H's option B): until the direct map is on, frames are reached
+/// at their identity addresses, which lie in the programs' low window, so this memory was
+/// never used (a 2.5 GB machine had 1.5 GB). Kept here at `ExitBootServices`, added by
+/// [`add_low_late`] once every frame is reached through the direct map.
+static LOW_HELD: Mutex<([(u64, u64); 32], usize)> = Mutex::new(([(0, 0); 32], 0));
+
+/// The lowest frame ever handed out (the real-mode area and the processors' start code
+/// below it).
+const LOW_START: u64 = 0x10_0000;
+
+/// The parts of the free `(start, pages)` regions below `floor` (from [`LOW_START`]):
+/// pure, host-tested.
+pub fn low_parts(regions: impl Iterator<Item = (u64, u64)>, floor: u64) -> alloc::vec::Vec<(u64, u64)> {
+    let mut out = alloc::vec::Vec::new();
+    if floor <= LOW_START {
+        return out;
+    }
+    for (start, pages) in regions {
+        let s = start.max(LOW_START);
+        let e = (start + pages * PAGE_SIZE).min(floor);
+        if e > s {
+            out.push((s, (e - s) / PAGE_SIZE));
+        }
+    }
+    out
+}
+
+fn hold_low(regions: impl Iterator<Item = (u64, u64)>, floor: u64) {
+    let parts = low_parts(regions, floor);
+    let mut h = LOW_HELD.lock();
+    for p in parts {
+        if h.1 < h.0.len() {
+            let n = h.1;
+            h.0[n] = p;
+            h.1 += 1;
+        }
+    }
+}
+
+/// Once the direct map is on (takeover): the free memory under the floor joins the frame
+/// allocator ([`LOW_HELD`]); then the boot log says if the desktop may not fit.
+pub fn add_low_late() {
+    let (held, n) = {
+        let mut h = LOW_HELD.lock();
+        let r = (h.0, h.1);
+        h.1 = 0;
+        r
+    };
+    let mut pages = 0;
+    {
+        let mut alloc = FRAME_ALLOCATOR.lock();
+        let limit = if alloc.refcount_entries > 0 { alloc.refcount_entries * PAGE_SIZE } else { u64::MAX };
+        for &(s, p) in &held[..n] {
+            let p = p.min(limit.saturating_sub(s) / PAGE_SIZE);
+            if p > 0 && alloc.region_count < MAX_REGIONS {
+                alloc.add_region(PhysAddr::new(s), p);
+                pages += p;
+            }
+        }
+    }
+    if pages > 0 {
+        crate::kprintln!("[mem] {} MiB of RAM below 1 GiB added to the frame allocator (reached through the direct map)", pages * PAGE_SIZE >> 20);
+    }
+    let usable = FRAME_ALLOCATOR.lock().total_usable_memory() >> 20;
+    if usable < DESKTOP_MIN_MB {
+        crate::kprintln!("[mem] only {} MiB usable: the KDE desktop needs about {} MiB; programs may be killed when memory runs out", usable, DESKTOP_MIN_MB);
+    }
+}
+
+/// The log line for a program killed because memory ran out (at most one every 10 s).
+pub fn log_out_of_memory(pid: u64, sig: &str) {
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = crate::arch::pit::uptime_ms();
+    let last = LAST.load(core::sync::atomic::Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < 10_000 {
+        return;
+    }
+    LAST.store(now.max(1), core::sync::atomic::Ordering::Relaxed);
+    let (free, total) = {
+        let fa = FRAME_ALLOCATOR.lock();
+        (fa.free_memory(), fa.total_usable_memory())
+    };
+    crate::kprintln!("[mem] out of memory: process {} gets {} (free {} MiB of {} MiB usable)", pid, sig, free >> 20, total >> 20);
+}
+
 /// Whether [`early_grow`] may take one more block from the firmware: boot services still run
 /// (`early`) and `alloc`'s region table has room to record it (a block it cannot record would
 /// be lost, and the next allocation would take another). Host-tested (`tests/host-t32`).
@@ -586,6 +684,10 @@ pub fn firmware_block(pages: u64, floor: u64, ceiling: u64) -> Option<u64> {
 /// (`entries`: type, start, pages) joins the frame allocator; the blocks taken before are
 /// loader data there and stay as they are.
 pub fn add_after_firmware(entries: impl Iterator<Item = (uefi::boot::MemoryType, u64, u64)>) {
+    // wave11 GK: the free memory under the floor is kept for [`add_low_late`]
+    let entries: alloc::vec::Vec<(uefi::boot::MemoryType, u64, u64)> = entries.collect();
+    hold_low(entries.iter().filter(|e| e.0 == uefi::boot::MemoryType::CONVENTIONAL).map(|e| (e.1, e.2)), early_floor());
+    let entries = entries.into_iter();
     let mut alloc = FRAME_ALLOCATOR.lock();
     if !EARLY.swap(false, core::sync::atomic::Ordering::SeqCst) {
         return;

@@ -136,4 +136,14 @@ fn early_grow_stops_at_a_full_region_table() {
     // Not early: no firmware block whatever the table
     assert!(!fa::is_early());
 }
+/// The free RAM under the low layout's floor kept for after the direct map: clipped to
+/// [1 MiB, floor), nothing when the floor is 1 MiB (the higher half).
+#[test]
+fn low_parts_clip_to_the_floor() {
+    const G: u64 = 1 << 30;
+    let regions = [(0x8_0000u64, 0x100u64), (0x20_0000, 0x1000), (G - 0x1000, 0x100), (G + 0x1000, 0x10)];
+    let p = fa::low_parts(regions.iter().copied(), G);
+    assert_eq!(p, vec![(0x10_0000, 0x80), (0x20_0000, 0x1000), (G - 0x1000, 1)]);
+    assert!(fa::low_parts(regions.iter().copied(), 0x10_0000).is_empty(), "higher half: floor at 1 MiB");
+}
 // wave11 GK end

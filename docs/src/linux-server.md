@@ -1170,6 +1170,52 @@ to the kernel, `unshare` after its decision), which are mechanism.
 Kernel `src/`: 118,176 lines at the start of 10-C, about 102,100 after (wave 9 ended at
 113,823).
 
+## What the kernel is after wave 11 (Group 11-C)
+
+Measured first, as V1 did (KDE login + Firefox on Wikipedia + Dolphin, `scratch/kmap.sh map`,
+the `vfs to kernel by call` counter, plus a temporary print of every send-back in vfs-server
+and lx-proc): the base (354a76f) and 11-C give the same picture, **about 280 calls in a whole
+session**, all of them path *lookups*, none a change: `openat` ~230-310, `statx` ~40-70,
+`access`/`faccessat2` 1-9, `newfstatat` 0-7, `readlink` 1; kept without asking **0**,
+unclaimed **0**. What they are:
+
+- lx-proc's redirects to the kernel (~180): re-opening a magic link (`/proc/self/fd/N`, by
+  far the most), walks through `/proc/N/root` (the portal's `.flatpak-info`/`.linyaps`),
+  writes to `oom_score_adj`, `access` of `ns/*`;
+- walks relative to a `/proc` directory descriptor the kernel made (`self/mountinfo`,
+  `uid_map`/`gid_map`/`setgroups`, `stat` of `ns/*`), and an `O_PATH` open of `/proc`;
+- `cgroup.procs` opens (the kernel's cgroup mechanism, by design);
+- not in this workload but by construction: a landlocked caller's opens under `/proc` (their
+  lexical Landlock chain is the kernel's), changes inside a bubblewrap/flatpak namespace whose
+  mounts are kernel `Named` mounts (`LX_FS_MOUNTS`/foreign mounts), a FUSE call that cannot run
+  again after the daemon's reply, and every file call once the ladder gave vfs-server up.
+
+So **the kernel walk and the path calls stay** (they answer exactly these), and so does the
+kernel's `/proc` text in `compat/linux/fs.rs` (a landlocked open, or a walk from a kernel
+`/proc` directory, can name any `/proc` file). Making them dead needs lx-proc to follow magic
+links and walk from kernel-made `/proc` directories, and vfs-server to decide bubblewrap's
+named mounts and Landlock's lexical checks: wave 12 material, not a deletion.
+
+**Deleted (dead by construction):** `fileh::notify_init_wait` and its callers' waits
+(inotify/fanotify inits before vfs-server's first start): vfs-server now claims its numbers
+*before* it goes online, and a call made before a service is online waits for its first start
+(`lx::restart::first_start`, below), so the kernel's inotify/fanotify init path is reached only
+when vfs-server never claimed them (it answers `ENOSYS`).
+
+**Startup (11-C):** a Linux service's first start is not a restart. The supervisor marks it
+(`first_start`); until it is online its callers wait (at most 60 s from its start, one log
+line `[lx] a call waits for service N, which is still starting`), also for numbers it has not
+claimed yet; a death during the first start is not counted by the ladder; the watchdog does
+not ping it before it is online. Wave 11 H's desktop wait for the Linux services is gone.
+
+**Memory (11-C):** the kernel heap is a sixth of the memory (256 MiB..1 GiB; it was half, up to
+1 GiB, while KDE + Firefox + Dolphin use 40-60 MiB of it), and when the image stays low (the
+firmware loaded it into the 2-4 GiB slot) the free RAM below 1 GiB joins the frame allocator
+once the direct map is on (it was never used: a 2.5 GB machine had 1,496 MiB, now 2,503).
+tmpfs pages ask the page cache to give back before they are refused, and a program killed for
+lack of memory gets a log line (`[mem] out of memory: process N gets SIGBUS ...`).
+
+
 ## lx-proc: the process service (wave 10, Group 7b-1)
 
 lx-proc (`userland/drivers/lx-proc`, service id `LXS_PROC`, endpoint `0x30`, two workers) holds the **policy** of process identity; the **data** stay in the kernel (decision 11: credentials, the process table with groups and sessions, limits, namespace ids, UTS names, the log ring, the accounting file).
