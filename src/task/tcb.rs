@@ -420,6 +420,10 @@ pub struct Task {
     /// preempts a running task when woken (a mostly sleeping thread, the shell's or the
     /// compositor's, goes ahead of a browser's busy ones).
     pub recent: u32,
+    /// wave11 GD: the CPU (number + 1; 0: none) a woken task preempted this one on: that CPU
+    /// resumes it after the woken work, other CPUs leave it there for a few passes (a busy
+    /// thread does not hop to another CPU because a light one ran for a moment).
+    pub preempted_on: u8,
     /// Saved x87/SSE register state while the task is not running.
     pub fpu: Box<crate::arch::idt::FpuState>,
 }
@@ -489,6 +493,7 @@ impl Task {
             preempted: false,
             passed_over: 0,
             recent: 0,
+            preempted_on: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),

@@ -43,6 +43,8 @@ pub const RECENT_DECAY_TICKS: u64 = 25;
 /// How much less a woken task must have used than the running one to preempt it mid-slice
 /// (no ping-pong between two equally busy threads).
 pub const RECENT_MARGIN: u32 = 2 * RECENT_TICK;
+/// Passes another CPU leaves a task preempted elsewhere for its own CPU to resume.
+pub const PREEMPTED_WAIT: u32 = 3;
 /// The tick `recent` was last decayed at.
 static RECENT_DECAYED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -764,6 +766,7 @@ impl Scheduler {
             preempted: false,
             passed_over: 0,
             recent: 0,
+            preempted_on: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -877,6 +880,7 @@ impl Scheduler {
             preempted: false,
             passed_over: 0,
             recent: 0,
+            preempted_on: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -976,6 +980,7 @@ impl Scheduler {
             preempted: false,
             passed_over: 0,
             recent: 0,
+            preempted_on: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -1078,6 +1083,7 @@ impl Scheduler {
             preempted: false,
             passed_over: 0,
             recent: 0,
+            preempted_on: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -1194,6 +1200,7 @@ impl Scheduler {
             preempted: false,
             passed_over: 0,
             recent: 0,
+            preempted_on: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(crate::arch::idt::FpuState::new()),
@@ -1391,6 +1398,7 @@ impl Scheduler {
             preempted: false,
             passed_over: 0,
             recent: 0,
+            preempted_on: 0,
             wake_pending: false,
             retired: false,
             fpu: alloc::boxed::Box::new(child_fpu),
@@ -1519,6 +1527,7 @@ impl Scheduler {
             }
             // Preempted mid-slice: it resumes right after the woken work
             self.tasks[curr_idx].preempted = true;
+            self.tasks[curr_idx].preempted_on = (crate::arch::percpu::cpu() as u8).saturating_add(1); // wave11 GD
         }
         let curr_task = &mut self.tasks[curr_idx];
 
@@ -1651,7 +1660,7 @@ impl Scheduler {
                     0 => t.woken,
                     1 => t.preempted,
                     _ => true,
-                };
+                } && (t.preempted_on == 0 || t.preempted_on as usize == me + 1 || t.passed_over >= PREEMPTED_WAIT);
                 // (the current task comes last in the order; it is taken only if nothing
                 // else is eligible in the tier: a yield lets the others go first)
                 if self.can_run(idx, me)
@@ -1668,6 +1677,13 @@ impl Scheduler {
         // Second pass: If no standard task is ready, allow Idle task (priority 0); also
         // during a driver call (`can_run` keeps out what must not run then), so the current
         // task does not simply go on below
+        // (wave11 GD: a task preempted on another CPU only when nothing else can run here)
+        if next_idx.is_none() {
+            next_idx = (1..=num_tasks).map(|o| (curr_idx + o) % num_tasks).find(|&idx| {
+                let t = &self.tasks[idx];
+                self.can_run(idx, me) && (t.preempted_on == 0 || t.preempted_on as usize == me + 1 || t.passed_over >= PREEMPTED_WAIT)
+            });
+        }
         if next_idx.is_none() {
             for offset in 1..=num_tasks {
                 let idx = (curr_idx + offset) % num_tasks;
@@ -1707,6 +1723,7 @@ impl Scheduler {
         }
         self.tasks[next_idx].woken = false;
         self.tasks[next_idx].preempted = false;
+        self.tasks[next_idx].preempted_on = 0;
         self.tasks[next_idx].passed_over = 0;
         if next_idx == curr_idx {
             // (nothing else can run, not even the idle task: a dead current task stays dead,
@@ -1925,6 +1942,7 @@ impl Scheduler {
         crate::compat::linux::prof::switched_in(self.tasks[next_idx].id.0);
         self.tasks[next_idx].woken = false;
         self.tasks[next_idx].preempted = false;
+        self.tasks[next_idx].preempted_on = 0;
         self.tasks[next_idx].passed_over = 0;
         self.switch_to(curr_idx, next_idx, ctx, current_cr3, slice);
         true
@@ -1999,6 +2017,7 @@ impl Scheduler {
         crate::compat::linux::prof::switched_in(self.tasks[next_idx].id.0);
         self.tasks[next_idx].woken = false;
         self.tasks[next_idx].preempted = false;
+        self.tasks[next_idx].preempted_on = 0;
         self.tasks[next_idx].passed_over = 0;
         self.switch_to(curr_idx, next_idx, ctx, current_cr3, slice);
         true

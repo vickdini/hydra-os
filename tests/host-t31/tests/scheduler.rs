@@ -1452,6 +1452,24 @@ fn ticks_are_charged_to_the_task_and_the_cpu_by_mode() {
 
 // wave11 GD begin
 #[test]
+fn a_task_preempted_on_one_cpu_is_left_there_for_a_few_passes() {
+    let _w = booted();
+    add_cpus(2);
+    let a = spawn("a", TaskPriority::Normal);
+    with(a, |t| {
+        t.preempted = true;
+        t.preempted_on = 1; // CPU 0's
+    });
+    // CPU 1 passes over it while it waits for CPU 0 (its idle task runs instead)
+    for _ in 0..scheduler::PREEMPTED_WAIT {
+        assert_ne!(yield_on(1), a);
+    }
+    // ...then takes it
+    assert_eq!(yield_on(1), a);
+    assert_eq!(with(a, |t| t.preempted_on), 0);
+}
+
+#[test]
 fn a_threads_own_cpu_time_and_state() {
     let _w = booted();
     let a = spawn("a", TaskPriority::Normal);
