@@ -97,3 +97,34 @@ hydra> map 0x7000000000 0x1000000 rw
 hydra> unmap 0x7000000000
 [+] Successfully unmapped Page 0x7000000000 (previously mapped to Frame 0x1000000)
 ```
+
+---
+
+## 6. The kernel and programs' low 2 GiB (wave 12, Group V)
+
+Programs need the low 2 GiB of their address space for themselves: 32-bit code, `MAP_32BIT`,
+non-PIE executables, Wine (which maps `0x7ffe0000`). The kernel keeps a GiB "slot" of that range
+in every address space only if it reaches something there at its physical (identity) address
+after the takeover; the boot log says which slots it keeps:
+
+```text
+[vm] programs' low window [0x10000, 0x80000000); kernel keeps GiB slots [2, 3] (...)
+[boot] higher half: late (image stays at 0x9d228000+0x8e5000; after ExitBootServices: stack on the heap at 0x8d7024a0, ...)
+```
+
+There are three paths (`src/arch/relocate.rs`, `HighPath`), and the second line says which ran:
+
+| Path | When | What |
+|---|---|---|
+| **early** | the firmware loaded the image outside [2 GiB, 4 GiB) (QEMU at 2, 4 and 6 GB), or the boot word `high=early` | `go_high` moves the image, its stack and the heap to the higher half at the entry point, before `ExitBootServices` |
+| **late** (default otherwise) | the image is in [2 GiB, 4 GiB) (the NUC; QEMU at 2.5 GB), or the boot word `high=late` | all of boot services runs at the load address, exactly as the firmware gave it (the NUC's firmware stops when kernel code runs high while it runs, wave 11). After `ExitBootServices` the kernel moves to a 1 MiB stack on its heap and keeps no firmware memory below 2 GiB: what it reaches there later goes through the direct map (frames, the boot log's block) or its own tables (runtime services, ACPI). The frames handed out before the direct map is on come from 2 GiB up (when at least 192 MiB are free there; else slot 1 stays kept), since they are reached at identity addresses until then. The image itself stays where it is: in [2, 4) GiB it takes nothing from programs; elsewhere its range stays kept |
+| **off** | the boot word `high=off` (also in safe mode and start menu entry 0); only this word gives the layout before wave 12 (`nohigh` and the N key at the breadcrumb prompt only skip the early move: the late path follows) | the path before wave 12: the firmware's stack, and every region of the final memory map below 2 GiB that is not free stays kept |
+
+Measured in QEMU (wave 12): 2.5 GB, late: window 2 GiB, `wine cmd /c ver` works (with
+`high=off` the window is 1 GiB, kept by a 2 MiB loader-data block, the boot log's memory at
+`0x7000_0000`, and Wine fails: "failed to map the shared user data"). 2 GB and 4/6 GB: early
+(the image loads at `0x7d222000` and `0x1_0000_0000`), window 2 GiB; `--high late` works at 4 and
+6 GB; at 2 GB with `high=late` the image and the heap lie below 2 GiB, so slot 1 stays kept.
+
+Test harness: `tools/hydra_run.py --high late|early|off` (QEMU's `fw_cfg opt/hydra/high`, read
+only in a virtual machine). On a stick: the word in `\hydra\options.txt`, or start menu entry 0.

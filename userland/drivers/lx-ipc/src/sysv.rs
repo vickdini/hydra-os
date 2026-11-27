@@ -179,6 +179,8 @@ struct Shm {
     handle: u32,
     ctime: i64,
     cpid: u32,
+    /// wave12 GV: its kept record (`kstore` id, 0: none yet; see `shmrec`).
+    rec: u64,
 }
 // wave10 G8-2 end
 
@@ -998,6 +1000,7 @@ fn kernel_stats(stats: &mut [LxShmStat]) {
 /// Segment `id` goes: its memory object, and what the kernel knew of it.
 fn shm_destroy(ipc: &mut Ipc, id: i32) {
     if let Some((_, s)) = ipc.shm.remove(&id) {
+        kstore::release(s.rec); // wave12 GV: its record goes with it
         shm_free(id, s.handle);
         let _ = sys::lx_obj(LX_OBJ_SHM, LX_SHM_FORGET, id as u32 as u64, 0);
     }
@@ -1039,7 +1042,7 @@ fn shmget(cx: &Cx) -> i64 {
             let Some((id, seq)) = new_id(&ipc.shm, &mut ipc.next_seq, SHMMNI) else { return ENOSPC };
             // (too many handles or kept objects: as Linux out of ids)
             let Ok(handle) = shm_object(id, size) else { return ENOSPC };
-            let s = Shm { perm: new_perm(key, flags, seq, cx), size, handle, ctime: now(), cpid: cx.c.tgid as u32 };
+            let s = Shm { perm: new_perm(key, flags, seq, cx), size, handle, ctime: now(), cpid: cx.c.tgid as u32, rec: 0 };
             ipc.shm.insert(id, (ns, s));
             id as i64
         }
@@ -1163,10 +1166,8 @@ pub fn on_shm_note(id: u64, _pid: u64, _c: u64) {
     let id = id as u32 as i32;
     let mut guard = IPC.lock();
     let ipc = &mut *guard;
+    // (wave12 GV: a destroyed segment's record goes with it: no tables to write)
     shm_settle(ipc, id);
-    if !ipc.shm.contains_key(&id) {
-        persist(ipc);
-    }
 }
 
 /// When [`shm_sweep`] last looked (ticks).
@@ -1191,15 +1192,11 @@ pub fn shm_sweep(now: u64) {
     if sys::lx_obj(LX_OBJ_SHM, LX_SHM_STAT, k.as_mut_ptr() as u64, k.len() as u64).is_err() {
         return;
     }
-    let mut gone = false;
+    // (wave12 GV: a destroyed segment's record goes with it: no tables to write)
     for s in &k {
         if s.nattch == 0 {
             shm_destroy(ipc, s.id as i32);
-            gone = true;
         }
-    }
-    if gone {
-        persist(ipc);
     }
 }
 
@@ -1331,12 +1328,85 @@ pub fn dispatch(cx: &Cx) -> (i64, u64) {
     // wave9 GX3: the tables are written before the answer leaves
     // (wave10 G8-2: not after the shared memory calls that change nothing worth keeping:
     // `shmat`, the stat and info commands, a failed call)
+    // wave12 GV: a shared memory call writes its segment's own record, not the tables
     let quiet = readonly || matches!(cx.nr, 29 | 31) && r.0 < 0;
     if !quiet {
-        persist(&IPC.lock());
+        match cx.nr {
+            29 => shm_keep(&mut IPC.lock(), r.0 as i32, false),
+            31 => shm_keep(&mut IPC.lock(), cx.args[0] as i32, true),
+            _ => persist(&IPC.lock()),
+        }
     }
     r
 }
+
+// wave12 GV begin: a segment's own kept record (see `shmrec`)
+/// Writes segment `id`'s record: a new segment's first one (`changed` false: `shmget`,
+/// which may also have found an existing segment), or again after `IPC_SET`, `IPC_RMID`,
+/// `SHM_LOCK`/`SHM_UNLOCK` (`changed`). A destroyed segment has none (`shm_destroy`).
+fn shm_keep(ipc: &mut Ipc, id: i32, changed: bool) {
+    if !kstore::active() {
+        return;
+    }
+    let next_seq = ipc.next_seq;
+    let Some((ns, s)) = ipc.shm.get_mut(&id) else { return };
+    if s.rec != 0 && !changed {
+        return;
+    }
+    if s.rec == 0 {
+        s.rec = kstore::id();
+    }
+    let p = &s.perm;
+    let r = crate::shmrec::SegRec { next_seq, id, ns: *ns, perm: [p.key as u32, p.uid, p.gid, p.cuid, p.cgid, p.mode, p.seq as u32], size: s.size, ctime: s.ctime, cpid: s.cpid };
+    kstore::put_logged(s.rec, &crate::shmrec::encode(&r));
+}
+
+/// A restarted lx-ipc: the segments of their own records `segs` (`(record id, bytes)`),
+/// after the tables (`restore`). Each one's memory is the kept object of the old instance
+/// (a missing one, made afresh now, would be zeroes: the segment is dropped instead); kept
+/// segment objects nobody knows go; removed segments whose last attachment went while
+/// lx-ipc was away go. Returns the records still in use and whether any segment came back.
+#[allow(dead_code)] // (linux-server never restores)
+pub fn restore_shm(segs: &[(u64, &[u8])]) -> (Vec<u64>, bool) {
+    let mut guard = IPC.lock();
+    let ipc = &mut *guard;
+    for &(rec, d) in segs {
+        let Some(r) = crate::shmrec::decode(d) else { continue };
+        if !sysvtext::new_size_ok(r.size) || ipc.shm.contains_key(&r.id) {
+            continue;
+        }
+        let [key, uid, gid, cuid, cgid, mode, seq] = r.perm;
+        let perm = Perm { key: key as i32, uid, gid, cuid, cgid, mode, seq: seq as u16 };
+        ipc.next_seq = crate::shmrec::later_seq(ipc.next_seq, r.next_seq);
+        ipc.shm.insert(r.id, (r.ns, Shm { perm, size: r.size, handle: 0, ctime: r.ctime, cpid: r.cpid, rec }));
+    }
+    let ids: Vec<i32> = ipc.shm.keys().copied().collect();
+    for id in ids {
+        let size = ipc.shm[&id].1.size;
+        let r = sys::lx_mem(LX_MEM_ANON, size, LX_MEM_KEPT | LX_MEM_BIG, lx_shm_key(id), 0);
+        if r >= 0 && r & LX_MEM_EXISTED != 0 {
+            ipc.shm.get_mut(&id).unwrap().1.handle = r as u32;
+        } else {
+            if r >= 0 {
+                sys::lx_mem(LX_MEM_CLOSE, r as u32 as u64, 0, 0, 0);
+                sys::lx_mem(LX_MEM_UNKEEP, lx_shm_key(id), 0, 0, 0);
+            }
+            ipc.shm.remove(&id);
+            // (the kernel forgets what it knew of it: its id may come back one day)
+            let _ = sys::lx_obj(LX_OBJ_SHM, LX_SHM_FORGET, id as u32 as u64, 0);
+        }
+    }
+    shm_unkeep_strays(&ipc.shm);
+    // Removed segments whose last attachment went while we were away
+    let removed: Vec<i32> = ipc.shm.iter().filter(|(_, (_, s))| s.perm.mode & SHM_DEST != 0).map(|(id, _)| *id).collect();
+    for id in removed {
+        shm_settle(ipc, id);
+    }
+    // (a segment of the tables' record, written before wave 12, gets its own record at its
+    // next change)
+    (ipc.shm.values().map(|(_, s)| s.rec).filter(|&r| r != 0).collect(), !ipc.shm.is_empty())
+}
+// wave12 GV end
 
 // wave9 GX3 begin: System V's tables in kept state (they are small and rarely used: the
 // whole of them is written again after each call, as one record and an arena chain)
@@ -1359,7 +1429,7 @@ fn persist(ipc: &Ipc) {
     }
     let mut k = KEPT.lock();
     if k.0 == 0 {
-        if ipc.sem.is_empty() && ipc.msg.is_empty() && ipc.shm.is_empty() {
+        if ipc.sem.is_empty() && ipc.msg.is_empty() {
             return;
         }
         k.0 = kstore::id();
@@ -1391,12 +1461,8 @@ fn persist(ipc: &Ipc) {
         }
     }
     // wave10 G8-2: the segments (their pages are kept objects of their own)
-    w.u32(ipc.shm.len() as u32);
-    for (&id, (ns, s)) in &ipc.shm {
-        w.u32(id as u32).u64(*ns);
-        perm_rec(&mut w, &s.perm);
-        w.u64(s.size).u64(s.ctime as u64).u32(s.cpid);
-    }
+    // wave12 GV: none here any more: each segment has its own record (`shm_keep`)
+    w.u32(0);
     let a = arena::get();
     let mut c = Chain::new();
     for part in w.0[1..].chunks(65536) {
@@ -1475,40 +1541,18 @@ pub fn restore(id: u64, rec: &[u8]) -> bool {
             if !sysvtext::new_size_ok(size) {
                 return None;
             }
-            ipc.shm.insert(id, (ns, Shm { perm, size, handle: 0, ctime, cpid }));
+            ipc.shm.insert(id, (ns, Shm { perm, size, handle: 0, ctime, cpid, rec: 0 }));
         }
         Some(ipc)
     })();
-    let Some(mut ipc) = parsed else {
+    let Some(ipc) = parsed else {
         let mut c = c;
         c.clear();
         c.release(a);
         return false;
     };
-    // wave10 G8-2: each segment's memory is the kept object of the old instance (a missing
-    // one, made afresh now, would be zeroes: the segment is dropped instead)
-    let ids: Vec<i32> = ipc.shm.keys().copied().collect();
-    for id in ids {
-        let size = ipc.shm[&id].1.size;
-        let r = sys::lx_mem(LX_MEM_ANON, size, LX_MEM_KEPT | LX_MEM_BIG, lx_shm_key(id), 0);
-        if r >= 0 && r & LX_MEM_EXISTED != 0 {
-            ipc.shm.get_mut(&id).unwrap().1.handle = r as u32;
-        } else {
-            if r >= 0 {
-                sys::lx_mem(LX_MEM_CLOSE, r as u32 as u64, 0, 0, 0);
-                sys::lx_mem(LX_MEM_UNKEEP, lx_shm_key(id), 0, 0, 0);
-            }
-            ipc.shm.remove(&id);
-            // (the kernel forgets what it knew of it: its id may come back one day)
-            let _ = sys::lx_obj(LX_OBJ_SHM, LX_SHM_FORGET, id as u32 as u64, 0);
-        }
-    }
-    shm_unkeep_strays(&ipc.shm);
-    // Removed segments whose last attachment went while we were away
-    let removed: Vec<i32> = ipc.shm.iter().filter(|(_, (_, s))| s.perm.mode & SHM_DEST != 0).map(|(id, _)| *id).collect();
-    for id in removed {
-        shm_settle(&mut ipc, id);
-    }
+    // wave10 G8-2: each segment's memory is the kept object of the old instance
+    // wave12 GV: taken back by `restore_shm`, after this (with the segments' own records)
     *IPC.lock() = ipc;
     *KEPT.lock() = (id, c);
     true

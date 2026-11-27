@@ -233,6 +233,7 @@ def main():
                     help="tell the kernel (fw_cfg opt/hydra/iommu=test) to allow the rogue-DMA test (`iommu dmatest`)")
     ap.add_argument("--iommu-off", action="store_true", help="tell the kernel (fw_cfg opt/hydra/iommu=off) not to use the IOMMU")
     ap.add_argument("--pcid-off", action="store_true", help="tell the kernel (fw_cfg opt/hydra/pcid=off) not to use PCID (tagged TLB)")
+    ap.add_argument("--high", default=None, choices=["late", "early", "off"], help="wave12 GV: the higher-half path (fw_cfg opt/hydra/high: late, early or off, as the boot word high=...)")
     ap.add_argument("--global-off", action="store_true", help="tell the kernel (fw_cfg opt/hydra/pge=off) not to use global kernel pages")
     ap.add_argument("--lx-kernel", action="store_true", help="tell the kernel (fw_cfg opt/hydra/lx=kernel) to answer the Linux calls moved to linux-server itself")
     # wave6 G21: a Linux service's restart class (fw_cfg opt/hydra/restart.NAME)
@@ -307,6 +308,8 @@ def main():
         args += ["-fw_cfg", "name=opt/hydra/iommu,string=test"]
     elif a.iommu_off:
         args += ["-fw_cfg", "name=opt/hydra/iommu,string=off"]
+    if a.high:
+        args += ["-fw_cfg", "name=opt/hydra/high,string=" + a.high]
     if a.pcid_off:
         args += ["-fw_cfg", "name=opt/hydra/pcid,string=off"]
     if a.global_off:

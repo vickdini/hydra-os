@@ -147,3 +147,21 @@ fn low_parts_clip_to_the_floor() {
     assert!(fa::low_parts(regions.iter().copied(), 0x10_0000).is_empty(), "higher half: floor at 1 MiB");
 }
 // wave11 GK end
+
+// wave12 GV begin: the late path's floor
+#[test]
+fn the_late_paths_floor() {
+    use hydra_hosttests_t32::memory::frame_allocator as fa;
+    // QEMU 2.5 GB: free RAM below and above 2 GiB; only what lies above counts
+    let regions = [(0x10_0000u64, 0x3FF00u64), (0x4000_0000, 0x40000), (0x8000_0000, 0x10000), (0x9000_0000, 0x8000)];
+    assert_eq!(fa::free_above(regions.iter().copied(), 2 << 30), (0x10000 + 0x8000) * 4096);
+    // a region across 2 GiB counts from 2 GiB on
+    assert_eq!(fa::free_above([(0x7000_0000u64, 0x20000u64)].into_iter(), 2 << 30), 0x1000_0000);
+    assert_eq!(fa::free_above(core::iter::empty(), 2 << 30), 0);
+    // enough room above 2 GiB: frames from 2 GiB on; else the old 1 GiB floor
+    assert_eq!(fa::late_floor(192 << 20), 2 << 30);
+    assert_eq!(fa::late_floor(4 << 30), 2 << 30);
+    assert_eq!(fa::late_floor((192 << 20) - 4096), 1 << 30);
+    assert_eq!(fa::late_floor(0), 1 << 30);
+}
+// wave12 GV end

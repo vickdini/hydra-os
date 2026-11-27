@@ -73,13 +73,16 @@ pub fn is_hardware_takeover_complete() -> bool {
 /// (step 3a of the takeover): every non-free region of the final memory map (in the
 /// higher half, below 2 GiB only device memory), the heap when it is not in the direct
 /// map, always [2 GiB, 4 GiB), the 64 KiB around the boot stack `sp`, and the
-/// framebuffer `fb`. `entries` are (type, start, pages).
+/// framebuffer `fb`. `entries` are (type, start, pages). wave12 GV: `high` is also set on
+/// the late path (`relocate::HighPath::Late`), which passes the image's load range as
+/// `image` (an image loaded below 2 GiB, `nohigh`/`high=late`, stays reachable).
 pub fn kernel_low_ranges(
     entries: impl Iterator<Item = (uefi::boot::MemoryType, u64, u64)>,
     high: bool,
     heap: Option<(u64, u64)>,
     sp: u64,
     fb: Option<u64>,
+    image: Option<(u64, u64)>,
 ) -> alloc::vec::Vec<(u64, u64)> {
     use uefi::boot::MemoryType as T;
     let mut ranges: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
@@ -96,6 +99,9 @@ pub fn kernel_low_ranges(
     ranges.push((sp & !0xFFFF, (sp | 0xFFFF) + 1));
     if let Some(fb) = fb {
         ranges.push((fb, fb + 1));
+    }
+    if let Some((start, size)) = image {
+        ranges.push((start, start + size));
     }
     ranges
 }
@@ -211,12 +217,21 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
         // tables are reached at high addresses, and the firmware's own memory (runtime
         // services, ACPI tables, reserved RAM) only with the kernel's tables loaded
         // (power::firmware_call): below 2 GiB, the low window, only device memory counts
-        let high = crate::arch::relocate::image_phys().is_some();
+        // wave12 GV: the late path too (the image stays where the firmware loaded it, its
+        // range passed on; the stack is on the heap by now)
+        let path = crate::arch::relocate::path();
+        let high = path != crate::arch::relocate::HighPath::Off;
+        let image = (path == crate::arch::relocate::HighPath::Late).then(crate::arch::relocate::load_range).flatten();
         let heap = (!crate::memory::heap::in_direct_map()).then(crate::memory::heap::range);
         let sp: u64;
         unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
         let fb = crate::video::get_video_info().map(|info| info.base_ptr as u64);
-        let ranges = kernel_low_ranges(memory_map.entries().map(|d| (d.ty, d.phys_start, d.page_count)), high, heap, sp, fb);
+        let mut ranges = kernel_low_ranges(memory_map.entries().map(|d| (d.ty, d.phys_start, d.page_count)), high, heap, sp, fb, image);
+        // wave12 GV: frames handed out before the direct map below 2 GiB (late path without
+        // room above 2 GiB): reached at identity addresses, so GiB slot 1 stays the kernel's
+        if path == crate::arch::relocate::HighPath::Late && crate::memory::frame_allocator::early_frames_in_slot1() {
+            ranges.push((1 << 30, 2 << 30));
+        }
         crate::memory::vm::init_low_layout(&ranges);
         let kept: alloc::vec::Vec<usize> = (1..512).filter(|&i| crate::memory::vm::kernel_low_slot(i)).collect();
         crate::kprintln!(
@@ -227,6 +242,7 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
             crate::arch::relocate::image_phys().map_or(0, |i| i.0),
             crate::arch::relocate::KERNEL_BASE
         );
+        crate::kprintln!("{}", crate::arch::relocate::path_line(path, crate::arch::relocate::load_range())); // wave12 GV
     }
 
     mark(6, "low layout set; XSAVE next"); // wave11 GH

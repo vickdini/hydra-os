@@ -13,7 +13,7 @@
 //! The identity mapping stays during boot (the firmware runs at its own addresses), but
 //! nothing of the kernel's is reached through it any more.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 /// Virtual address of the image's first byte in the higher half (the top 2 GiB).
 pub const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
@@ -37,10 +37,28 @@ static STACK_PHYS: AtomicU64 = AtomicU64::new(0);
 /// Without the move (`nohigh`, or the move impossible) `next` simply runs on the current
 /// stack.
 pub fn run_on_kernel_stack(next: fn() -> !) -> ! {
-    if STACK_PHYS.load(Ordering::SeqCst) == 0 {
-        next();
-    }
-    let top = STACK_BOTTOM + STACK_SIZE;
+    // wave12 GV begin: without the early move, the late path (unless high=off): a stack on
+    // the kernel's heap, which every address space reaches, instead of the firmware's (boot
+    // services memory, maybe below 2 GiB)
+    let top = if STACK_PHYS.load(Ordering::SeqCst) != 0 {
+        set_path(HighPath::Early);
+        STACK_BOTTOM + STACK_SIZE
+    } else {
+        let p = path_after_firmware(false, off_word());
+        set_path(p);
+        if p != HighPath::Late {
+            crate::arch::boot_services::mark(4, "high=off: staying on the firmware's stack");
+            next();
+        }
+        let stack = alloc::vec![0u8; STACK_SIZE as usize].leak();
+        let lo = stack.as_ptr() as u64;
+        LATE_STACK.store(lo, Ordering::SeqCst);
+        let mut line = crate::console::FixedBuf::new();
+        let _ = core::fmt::Write::write_fmt(&mut line, format_args!("late path: to a {} KiB stack on the heap at {:#x}", STACK_SIZE >> 10, lo));
+        crate::arch::boot_services::mark(4, line.as_str());
+        (lo + STACK_SIZE) & !15
+    };
+    // wave12 GV end
     unsafe {
         // The Microsoft x64 convention of the UEFI target: 32 bytes of shadow space, the
         // stack 16-byte aligned at the call
@@ -347,3 +365,173 @@ pub fn go_high(next: fn() -> !) {
         );
     }
 }
+
+// wave12 GV begin: the higher half after ExitBootServices ("go_high option A")
+/// How the kernel keeps out of programs' low 2 GiB (32-bit code, `MAP_32BIT`, Wine's
+/// `0x7ffe0000`); the boot log's `[boot] higher half:` line says which one ran.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HighPath {
+    /// [`go_high`] at the entry point, before `ExitBootServices`: the image, its stack and
+    /// the heap at higher-half addresses from the start (an image the firmware loaded
+    /// outside the kept 2-4 GiB slot; boot word `high=early` for any).
+    Early,
+    /// The default for an image in the kept 2-4 GiB slot (the NUC's firmware loads it there),
+    /// and for any with the boot word `high=late`: all of boot services at the load address,
+    /// exactly as the firmware gave it (the NUC's firmware stops when kernel code runs high
+    /// while it runs, wave 11). Once `ExitBootServices` is done the kernel moves its stack
+    /// to the heap ([`run_on_kernel_stack`]) and keeps nothing of the firmware's memory below
+    /// 2 GiB in programs' address spaces (`boot_services::kernel_low_ranges`): what it
+    /// reaches there afterwards goes through the direct map (frames, the boot log) or its
+    /// own tables (runtime services, ACPI), as on the early path. The image stays where it is
+    /// (in the kept slot it takes nothing from programs; elsewhere its range stays kept).
+    Late,
+    /// The path before wave 12 (boot word `high=off`): like [`HighPath::Late`] but on the
+    /// firmware's stack, and every region of the firmware's final memory map below 2 GiB
+    /// that is not free stays in every address space (a 2.5 GB machine kept GiB slot 1 for
+    /// a 2 MiB boot-log block, and programs had a 1 GiB low window).
+    Off,
+}
+
+/// The path taken (0: not decided yet, then 1 + the [`HighPath`] index).
+static PATH: AtomicU8 = AtomicU8::new(0);
+/// The late path's stack on the heap (its lowest byte; 0: none).
+static LATE_STACK: AtomicU64 = AtomicU64::new(0);
+
+/// The entry point's choice (pure): whether to move to the higher half now ([`go_high`]),
+/// from the boot word (`high=late`, `high=early`; `high=off` and none decide as before wave
+/// 12) and whether the firmware loaded the image into the kept 2-4 GiB slot.
+pub fn move_at_entry(word: Option<HighPath>, in_kept_slot: bool) -> bool {
+    match word {
+        Some(HighPath::Late) => false,
+        Some(HighPath::Early) => true,
+        Some(HighPath::Off) | None => !in_kept_slot,
+    }
+}
+
+/// The path once the firmware is gone (pure): early if the image moved at the entry point,
+/// otherwise off with the word `high=off`, else late.
+pub fn path_after_firmware(moved: bool, off: bool) -> HighPath {
+    if moved {
+        HighPath::Early
+    } else if off {
+        HighPath::Off
+    } else {
+        HighPath::Late
+    }
+}
+
+/// The boot word among `high=early`, `high=late`, `high=off` in `text` (whitespace-separated
+/// words, any case; the last one counts): pure.
+pub fn parse_high_word(text: &[u8]) -> Option<HighPath> {
+    let mut found = None;
+    for w in text.split(|c| c.is_ascii_whitespace() || *c == 0) {
+        if w.len() < 5 || !w[..5].eq_ignore_ascii_case(b"high=") {
+            continue;
+        }
+        let v = &w[5..];
+        if v.eq_ignore_ascii_case(b"early") {
+            found = Some(HighPath::Early);
+        } else if v.eq_ignore_ascii_case(b"late") {
+            found = Some(HighPath::Late);
+        } else if v.eq_ignore_ascii_case(b"off") {
+            found = Some(HighPath::Off);
+        }
+    }
+    found
+}
+
+/// Records the path taken.
+pub fn set_path(p: HighPath) {
+    PATH.store(1 + p as u8, Ordering::SeqCst);
+}
+
+/// The path taken: [`HighPath::Early`] once the image runs high, else what was recorded
+/// (late before anything was).
+pub fn path() -> HighPath {
+    if IMAGE_PHYS.load(Ordering::Relaxed) != 0 {
+        return HighPath::Early;
+    }
+    match PATH.load(Ordering::SeqCst) {
+        3 => HighPath::Off,
+        _ => HighPath::Late,
+    }
+}
+
+/// The late path's stack on the heap `(start, size)`.
+pub fn late_stack() -> Option<(u64, u64)> {
+    let p = LATE_STACK.load(Ordering::Relaxed);
+    (p != 0).then_some((p, STACK_SIZE))
+}
+
+/// The boot word at the entry point (before the heap; one firmware file read): from
+/// `\hydra\options.txt`, or in a virtual machine (CPUID's hypervisor bit; never on real
+/// hardware) from QEMU's `-fw_cfg name=opt/hydra/high,string=late|early|off`.
+#[cfg(target_os = "uefi")]
+pub fn entry_word() -> Option<HighPath> {
+    let mut buf = [0u8; 2048];
+    if in_vm() {
+        if let Some(n) = crate::arch::fwcfg::read_file_into("opt/hydra/high", &mut buf[..16]) {
+            let mut w = [0u8; 21];
+            w[..5].copy_from_slice(b"high=");
+            w[5..5 + n].copy_from_slice(&buf[..n]);
+            if let Some(p) = parse_high_word(&w[..5 + n]) {
+                return Some(p);
+            }
+        }
+    }
+    let n = crate::arch::bootopts::early_text(&mut buf);
+    parse_high_word(&buf[..n])
+}
+
+/// Host build: no boot word.
+#[cfg(not(target_os = "uefi"))]
+pub fn entry_word() -> Option<HighPath> {
+    None
+}
+
+/// Whether the word `high=off` was given (after the heap and the boot words exist): in the
+/// boot words (`options.txt`, the load options, the start menu's entry) or QEMU's fw_cfg.
+pub fn off_word() -> bool {
+    if crate::arch::bootopts::say(&[b"high=off", b"HIGH=OFF"]) {
+        return true;
+    }
+    let mut buf = [0u8; 16];
+    in_vm() && crate::arch::fwcfg::read_file_into("opt/hydra/high", &mut buf).is_some_and(|n| n >= 3 && buf[..3].eq_ignore_ascii_case(b"off"))
+}
+
+/// Whether the CPU runs under a hypervisor (CPUID leaf 1, ECX bit 31): only then are QEMU's
+/// fw_cfg ports read this early.
+#[cfg(target_os = "uefi")]
+fn in_vm() -> bool {
+    (core::arch::x86_64::__cpuid(1).ecx >> 31) & 1 == 1
+}
+
+/// Host build: never (no fw_cfg ports to read).
+#[cfg(not(target_os = "uefi"))]
+fn in_vm() -> bool {
+    false
+}
+
+/// The boot log's line for path `p` (`image` is where the firmware loaded the image).
+pub fn path_line(p: HighPath, image: Option<(u64, u64)>) -> alloc::string::String {
+    let (start, size) = image.unwrap_or((0, 0));
+    match p {
+        HighPath::Early => alloc::format!(
+            "[boot] higher half: early (moved at the entry point, before ExitBootServices; image at {:#x} -> {:#x})",
+            IMAGE_PHYS.load(Ordering::Relaxed),
+            KERNEL_BASE
+        ),
+        HighPath::Late => alloc::format!(
+            "[boot] higher half: late (image stays at {:#x}+{:#x}; after ExitBootServices: stack on the heap{}, no firmware memory below 2 GiB kept; boot word high=off for the path before wave 12)",
+            start,
+            size,
+            late_stack().map_or(alloc::string::String::new(), |(s, _)| alloc::format!(" at {:#x}", s))
+        ),
+        HighPath::Off => alloc::format!(
+            "[boot] higher half: off (boot word high=off: image stays at {:#x}+{:#x}, on the firmware's stack, every firmware region below 2 GiB kept)",
+            start,
+            size
+        ),
+    }
+}
+// wave12 GV end

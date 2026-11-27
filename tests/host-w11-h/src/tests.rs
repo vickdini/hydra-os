@@ -339,7 +339,7 @@ fn words_from_options_file_and_menu() {
     w.add_file(b"\xEF\xBB\xBF# a comment\r\nIOMMU=off  # why\r\n\r\npcid=off\n");
     w.add_text(SAFE);
     let t = String::from_utf8(w.text().to_vec()).unwrap();
-    assert_eq!(t, "debug lx.vfs.restart=fast iommu=off  pcid=off safe iommu=off pcid=off cpus=1 verbose");
+    assert_eq!(t, "debug lx.vfs.restart=fast iommu=off  pcid=off safe iommu=off pcid=off cpus=1 high=off verbose"); // wave12 GV: safe mode has high=off
     assert!(w.has(b"iommu=off"));
     assert!(!w.has(b"nodesktop"));
     assert!(!w.has(b""));
@@ -382,7 +382,9 @@ fn menu_file_and_keys() {
     assert_eq!(menu_choice('8'), Some(FW_MEMORY));
     assert_eq!(menu_choice('9'), Some(RUN13_BOTH));
     assert!(RUN13_BOTH.contains("fwidt=on") && RUN13_BOTH.contains("fwmem=new"));
-    assert_eq!(menu_choice('0'), None);
+    // wave12 GV: entry 0 = high=off; safe mode includes it
+    assert_eq!(menu_choice('0'), Some(HIGH_OFF));
+    assert!(HIGH_OFF.contains("high=off") && SAFE.contains("high=off") && SAFE_CONSOLE.contains("high=off"));
     assert!(ONLY_CPUS1.contains("cpus=1") && !ONLY_CPUS1.contains("pcid") && !ONLY_CPUS1.contains("iommu"));
     assert!(ONLY_NOPCID.contains("pcid=off") && !ONLY_NOPCID.contains("cpus") && !ONLY_NOPCID.contains("iommu"));
     assert!(ONLY_NOIOMMU.contains("iommu=off") && !ONLY_NOIOMMU.contains("cpus") && !ONLY_NOIOMMU.contains("pcid"));

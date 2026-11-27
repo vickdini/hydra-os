@@ -1,0 +1,15 @@
+[package]
+name = "hydra_hosttests_w12_v"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group V's host unit tests (wave 12): lx-ipc's socket calls on objects that are no sockets (lx-ipc/src/sockcall.rs) and its per-segment System V records"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]

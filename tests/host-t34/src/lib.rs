@@ -246,6 +246,14 @@ pub mod arch {
         pub fn in_kept_low_slot(_start: u64, _size: u64) -> bool {
             false
         }
+        /// *stub* wave12 GV: no boot word on the host.
+        pub fn entry_word() -> Option<u8> {
+            None
+        }
+        /// *stub* wave12 GV: as the kernel's: no word, an image outside the kept slot moves.
+        pub fn move_at_entry(_word: Option<u8>, in_kept_slot: bool) -> bool {
+            !in_kept_slot
+        }
         /// *stub* wave11 GH: the rest of the boot, on the same (test) stack.
         pub fn run_on_kernel_stack(next: fn() -> !) -> ! {
             next()
