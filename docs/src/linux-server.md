@@ -1215,6 +1215,9 @@ once the direct map is on (it was never used: a 2.5 GB machine had 1,496 MiB, no
 tmpfs pages ask the page cache to give back before they are refused, and a program killed for
 lack of memory gets a log line (`[mem] out of memory: process N gets SIGBUS ...`).
 
+Kernel `src/`: 102,152 lines after wave 10, 107,335 at 11-C's start (F, P and H added mechanism:
+`/proc` facts, FUSE changes, boot logs and hardware), 107,571 after 11-C (+349/-113).
+
 
 ## lx-proc: the process service (wave 10, Group 7b-1)
 
