@@ -240,8 +240,10 @@ pub fn prepare_file() {
                 let mut text = logring::start_line(h.start);
                 text.extend_from_slice(&logring::render(r));
                 let why = if h.flags & logring::F_PANIC != 0 { "a kernel panic" } else { "a restart to save it" };
-                text.extend_from_slice(alloc::format!("\r\n--- end of the log: saved by the next start of Hydra after {} ---\r\n", why).as_bytes());
-                text.truncate(logring::FILE_SIZE);
+                let end = alloc::format!("\r\n--- end of the log: saved by the next start of Hydra after {} ---\r\n", why);
+                // (review: room kept for the end line)
+                text.truncate(logring::FILE_SIZE - end.len());
+                text.extend_from_slice(end.as_bytes());
                 mark(format_args!("bootlog: writing the previous start's log into {} (in place)", logring::file_name(h.seq)));
                 if let Some(mut f) = open(&mut dir, h.seq, FileMode::ReadWrite) {
                     let ok = fw_write(&mut f, 0, &text, bounce_s);
@@ -497,8 +499,9 @@ fn write_out(end: &str, last: bool, wait_ms: u64) -> bool {
     let head_len = h.head_len as usize + logring::START_LINE;
     let from = if logring::wrapped(&h) { head_len.min(t.written) } else { t.written };
     let from = from & !4095;
+    // (review: the end line always fits: the text is cut before it, not the line)
+    text.truncate(logring::FILE_SIZE.saturating_sub(end.len()));
     text.extend_from_slice(end.as_bytes());
-    text.truncate(logring::FILE_SIZE);
     let mut ok = true;
     for (part_off, file_off, len) in t.map.pieces(from as u64, (text.len() - from.min(text.len())) as u64) {
         let data = &text[file_off as usize..(file_off + len) as usize];

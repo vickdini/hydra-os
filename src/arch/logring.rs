@@ -230,7 +230,7 @@ pub fn choose_slot(slots: &[(u32, Option<u32>)]) -> Option<(u32, u32)> {
     let newest = slots.iter().filter_map(|s| s.1).max().unwrap_or(0);
     let unused = slots.iter().filter(|s| s.1.is_none()).map(|s| s.0).min();
     let slot = unused.or_else(|| slots.iter().min_by_key(|s| (s.1, s.0)).map(|s| s.0))?;
-    Some((slot, newest + 1))
+    Some((slot, newest.saturating_add(1)))
 }
 // wave11 GH end
 

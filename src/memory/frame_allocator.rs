@@ -440,7 +440,8 @@ pub static FRAME_ALLOCATOR: Mutex<PhysicalMemoryManager> = Mutex::new(PhysicalMe
 /// Harvests usable `CONVENTIONAL` memory regions from the UEFI boot services memory map
 /// and initializes the global `FRAME_ALLOCATOR` and its per-frame reference count table.
 pub fn init_memory_from_uefi() {
-    // wave11 GH: the boot word fwmem=old: all free memory at once, as up to run 10
+    // wave11 GH: the default (since NUC run 13): all free memory at once, as up to run 10;
+    // the firmware-block way below only with the boot word fwmem=new
     if OLD_PATH.load(core::sync::atomic::Ordering::SeqCst) {
         let mut allocator = FRAME_ALLOCATOR.lock();
         if let Ok(memory_map) = uefi::boot::memory_map(uefi::boot::MemoryType::LOADER_DATA) {
@@ -456,8 +457,8 @@ pub fn init_memory_from_uefi() {
         allocator.init_refcounts();
         return;
     }
-    // wave11 GH: until ExitBootServices the firmware owns its free memory and keeps
-    // allocating from it (its USB stack, its file reads): the frames handed out before then
+    // wave11 GH (boot word fwmem=new): until ExitBootServices the firmware owns its free
+    // memory and keeps allocating from it (its USB stack, its file reads): the frames handed out before then
     // come from blocks the firmware allocated for Hydra ([`EARLY_BLOCK_PAGES`] at a time),
     // and the free memory of the final memory map is added after it ([`add_after_firmware`]).
     // Writing to free memory the firmware had not given stopped the NUC in its boot-file
@@ -495,9 +496,9 @@ pub fn init_memory_from_uefi() {
 }
 
 // wave11 GH begin
-/// The boot word `fwmem=old` (set by `main` before [`init_memory_from_uefi`]): the frame
-/// allocator takes all of the firmware's free memory at once and the heap is carved from it,
-/// as up to NUC run 10.
+/// Set by `main` before [`init_memory_from_uefi`] unless the boot word `fwmem=new`: the
+/// frame allocator takes all of the firmware's free memory at once and the heap is carved
+/// from it, as up to NUC run 10 (the default again since run 13).
 pub static OLD_PATH: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Set from [`init_memory_from_uefi`] to [`add_after_firmware`]: boot services run, and new
@@ -522,7 +523,9 @@ fn early_floor() -> u64 {
 /// Before `ExitBootServices`: one more block of [`EARLY_BLOCK_PAGES`] from the firmware
 /// added to `alloc` (false after it, or when the firmware has none).
 fn early_grow(alloc: &mut PhysicalMemoryManager) -> bool {
-    if !EARLY.load(core::sync::atomic::Ordering::SeqCst) {
+    // (review: no block when the region table is full, else allocate_frame_raw would take
+    // block after block it cannot use)
+    if !EARLY.load(core::sync::atomic::Ordering::SeqCst) || alloc.region_count >= MAX_REGIONS {
         return false;
     }
     // Below 4 GiB first, where the frames came from before (the kernel's first page tables
@@ -547,9 +550,13 @@ pub fn firmware_block(pages: u64, floor: u64, ceiling: u64) -> Option<u64> {
         for d in map.entries() {
             let end = (d.phys_start + d.page_count * PAGE_SIZE).min(ceiling);
             if d.ty == T::CONVENTIONAL && end >= bytes && end - bytes >= d.phys_start.max(floor) {
+                // The highest 64 candidates (review: not the first 64 of the map)
+                let top = end - bytes;
                 if n < tops.len() {
-                    tops[n] = end - bytes;
+                    tops[n] = top;
                     n += 1;
+                } else if let Some((i, _)) = tops.iter().enumerate().min_by_key(|(_, v)| **v).filter(|(_, v)| **v < top) {
+                    tops[i] = top;
                 }
             }
         }
@@ -573,12 +580,18 @@ pub fn add_after_firmware(entries: impl Iterator<Item = (uefi::boot::MemoryType,
     }
     let floor = early_floor();
     let limit = alloc.refcount_entries * PAGE_SIZE;
+    let (mut dropped, mut dropped_pages) = (0u64, 0u64);
     for (ty, start, pages) in entries {
         let end = (start + pages * PAGE_SIZE).min(if limit > 0 { limit } else { u64::MAX });
         if ty == uefi::boot::MemoryType::CONVENTIONAL && end > floor {
             let s = start.max(floor);
             if end > s {
-                alloc.add_region(PhysAddr::new(s), (end - s) / PAGE_SIZE);
+                if alloc.region_count >= MAX_REGIONS {
+                    dropped += 1;
+                    dropped_pages += (end - s) / PAGE_SIZE;
+                } else {
+                    alloc.add_region(PhysAddr::new(s), (end - s) / PAGE_SIZE);
+                }
             }
         }
     }
@@ -587,6 +600,10 @@ pub fn add_after_firmware(entries: impl Iterator<Item = (uefi::boot::MemoryType,
         total += r.page_count * PAGE_SIZE;
     }
     alloc.total_usable_bytes = total;
+    drop(alloc);
+    if dropped > 0 {
+        crate::kprintln!("[mem] {} free regions ({} MiB) left out: the frame allocator holds at most {}", dropped, dropped_pages * PAGE_SIZE >> 20, MAX_REGIONS);
+    }
 }
 // wave11 GH end
 

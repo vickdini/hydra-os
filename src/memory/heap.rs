@@ -302,7 +302,8 @@ pub fn init() -> Result<HeapStats, &'static str> {
     let preferred = size;
     while heap_start_ptr.is_none() && size >= (preferred / 2).max(MIN_HEAP_SIZE) {
         let page_count = (size + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
-        // wave11 GH: from the firmware while it runs (its free memory is still its own)
+        // wave11 GH (fwmem=new): from the firmware while it runs (its free memory is still
+        // its own)
         for floor in [4u64 << 30, 2u64 << 30] {
             if heap_start_ptr.is_none() && super::frame_allocator::is_early() {
                 heap_start_ptr = super::frame_allocator::firmware_block(page_count as u64, floor, u64::MAX).map(|p| p as *mut u8);

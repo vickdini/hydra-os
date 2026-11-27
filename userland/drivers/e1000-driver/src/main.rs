@@ -127,6 +127,9 @@ const MMIO_LEN: usize = 128 * 1024;
 const REG_KMRNCTRLSTA: usize = 0x0034;
 const REG_FEXTNVM6: usize = 0x0010;
 const REG_TXDCTL0: usize = 0x3828;
+const REG_TXDCTL1: usize = 0x3928;
+/// CTRL_EXT: PHY power-down when the MAC is at D3 without wake-up (pchlan and later).
+const CTRL_EXT_PHYPDEN: u32 = 1 << 20;
 const REG_TARC0: usize = 0x3840;
 const REG_TARC1: usize = 0x3940;
 const REG_RFCTL: usize = 0x5008;
@@ -712,10 +715,12 @@ impl Nic {
     /// The "hardware bits" Linux sets on ICH/PCH adapters after every reset
     /// (e1000_initialize_hw_bits_ich8lan), and the Lynx Point packet-buffer ECC.
     fn pch_hw_bits(&self) {
-        self.write(REG_CTRL_EXT, self.read(REG_CTRL_EXT) | 1 << 22);
+        // (review: as e1000_initialize_hw_bits_ich8lan for pchlan and later, bit by bit)
+        self.write(REG_CTRL_EXT, self.read(REG_CTRL_EXT) | 1 << 22 | CTRL_EXT_PHYPDEN);
         self.write(REG_TXDCTL0, self.read(REG_TXDCTL0) | 1 << 22);
+        self.write(REG_TXDCTL1, self.read(REG_TXDCTL1) | 1 << 22);
         self.write(REG_TARC0, self.read(REG_TARC0) | 1 << 23 | 1 << 24 | 1 << 26 | 1 << 27);
-        let mut tarc1 = (self.read(REG_TARC1) & !(1 << 28 | 1 << 29)) | 1 << 22 | 1 << 24 | 1 << 26 | 1 << 30;
+        let mut tarc1 = self.read(REG_TARC1) | 1 << 24 | 1 << 26 | 1 << 30;
         if self.read(REG_TCTL) & TCTL_MULR != 0 {
             tarc1 &= !(1 << 28);
         } else {
@@ -798,14 +803,16 @@ impl Nic {
     /// Every 60 s (or when `now`): the adapter's statistics counters since start, and the
     /// frames this driver dropped, in one log line.
     fn log_stats(&mut self, now: bool) {
+        // (review: the counters are read, which clears them, only when the line is due:
+        // 32-bit counters do not wrap within a minute at gigabit rates)
         let t = sys::uptime_ticks();
-        for (i, (reg, _)) in STATS.iter().enumerate() {
-            self.stats[i] += self.read(*reg) as u64;
-        }
         if !now && t < self.stats_at + 6000 {
             return;
         }
         self.stats_at = t;
+        for (i, (reg, _)) in STATS.iter().enumerate() {
+            self.stats[i] += self.read(*reg) as u64;
+        }
         let mut line = alloc::string::String::from("[e1000-driver] counters:");
         for (i, (_, name)) in STATS.iter().enumerate() {
             line.push_str(&alloc::format!(" {} {}", name, self.stats[i]));

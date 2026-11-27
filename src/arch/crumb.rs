@@ -339,6 +339,11 @@ pub fn fw_ptr_ok(p: *const u8, what: &str) -> bool {
         return true;
     }
     step_fmt(format_args!("HIGH POINTER {:#x} for the firmware: {}", p as u64, what));
+    // (review: on the console and in the boot log too, breadcrumbs or not: a refused name
+    // or buffer is never just a silent "not found")
+    let mut line = crate::console::FixedBuf::new();
+    let _ = core::fmt::Write::write_fmt(&mut line, format_args!("[bootfs] refused a higher-half pointer {:#x} for the firmware ({})\n", p as u64, what));
+    crate::console::print_raw(line.as_str());
     false
 }
 

@@ -1,12 +1,12 @@
 #!/bin/bash
 # hydra-nettest: a quick network self-test (wave 11, NUC run 15: https pages did not load
-# while ping worked). Runs once by itself about a minute after the live session starts
-# (hydra-live-setup) and can be run again from a terminal. Every result is a "[nettest]" line
+# while ping worked). With the start word nettest it runs once by itself about a minute
+# after the live session starts (hydra-live-setup); from a terminal at any time. Every result is a "[nettest]" line
 # in the boot log (\logs\bootNNN.txt on the stick): on a terminal it is shown there as well.
 #
 # Tests: DNS (A and AAAA), TCP connects to the gateway and to example.com, curl over IPv4
-# (http, https), https over IPv6, a 5 MB download with its speed, and the network card's
-# counters before and after.
+# (http, https), https over IPv6, and the network card's counters before and after; with
+# --download also a 5 MB download with its speed. At boot only with the start word nettest.
 
 if [ -t 2 ]; then
     # From a terminal: on the screen, and into the boot log through syslog
@@ -75,7 +75,8 @@ web -4 -m 30 http://example.com/
 web -4 -m 30 https://example.com/
 web -4 -m 30 https://www.msn.com/
 web -6 -m 30 https://www.msn.com/
-web -4 -m 60 http://ipv4.download.thinkbroadband.com/5MB.zip
+# The 5 MB download only when asked (hydra-nettest --download)
+[ "$1" = --download ] && web -4 -m 60 http://ipv4.download.thinkbroadband.com/5MB.zip
 
 counters after
 say "done: $(date '+%F %T')"

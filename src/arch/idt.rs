@@ -371,9 +371,9 @@ pub fn init() {
         idt.entries[MSI_VECTOR_BASE as usize + i].set_handler_addr(handler, kernel_cs);
     }
 
-    // wave11 GH: while the firmware runs (before ExitBootServices) its interrupts (timer,
-    // USB, ...) must reach its own handlers, or its timer events stop and a USB transfer
-    // waits for ever: the hardware vectors (32..=255) keep the firmware's gates until
+    // wave11 GH (boot word fwidt=on, not the default since NUC run 13): while the firmware
+    // runs (before ExitBootServices) its interrupts (timer, USB, ...) reach its own
+    // handlers: the hardware vectors (32..=255) keep the firmware's gates until
     // `take_hardware_vectors` (the takeover); Hydra's exception gates (0..=31) are used
     // from now on
     #[cfg(target_os = "uefi")]
