@@ -307,6 +307,50 @@ Also carried, if a group has room: lx-ipc's SysV `shmget`/`IPC_STAT` cost (+4 µ
 
 About 15–20 agent-days.
 
+### Wave 12: FreeBSD command-line programs (planned 2026-11-27, decisions 39–42)
+
+Wave 12 is the "11a" step of [personality-design.md](personality-design.md) section 4.5, the first half of the FreeBSD front end, plus the network part of "11b" and the wave 11 carry-overs.
+
+**The goal:** a FreeBSD 15.1 root at `/freebsd` in the pool, next to `/ubuntu`. Its dynamically linked base tools run on the existing services: `sh`, `ls -l`, `cat`, `ps`, `top`, `fetch https://...`. `pkg install nano` works. Measured by milestones 1–9 of section 4.6 and the `kyua` pass counts for `lib/libc`, `lib/libthr` and `bin/sh`.
+
+**Why the design changes from step 0.** Step 0 assumed one `linux-server` that would become a "POSIX core with front ends" (section 3). Since then, waves 6–11 split the Linux layer into separate services (vfs-server, lx-net, lx-ipc, lx-proc, lx-sec, the device services). Each FreeBSD translation therefore goes where its object lives (decision 39):
+- **Kernel** (`src/personality/`), only mechanism:
+  - the FreeBSD call table (number to route, errno, the carry flag);
+  - exec layout, signals and `ucontext`;
+  - `thr_*` and `_umtx_op` on the existing futex and thread code;
+  - `sysarch`, the `mmap` flags, clock ids, resource-limit numbers.
+- **Services:** the layouts and constants of the objects they own, chosen by `LxCall.pers` (already in the protocol since wave 5):
+  - vfs-server: open/`AT_*` flags, the 224-byte `stat`, `statfs`, `getdirentries`, `fcntl`/`flock`, `__realpathat`;
+  - lx-proc: `sysctl`/`sysctlbyname` and `kern.proc` (`kinfo_proc`);
+  - tty-server: `termios` and terminal ioctls;
+  - lx-ipc: bidirectional pipes;
+  - lx-net: `sockaddr` with `sa_len`, socket options, `msghdr`, `getifaddrs` routing messages.
+- **kqueue** is a second encoding of the kernel's epoll readiness engine (section 3.4).
+
+The Linux path does not change. A Linux task's table pointer stays null, as today.
+
+**Stages** (2 groups at once, the credit budget; a Sonnet review before each merge; a deploy after each stage, with your OK):
+
+| Stage | Group | Work | Agent-days |
+|---|---|---|---:|
+| 1 | **FK** (FreeBSD kernel side) | The full FreeBSD call table (the 125 "D" calls and the kernel's "T" calls, the rest `ENOSYS`/stubs); `ucontext` (`getcontext`/`setcontext`/`swapcontext`); `thr_new`/`thr_exit`/`thr_kill`/`thr_set_name`; `_umtx_op` (mutexes, condition variables, semaphores, rwlocks, `WAIT_UINT`/`WAKE`); `sysarch`; `sigfastblock`; the `mmap` flags, clocks and limits; `/freebsd` unpacked in the pool by `make-freebsd-root.sh`; a `freebsd` launcher (as `linux chroot /ubuntu`). Milestones 1–3 (`rawsys`, `/rescue/echo`, dynamic `/bin/echo` through rtld) and `fbsdthr` | 5–6 |
+| 1 | **V** (carry-overs) | Firefox videos stuck loading (YouTube, Dailymotion; reproduce in QEMU, then fix); the higher-half move after `ExitBootServices` (go_high option A), so Wine runs at 2.5 GB; lx-ipc's SysV `shmget` cost, if there is room | 3–4 |
+| 2 | **FS** (FreeBSD in the file, process and terminal services) | The service-side layouts listed above (vfs-server, lx-proc's `sysctl` first set and `kern.proc`, tty-server, lx-ipc pipes); Capsicum, jail, kld and mac stubs; `procctl`; `getlogin`; `issetugid`. Milestones 4–6 (`sh -c 'ls -l /; cat /etc/motd'`, `fbsdinfo`, `kyua` on `lib/libc`), plus `ps` and `top` | 5–6 |
+| 2 | **FN** (FreeBSD network and events) | kqueue on the epoll engine (`fbsdkq`, `tail -f`); the lx-net layouts and `NET_RT_IFLIST`; `fetch` with TLS; `pkg bootstrap` and `pkg install -y nano`. Milestones 7–9 | 5–6 |
+| | **12-C** | `kyua` numbers per area; the Linux budget is unchanged (`lxbench`); kill tests with FreeBSD programs running; the NUC stick with `/freebsd` (decision 42) | 1–2 |
+
+About 19–24 agent-days.
+
+**Wave 13 (not in this wave):**
+- a graphical FreeBSD program (Qt 6 Wayland on the KDE desktop, milestone 10);
+- Windows programs through FreeBSD's own Wine (milestone 11);
+- real Capsicum rights and jails;
+- `kyua` on `usr.bin`;
+- lx-proc following magic links and vfs-server deciding bubblewrap mounts and Landlock, after which the kernel walk can go;
+- System Monitor's Applications view.
+
+After that, the diagnostics stick ([diagnostics-live-plan.md](diagnostics-live-plan.md)), the Wi-Fi driver and copy-to-RAM, then macOS.
+
 ### Waves 5–9: the rest of the Linux layer (one-server plan, superseded after wave 5)
 
 Each wave does one or two steps of section 7.2 of the design. Two habits carry through every step:
@@ -487,6 +531,10 @@ Also 2026-11-19: a seventh, bug-fixing group joins wave 6, and wave 6 starts rig
 36. **Wave 11 is a consolidation wave** (2026-11-24): FreeBSD waits one wave. Stage 1 R (restart robustness), F (the last walks and FUSE changes into vfs-server), P (the remaining `/proc` files into lx-proc), H (real-hardware preparation for the NUC); stage 2 the NUC run, fixes, 11-C closing. Four groups at once.
 37. **The user runs Hydra on the NUC in wave 11's stage 2** (boots the stick H prepares, installs, returns the logs).
 38. **Wave 11 starts right away** (2026-11-24).
+39. **FreeBSD translations live in the service that owns each object** (2026-11-27), chosen by `LxCall.pers`. The kernel keeps only mechanism: the call table, exec, signals and `ucontext`, threads and `_umtx_op`, `sysarch`, `mmap` flags and clocks. This keeps the kernel small and adds no extra hop to a call.
+40. **Wave 12 order** (2026-11-27): stage 1 is FK (the FreeBSD kernel side) and V (the wave 11 carry-overs: Firefox video, go_high option A, SysV `shmget`). Stage 2 is FS (the file, process and terminal services) and FN (kqueue, network, `pkg`). Then 12-C. Two groups at once.
+41. **Wave 12 stops at the command line plus `pkg install`** (2026-11-27). A graphical FreeBSD program, FreeBSD's Wine and real Capsicum and jails go to wave 13.
+42. **`/freebsd` goes into the pool and onto the live stick** (2026-11-27): about +700 MB on the stick.
 
 ### Still open, and when they are needed
 
