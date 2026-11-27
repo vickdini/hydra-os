@@ -146,8 +146,13 @@ pub fn start() -> Vec<(u32, u32, u64)> {
             sysv_back = true;
         }
     }
+    // wave12 GV: the segments, each from its own record
+    let segs: Vec<(u64, &[u8])> = recs.iter().filter(|(_, d)| d.first() == Some(&crate::shmrec::K_SHMSEG)).map(|(&k, &d)| (k, d)).collect();
+    let (seg_live, segs_back) = crate::sysv::restore_shm(&segs);
+    live.extend(seg_live);
     // wave10 G8-2: no tables back = no segments: the kernel's old attachments stop counting
-    if !sysv_back {
+    // (wave12 GV: unless segments came back from their own records)
+    if !sysv_back && !segs_back {
         crate::sysv::shm_fresh_start();
     }
     for &slot in &dead {

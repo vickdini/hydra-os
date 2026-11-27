@@ -49,6 +49,7 @@ mod netlink;
 mod pidfd;
 mod pipe;
 mod restore; // wave9 GX3
+mod shmrec; // wave12 GV
 mod signalfd;
 mod sockcall; // wave12 GV
 mod sysv;
