@@ -1,7 +1,10 @@
 #!/bin/bash
-# wave11 GD: GTK programs (Firefox's title bar and buttons, GTK dialogs) follow Plasma's
-# Breeze theme. Runs as root inside the Ubuntu root of the pool (network needed for apt):
-#   linux chroot /ubuntu /usr/bin/bash /path/gtk-breeze-inside.sh
+# wave11 GD: the image's desktop settings. Runs as root inside the Ubuntu root of the pool
+# (network needed for apt):  linux chroot /ubuntu /usr/bin/bash /path/desktop-inside.sh
+# 1. kwin_wayland gets CAP_SYS_NICE (as Ubuntu's kwin package sets it on Linux): kwin then
+#    runs its compositor thread SCHED_RR, which Hydra's scheduler runs at high priority, so
+#    pointer moves and frames do not wait behind busy programs (Firefox).
+# 2. GTK programs (Firefox's title bar and buttons, GTK dialogs) follow Plasma's Breeze theme.
 # Installs breeze-gtk-theme (the GTK 2/3/4 Breeze theme) and kde-config-gtk-style (KDE's
 # GTK settings module: at every login kded's gtkconfig writes the user's GTK settings,
 # settings.ini, gtkrc and xsettingsd's, from Plasma's own), then sets Breeze as the
@@ -11,7 +14,12 @@ set -e
 export DEBIAN_FRONTEND=noninteractive
 dpkg --configure -a
 apt-get update -qq
-apt-get install -y -q -o Dpkg::Use-Pty=0 breeze-gtk-theme kde-config-gtk-style
+apt-get install -y -q -o Dpkg::Use-Pty=0 breeze-gtk-theme kde-config-gtk-style libcap2-bin librsvg2-common
+# (librsvg2-common: GTK's SVG image loader; without it symbolic icons, the title-bar
+# buttons' glyphs among them, do not draw)
+ls /usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders/ | xargs echo
+setcap cap_sys_nice+ep /usr/bin/kwin_wayland
+getcap /usr/bin/kwin_wayland
 S='[Settings]
 gtk-theme-name=Breeze
 gtk-icon-theme-name=breeze
@@ -32,4 +40,4 @@ for h in /etc/skel /home/hydra; do
 done
 chown -R hydra:hydra /home/hydra/.config/gtk-3.0 /home/hydra/.config/gtk-4.0 2>/dev/null || true
 ls /usr/share/themes | tr '\n' ' '; echo
-echo GTK-BREEZE-OK
+echo DESKTOP-SETTINGS-OK

@@ -207,3 +207,33 @@ Operators can monitor and test driver reincarnation interactively:
 - `service restart <name>`: Manually cycles and reincarnates a service daemon.
 - `service kill <name>`: Simulates a sudden driver crash and triggers automated reincarnation.
 
+
+### Interactive work first (wave 11, Group D)
+What the NUC's desktop needed (pointer lag and a slow start menu while Firefox ran, on a
+machine without a GPU driver where everything is drawn in software):
+
+- **Recent CPU use per thread** (`Task::recent`): each tick a thread runs adds
+  `RECENT_TICK`; every `RECENT_DECAY_TICKS` (250 ms) every thread's value loses a quarter.
+  Among ready threads of one priority (and within the woken / preempted / other tiers)
+  the least used runs first, then round-robin order; a yield puts the current thread last.
+  This is the classic BSD idea, and what CFS's virtual runtime achieves on Linux: a
+  thread that mostly sleeps (the shell drawing the start menu, the compositor) goes ahead
+  of a browser's busy threads, without anyone marking it.
+- **Wake-up preemption**: a woken thread preempts the running one mid-slice only if it
+  has a higher priority, or the same and clearly less recent use (`RECENT_MARGIN`); two
+  equally busy threads do not ping-pong. When no CPU is idle, `smp::kick_for` interrupts
+  another CPU (the TLB vector with a resched flag, `idt.rs`) to run a woken thread at once
+  rather than at its next tick: for a high or real-time priority thread any CPU running
+  lower priority work; for a normal one only a CPU running a busy normal thread
+  (`PREEMPT_BUSY`, used 4 x more lately: `PREEMPT_RATIO`). A system call's kick waits for
+  its end and is dropped when the caller's own CPU runs the woken thread.
+- **Priorities**: the highest ready priority among services runs first; display-server and
+  input-server run at `Realtime` (above the other services), so a cursor move waits for no
+  file or network work. Linux threads asking for `SCHED_FIFO`/`SCHED_RR` or nice <= -10 run
+  at `High`: kwin_wayland asks for `SCHED_RR` at start when it has `CAP_SYS_NICE` (the image
+  sets that file capability, `tools/desktop/desktop-inside.sh`).
+- The timeslice stays 50 ms: with wake-up preemption by use, the slice no longer bounds
+  interactive latency, and shorter slices would only add switches between busy threads.
+- display-server copies a flipped picture in 64-row bands on its screen thread (the flip
+  returns at once; the lock is free between bands, so a cursor move waits for one band at
+  most) and completes the flip at the first blank after the copy.

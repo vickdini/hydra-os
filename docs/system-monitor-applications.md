@@ -58,11 +58,13 @@ for `org.freedesktop.systemd1` on the session bus).
 
 ## The Disks view ("Basic data partition")
 
-System Monitor's disk sensors (ksystemstats' disk plugin) list Solid storage volumes
-that are mounted and show their label, or else the GPT partition name. Hydra's root is a
-ZFS dataset, not a block device Solid knows, so it is not listed; what remains is a
-mounted FAT partition whose GPT name is Windows' default "Basic data partition" (the
-stick's data partition in a live session). That is correct as far as Solid goes; showing
-the system disk would need the root pool's device (the ZFS partition) reported as the
-volume mounted at `/` (UDisks2 does this on Linux through libblockdev's ZFS support,
-which Hydra does not have).
+System Monitor's disk sensors (ksystemstats' disk plugin) list the storage volumes Solid
+knows that are mounted, named by their label or else their GPT partition name. Hydra's
+root is a ZFS dataset (`hydrapool/...`), not a block device Solid knows, so the system
+disk is never listed: in QEMU the Disks box is empty. On the NUC the one entry is a
+mounted FAT partition whose GPT name is Windows' default "Basic data partition" (on the
+live stick that is the stick's data partition; not checked on the machine). So the entry
+itself is right as far as Solid goes, but the list misses the disk that matters. Showing
+it needs the root pool's partition reported as the volume mounted at `/` (on Linux,
+UDisks2 does this through libblockdev's ZFS support, which Hydra does not have); left
+for later.
