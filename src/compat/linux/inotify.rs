@@ -28,10 +28,10 @@ fn not_an_instance(fd: u64) -> i64 {
     }
 }
 
-/// `inotify_init1(flags)` / `inotify_init()` reaching the kernel: before vfs-server's first
-/// start it waits for it (then the call is vfs-server's); else vfs-server is not there.
-pub fn sys_init1(flags: u64) -> i64 {
-    crate::lx::fileh::notify_init_wait(294, [flags, 0, 0, 0, 0, 0]).unwrap_or(ENOSYS)
+/// `inotify_init1(flags)` / `inotify_init()` reaching the kernel: vfs-server never claimed
+/// them (it claims them before its first start ends; wave11 GK): not there.
+pub fn sys_init1(_flags: u64) -> i64 {
+    ENOSYS
 }
 
 /// `inotify_add_watch(fd, ..)` reaching the kernel: `fd` is no instance.

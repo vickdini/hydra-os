@@ -281,7 +281,7 @@ mod live {
         const ERESTARTSYS: i64 = -512;
         let vfs_online = || svc::host(svc::host_of(LXS_VFS)).is_some_and(|x| x.is_online());
         for _ in 0..TRIES {
-            if !vfs_online() && crate::lx::restart::restarting(LXS_VFS) {
+            if !vfs_online() && crate::lx::restart::waitable(LXS_VFS) { // wave11 GK
                 let _ = crate::lx::restart::wait_online(LXS_VFS, &vfs_online);
             }
             // (no group with a permission mark wants this open any more: allowed)

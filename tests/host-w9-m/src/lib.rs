@@ -93,6 +93,8 @@ pub mod compat {
             pub fn unmap_past(ino: u64, size: u64) {
                 UNMAPS.lock().unwrap().push((ino, size));
             }
+            /// wave11 GK: *stub* the page cache's give-back (tmpfs asks it when memory is short)
+            pub fn cache_shrink(_want: usize) {}
         }
     }
 }

@@ -109,3 +109,19 @@ fn heap_life() {
         assert_eq!((x, y), (a, a));
     }
 }
+
+// wave11 GK begin
+/// The heap's share of memory: a sixth, between 256 MiB and 1 GiB, at most half.
+#[test]
+fn heap_target_is_a_sixth_of_memory() {
+    use hydra_hosttests_t32::memory::heap::{heap_target, HEAP_SIZE};
+    const M: usize = 1 << 20;
+    assert_eq!(heap_target(2048 * M), 2048 * M / 6, "2 GB: a sixth (341 MiB)");
+    assert_eq!(heap_target(2560 * M), 2560 * M / 6);
+    assert_eq!(heap_target(3014 * M), 3014 * M / 6, "QEMU's 4 GB (3014 MiB usable): 502 MiB, was 1 GiB");
+    assert_eq!(heap_target(16384 * M), HEAP_SIZE, "at most 1 GiB");
+    assert_eq!(heap_target(1024 * M), 256 * M, "at least 256 MiB");
+    assert_eq!(heap_target(400 * M), 200 * M, "at most half");
+    assert_eq!(heap_target(100 * M), 128 * M, "never under the 128 MiB minimum");
+}
+// wave11 GK end

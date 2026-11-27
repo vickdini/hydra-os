@@ -133,6 +133,12 @@ pub const fn shape(nr: u64) -> Option<Shape> {
 /// The numbers vfs-server claimed (bit `nr`), below the table's 512.
 static CLAIMED: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 
+/// wave11 GK: whether `nr` is a file-service number vfs-server may still claim (not yet
+/// claimed): the only numbers whose route changes at run time.
+pub fn claimable(nr: u64) -> bool {
+    shape(nr).is_some() && !claimed(nr)
+}
+
 /// Whether vfs-server claimed call `nr`.
 pub fn claimed(nr: u64) -> bool {
     nr < 512 && CLAIMED[nr as usize / 64].load(Ordering::Acquire) & (1 << (nr % 64)) != 0
@@ -1107,7 +1113,7 @@ pub static OFFLINE_WAITS: AtomicU64 = AtomicU64::new(0);
 /// wait failed (`ERESTARTSYS` on a signal, `EIO` after 30 s or if it went again): the
 /// caller's answer.
 fn offline_wait() -> Result<Option<&'static Host>, i64> {
-    if !super::restart::restarting(LXS_VFS) {
+    if !super::restart::waitable(LXS_VFS) { // wave11 GK: or in its first start
         return Ok(None);
     }
     OFFLINE_WAITS.fetch_add(1, Ordering::Relaxed);
@@ -1115,47 +1121,8 @@ fn offline_wait() -> Result<Option<&'static Host>, i64> {
     vfs_host().map(Some).ok_or(EIO)
 }
 
-/// Inotify/fanotify inits that waited for vfs-server's first start.
-pub static FIRST_START_WAITS: AtomicU64 = AtomicU64::new(0);
-
-/// wave9 G9-C (review M2): `inotify_init*` / `fanotify_init` (`nr`, `args`) reaching the
-/// kernel before vfs-server has claimed them (not started yet) waits for that, at most 30 s,
-/// then forwards the call: `Some(answer)`; `None`: vfs-server was given up or did not come
-/// (the kernel's answer, ENOSYS).
-#[cfg(target_os = "uefi")]
-pub fn notify_init_wait(nr: u64, args: [u64; 6]) -> Option<i64> {
-    if !is_notify_call(nr) || super::restart::down(LXS_VFS) {
-        return None;
-    }
-    let mut waited = false;
-    for _ in 0..600 {
-        if claimed(nr) && vfs_host().is_some() {
-            // SAFETY: SyscallFrame is plain register data
-            let mut f: SyscallFrame = unsafe { core::mem::zeroed() };
-            f.rax = nr;
-            [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9] = args;
-            return forward(&f);
-        }
-        if super::restart::down(LXS_VFS) {
-            return None;
-        }
-        if crate::compat::linux::proc::signal_pending() {
-            return Some(crate::compat::linux::proc::ERESTARTSYS);
-        }
-        if !waited {
-            waited = true;
-            FIRST_START_WAITS.fetch_add(1, Ordering::Relaxed);
-        }
-        crate::task::sleep_ms(50);
-    }
-    None
-}
-
-/// Off the kernel (host tests): no first start to wait for.
-#[cfg(not(target_os = "uefi"))]
-pub fn notify_init_wait(_nr: u64, _args: [u64; 6]) -> Option<i64> {
-    None
-}
+// wave11 GK: `notify_init_wait` (inotify/fanotify inits before vfs-server's first start) is
+// gone: vfs-server claims them before it goes online, and callers wait for its first start.
 // wave9 G6b-1 end
 
 /// [`LX_FH_MNTGET`](crate::ipc::protocol::LX_FH_MNTGET): namespace `ns`'s whole table to

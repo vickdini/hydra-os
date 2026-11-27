@@ -1024,3 +1024,15 @@ fn a_handle_answer_on_the_lock_free_path_is_made_on_the_ordinary_path() {
     assert!(forward(&f).is_some());
     assert_eq!(n.load(Ordering::Acquire), 2);
 }
+
+// wave11 GK (review 1): only file-service numbers not yet claimed wait for vfs-server's
+// first start; the kernel's own calls (mmap 9, futex 202, brk 12, clock_gettime 228) never do
+#[test]
+fn only_unclaimed_file_numbers_are_claimable() {
+    let _sim = world();
+    for nr in [9u64, 202, 12, 228, 0, 1] {
+        assert!(!claimable(nr), "nr {}", nr);
+    }
+    assert!(claimable(257) || claimed(257));
+    assert_eq!(claimable(257), !claimed(257));
+}
