@@ -184,18 +184,18 @@ fn net_driver_gets_the_adapters_window_model_and_interrupt() {
     fake::MSI.lock().unwrap().insert((0, 4, 0), 50);
     fake::IOMMU_DMA_TEST.store(true, Ordering::SeqCst);
     let id = SUPERVISOR.lock().start_service("net_driver").unwrap();
-    assert_eq!(&with(id.0, |t| t.cmdline.clone()).unwrap()[..], b"/drivers/net_driver\0bar0=0xfeb80000\0model=82540\0dma_test=1\0irq=11\0", "the 82540 gets no MSI");
+    assert_eq!(&with(id.0, |t| t.cmdline.clone()).unwrap()[..], b"/drivers/net_driver\0bar0=0xfeb80000\0model=82540\0dev=0x100e\0dma_test=1\0irq=11\0", "the 82540 gets no MSI");
     assert!(fake::SVC_LOG.lock().unwrap().contains(&("set_grants", ENDPOINT_NET_DEV, 0xFEB8_0000, 128 * 1024)));
     task::kill(id);
     fake::IOMMU_DMA_TEST.store(false, Ordering::SeqCst);
     let dev2 = hydra_hosttests_t31::arch::pci::PciDevice { irq_line: 2, ..dev };
     *fake::E1000.lock().unwrap() = Some((dev2, 0xFEB8_0000, "82574"));
     let id = SUPERVISOR.lock().start_service("net_driver").unwrap();
-    assert_eq!(&with(id.0, |t| t.cmdline.clone()).unwrap()[..], b"/drivers/net_driver\0bar0=0xfeb80000\0model=82574\0irq=50\0");
+    assert_eq!(&with(id.0, |t| t.cmdline.clone()).unwrap()[..], b"/drivers/net_driver\0bar0=0xfeb80000\0model=82574\0dev=0x100e\0irq=50\0");
     task::kill(id);
     fake::MSI.lock().unwrap().clear();
     let id = SUPERVISOR.lock().start_service("net_driver").unwrap();
-    assert_eq!(&with(id.0, |t| t.cmdline.clone()).unwrap()[..], b"/drivers/net_driver\0bar0=0xfeb80000\0model=82574\0", "IRQ 2 (the cascade) is not usable");
+    assert_eq!(&with(id.0, |t| t.cmdline.clone()).unwrap()[..], b"/drivers/net_driver\0bar0=0xfeb80000\0model=82574\0dev=0x100e\0", "IRQ 2 (the cascade) is not usable");
 }
 
 fn block_size(ep: u32, req: Message) -> Result<Message, i64> {

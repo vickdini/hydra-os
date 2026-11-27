@@ -29,6 +29,34 @@ static IMAGE_SIZE: AtomicU64 = AtomicU64::new(0);
 /// The boot stack's physical range start.
 static STACK_PHYS: AtomicU64 = AtomicU64::new(0);
 
+/// wave11 GH: moves to the kernel's own stack in the higher half (the one [`go_high`] mapped)
+/// and calls `next` there; does not return. [`go_high`] leaves the kernel on the firmware's
+/// stack: the firmware's own code runs on the caller's stack, and a real firmware (the
+/// NUC's) stops when that is at a higher-half address (its drivers use stack buffers for
+/// DMA or cut addresses to 32 bits). So this is called once `ExitBootServices` is done.
+/// Without the move (`nohigh`, or the move impossible) `next` simply runs on the current
+/// stack.
+pub fn run_on_kernel_stack(next: fn() -> !) -> ! {
+    if STACK_PHYS.load(Ordering::SeqCst) == 0 {
+        next();
+    }
+    let top = STACK_BOTTOM + STACK_SIZE;
+    unsafe {
+        // The Microsoft x64 convention of the UEFI target: 32 bytes of shadow space, the
+        // stack 16-byte aligned at the call
+        core::arch::asm!(
+            "mov rsp, {top}",
+            "xor ebp, ebp",
+            "sub rsp, 32",
+            "call {target}",
+            "ud2",
+            top = in(reg) top,
+            target = in(reg) next as usize as u64,
+            options(noreturn)
+        );
+    }
+}
+
 extern "C" {
     /// The image's DOS header (defined by the linker).
     static __ImageBase: u8;
@@ -53,7 +81,7 @@ const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
 /// A zeroed page from the firmware (boot loader data: never handed to the frame allocator).
 #[cfg(target_os = "uefi")]
 fn page() -> Option<u64> {
-    let p = uefi::boot::allocate_pages(uefi::boot::AllocateType::AnyPages, uefi::boot::MemoryType::LOADER_DATA, 1).ok()?;
+    let p = uefi::boot::allocate_pages(uefi::boot::AllocateType::MaxAddress(0xFFFF_FFFF), uefi::boot::MemoryType::LOADER_DATA, 1).ok()?;
     unsafe { core::ptr::write_bytes(p.as_ptr(), 0, 4096) };
     Some(p.as_ptr() as u64)
 }
@@ -85,7 +113,7 @@ fn ram_top() -> Option<u64> {
 /// The kernel stack for the higher half, from the firmware.
 #[cfg(target_os = "uefi")]
 fn stack_pages() -> Option<u64> {
-    uefi::boot::allocate_pages(uefi::boot::AllocateType::AnyPages, uefi::boot::MemoryType::LOADER_DATA, (STACK_SIZE / 4096) as usize)
+    uefi::boot::allocate_pages(uefi::boot::AllocateType::MaxAddress(0xFFFF_FFFF), uefi::boot::MemoryType::LOADER_DATA, (STACK_SIZE / 4096) as usize)
         .ok()
         .map(|p| p.as_ptr() as u64)
 }
@@ -160,6 +188,29 @@ fn direct_map(pml4: u64) -> Option<()> {
     Some(())
 }
 
+// wave11 GH begin
+/// Where the firmware loaded the image `(start, size)` while it still runs there (before
+/// [`go_high`]): `None` if its header cannot be read.
+pub fn load_range() -> Option<(u64, u64)> {
+    unsafe {
+        let base = core::ptr::addr_of!(__ImageBase) as u64;
+        if base >= KERNEL_BASE {
+            return None;
+        }
+        pe_info(base).map(|(_, size)| (base, size))
+    }
+}
+
+/// Whether the image lies inside [2 GiB, 4 GiB): the slot of the low half the kernel keeps
+/// in every address space anyway (PCI hole, APICs), so staying there takes nothing from
+/// programs. Then the move to the higher half is skipped (the NUC's firmware, wave 11: an
+/// AMI/Intel firmware stops in its first file read when the kernel's code runs high before
+/// ExitBootServices, even with its own CR3, stack and IDT).
+pub fn in_kept_low_slot(start: u64, size: u64) -> bool {
+    start >= 2 << 30 && start.saturating_add(size) <= 4 << 30
+}
+// wave11 GH end
+
 /// The image's base relocation table `(rva, size)` and size of image, from its PE header.
 unsafe fn pe_info(base: u64) -> Option<((u32, u32), u64)> {
     let rd32 = |a: u64| core::ptr::read_unaligned(a as *const u32);
@@ -216,6 +267,7 @@ pub fn go_high(next: fn() -> !) {
         if base >= KERNEL_BASE {
             return;
         }
+        crate::arch::crumb::step("go_high: reading the PE header");
         let Some(((rva, len), size)) = pe_info(base) else { return };
         if rva == 0 || len == 0 || size == 0 || size > 0x3000_0000 {
             return;
@@ -224,6 +276,7 @@ pub fn go_high(next: fn() -> !) {
         if !each_reloc(base + rva as u64, len as u64, |_| {}) {
             return;
         }
+        crate::arch::crumb::step("go_high: relocations checked");
         // Hydra's top-level table: the firmware's entries (its identity map) and the top
         // entry for the image, which the firmware must not use
         let fw = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
@@ -231,29 +284,40 @@ pub fn go_high(next: fn() -> !) {
         if (256..512).any(|i| *((fw + i * 8) as *const u64) & PRESENT != 0) {
             return;
         }
-        let Some(pml4) = page() else { return };
-        core::ptr::copy_nonoverlapping(fw as *const u64, pml4 as *mut u64, 512);
-        if direct_map(pml4).is_none() {
-            return;
-        }
+        // wave11 GH: the higher-half entries go into the FIRMWARE's own top-level table and CR3
+        // stays the firmware's: a real firmware (the NUC's) never returned from its first file
+        // read under a copy of its tables at another address. The upper half is unused by
+        // the firmware (checked above); its table pages may be write-protected (CR0.WP is
+        // cleared while they are written). Hydra's own tables come at the takeover.
+        let pml4 = fw;
         let size = (size + 4095) & !4095;
-        for off in (0..size).step_by(4096) {
-            if map(pml4, KERNEL_BASE + off, base + off).is_none() {
-                return;
-            }
-        }
         let Some(stack) = stack_pages() else {
             return;
         };
-        for off in (0..STACK_SIZE).step_by(4096) {
-            if map(pml4, STACK_BOTTOM + off, stack + off).is_none() {
-                return;
-            }
-        }
-        // Nothing can fail from here on
-        x86_64::instructions::interrupts::without_interrupts(|| {
-            core::arch::asm!("mov cr3, {}", in(reg) pml4, options(nostack, preserves_flags));
+        let built = x86_64::instructions::interrupts::without_interrupts(|| {
+            let cr0 = x86_64::registers::control::Cr0::read_raw();
+            x86_64::registers::control::Cr0::write_raw(cr0 & !(1 << 16));
+            let ok = (|| {
+                direct_map(pml4)?;
+                for off in (0..size).step_by(4096) {
+                    map(pml4, KERNEL_BASE + off, base + off)?;
+                }
+                for off in (0..STACK_SIZE).step_by(4096) {
+                    map(pml4, STACK_BOTTOM + off, stack + off)?;
+                }
+                Some(())
+            })();
+            x86_64::registers::control::Cr0::write_raw(cr0);
+            // (new entries only: one reload of CR3 drops whatever the TLB might hold)
+            core::arch::asm!("mov {0}, cr3", "mov cr3, {0}", out(reg) _, options(nostack, preserves_flags));
+            ok
         });
+        if built.is_none() {
+            // (entries already written point at pages of ours and are never used: nothing runs high)
+            crate::arch::crumb::step("go_high: building the higher half failed; staying low");
+            return;
+        }
+        crate::arch::crumb::step_fmt(format_args!("go_high: higher half in the firmware's own table at {:#x} (CR3 unchanged)", pml4));
         let delta = KERNEL_BASE.wrapping_sub(base);
         // Written through the high alias: the firmware may have made the identity pages
         // of read-only sections read-only
@@ -261,21 +325,23 @@ pub fn go_high(next: fn() -> !) {
             let p = (KERNEL_BASE + r) as *mut u64;
             core::ptr::write_unaligned(p, core::ptr::read_unaligned(p).wrapping_add(delta));
         });
+        crate::arch::crumb::step("go_high: relocations applied; jumping high next");
         crate::memory::frame_allocator::enable_direct_map();
         IMAGE_PHYS.store(base, Ordering::SeqCst);
         IMAGE_SIZE.store(size, Ordering::SeqCst);
-        STACK_PHYS.store(stack, Ordering::SeqCst);
         let target = (next as usize as u64).wrapping_add(delta);
-        let top = STACK_BOTTOM + STACK_SIZE;
-        // The Microsoft x64 convention of the UEFI target: 32 bytes of shadow space, the
-        // stack 16-byte aligned at the call
+        // wave11 GH: the first thing at the high target prints a line through the firmware
+        // with nothing but identity addresses (crumb::high_arrived)
+        crate::arch::crumb::prepare_arrival();
+        STACK_PHYS.store(stack, Ordering::SeqCst);
+        // wave11 GH: to the high code, still on the firmware's stack (the kernel's own stack
+        // is taken after ExitBootServices: run_on_kernel_stack); 16-byte aligned at the
+        // call, 32 bytes of shadow space (the Microsoft x64 convention of the UEFI target)
         core::arch::asm!(
-            "mov rsp, {top}",
-            "xor ebp, ebp",
+            "and rsp, -16",
             "sub rsp, 32",
             "call {target}",
             "ud2",
-            top = in(reg) top,
             target = in(reg) target,
             options(noreturn)
         );

@@ -147,7 +147,52 @@ struct TcpConn {
     listener: Option<u32>,
     /// Its port was bound with `SO_REUSEADDR` (inherited from the listener).
     reuse_addr: bool,
+    /// wave11 GH: the largest segment we send: the peer's MSS option (536 without one,
+    /// RFC 1122), lowered by ICMP "fragmentation needed" (path MTU).
+    mss: usize,
 }
+
+// wave11 GH begin: TCP counters for the log (NUC run 15: https failed while ping worked)
+/// [SYNs sent, SYN-ACKs received, retransmissions, RSTs received, RSTs sent, bad checksums
+/// received, connections established, refused, reset, timed out, "fragmentation needed"
+/// received, smallest peer MSS seen].
+pub static TCP_STATS: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
+const ST_SYN: usize = 0;
+const ST_SYNACK: usize = 1;
+const ST_RETX: usize = 2;
+const ST_RST_IN: usize = 3;
+const ST_RST_OUT: usize = 4;
+const ST_BADSUM: usize = 5;
+const ST_EST: usize = 6;
+const ST_REFUSED: usize = 7;
+const ST_RESET: usize = 8;
+const ST_TIMEOUT: usize = 9;
+const ST_FRAG: usize = 10;
+const ST_MSS_MIN: usize = 11;
+
+fn stat(i: usize) {
+    TCP_STATS[i].fetch_add(1, Ordering::Relaxed);
+}
+
+/// The counters as one log line.
+pub fn tcp_stats_line() -> alloc::string::String {
+    let v = |i: usize| TCP_STATS[i].load(Ordering::Relaxed);
+    alloc::format!(
+        "[net-server] tcp: syn sent {} syn-ack in {} retransmits {} rst in {} rst out {} bad checksums in {} established {} refused {} reset {} timed out {} frag-needed in {} smallest peer mss {}",
+        v(ST_SYN), v(ST_SYNACK), v(ST_RETX), v(ST_RST_IN), v(ST_RST_OUT), v(ST_BADSUM), v(ST_EST), v(ST_REFUSED), v(ST_RESET), v(ST_TIMEOUT), v(ST_FRAG), v(ST_MSS_MIN)
+    )
+}
+
+/// The MSS to send with, from the peer's option: at most ours, 536 without one.
+fn peer_mss(opt: Option<u16>) -> usize {
+    let m = opt.map(|m| (m as usize).clamp(88, MSS)).unwrap_or(536);
+    let prev = TCP_STATS[ST_MSS_MIN].load(Ordering::Relaxed);
+    if prev == 0 || (m as u64) < prev {
+        TCP_STATS[ST_MSS_MIN].store(m as u64, Ordering::Relaxed);
+    }
+    m
+}
+// wave11 GH end
 
 /// An ICMP socket: a ping socket (`SOCK_DGRAM`, echo replies for its identifier) or a raw
 /// one (`SOCK_RAW`, every ICMP message, IPv4 ones with their IP header).
@@ -427,9 +472,14 @@ impl TcpConn {
     /// * `seq` - Sequence number for the segment header.
     /// * `payload` - Segment payload byte slice.
     fn send_segment(&mut self, flags: u8, seq: u32, payload: &[u8]) {
-        let mut buf = [0u8; 20 + MSS];
+        let mut buf = [0u8; 24 + MSS];
         let src = self.local_ip;
-        if let Ok(n) = TcpPacket::serialize(
+        // wave11 GH: our MSS in SYN and SYN-ACK (without it a peer sends at most 536 bytes)
+        let opts: &[u8] = if flags & TcpFlags::SYN != 0 { &[2, 4, (MSS >> 8) as u8, MSS as u8] } else { &[] };
+        if flags & TcpFlags::SYN != 0 && flags & TcpFlags::ACK == 0 {
+            stat(ST_SYN);
+        }
+        if let Ok(n) = TcpPacket::serialize_opts(
             src,
             self.remote_ip,
             self.local_port,
@@ -438,6 +488,7 @@ impl TcpConn {
             self.rcv_nxt,
             flags,
             self.window(),
+            opts,
             payload,
             &mut buf,
         ) {
@@ -464,7 +515,7 @@ impl TcpConn {
             if unsent == 0 || in_flight >= window {
                 break;
             }
-            let n = unsent.min(MSS).min(window - in_flight);
+            let n = unsent.min(self.mss).min(window - in_flight);
             let chunk: Vec<u8> = self.send_buf.iter().skip(data_in_flight).take(n).copied().collect();
             let seq = self.snd_nxt;
             self.send_segment(TcpFlags::ACK | TcpFlags::PSH, seq, &chunk);
@@ -492,12 +543,19 @@ impl TcpConn {
     fn input(&mut self, seg: &TcpPacket) {
         let flags = seg.flags;
         if flags & TcpFlags::RST != 0 {
+            stat(ST_RST_IN);
+            stat(if self.state == TcpState::SynSent { ST_REFUSED } else { ST_RESET });
             self.error = Some(if self.state == TcpState::SynSent { ECONNREFUSED } else { ECONNRESET });
             self.state = TcpState::Closed;
             return;
         }
         if self.state == TcpState::SynSent {
             if flags & TcpFlags::SYN != 0 && flags & TcpFlags::ACK != 0 && seg.ack_num == self.iss.wrapping_add(1) {
+                stat(ST_SYNACK);
+                stat(ST_EST);
+                if !is_local(self.remote_ip) {
+                    self.mss = peer_mss(seg.mss);
+                }
                 self.rcv_nxt = seg.seq_num.wrapping_add(1);
                 self.snd_una = seg.ack_num;
                 self.snd_wnd = seg.window_size as u32;
@@ -609,7 +667,9 @@ impl TcpConn {
             return false;
         }
         self.retries += 1;
+        stat(ST_RETX);
         if self.retries > MAX_RETRIES {
+            stat(ST_TIMEOUT);
             self.error = Some(ETIMEDOUT);
             if self.state == TcpState::SynReceived {
                 self.detached = true; // never accepted: nobody holds it
@@ -629,13 +689,19 @@ impl TcpConn {
             self.send_segment(TcpFlags::SYN | TcpFlags::ACK, iss, &[]);
             return false;
         }
-        // Go back N: resend everything from the oldest unacknowledged byte
+        self.go_back_n();
+        false
+    }
+
+    /// Go back N: resends everything from the oldest unacknowledged byte, then the FIN if
+    /// one was sent (the retransmission timer, and a smaller path MTU).
+    fn go_back_n(&mut self) {
         self.snd_nxt = self.snd_una;
         if self.fin_seq.is_some() && self.send_buf.is_empty() {
             let seq = self.snd_una;
             self.send_segment(TcpFlags::FIN | TcpFlags::ACK, seq, &[]);
             self.snd_nxt = self.snd_una.wrapping_add(1);
-            return false;
+            return;
         }
         let fin = self.fin_seq.take();
         let state = self.state;
@@ -647,7 +713,6 @@ impl TcpConn {
         if fin.is_none() {
             self.state = state;
         }
-        false
     }
 }
 
@@ -679,6 +744,17 @@ pub fn poll_nic() -> usize {
 
 /// Runs the TCP retransmission timers and forgets closed connections nobody holds.
 pub fn run_timers() {
+    // wave11 GH: the TCP counters in the log every 60 s while they change
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    static SUM: AtomicU64 = AtomicU64::new(0);
+    let t = now();
+    if t >= LAST.load(Ordering::Relaxed) + 6000 {
+        LAST.store(t, Ordering::Relaxed);
+        let sum: u64 = TCP_STATS[..11].iter().map(|c| c.load(Ordering::Relaxed)).sum();
+        if sum != SUM.swap(sum, Ordering::Relaxed) {
+            hydra_rt::println!("{}", tcp_stats_line());
+        }
+    }
     let mut stack = STACK.lock();
     for c in stack.tcp.values_mut() {
         c.timers();
@@ -803,7 +879,12 @@ fn handle_frame(raw: &[u8]) {
 fn handle_ip(src: [u8; 4], dst: [u8; 4], proto: IpProtocol, payload: &[u8]) {
     match proto {
         IpProtocol::Tcp => {
-            let Some(seg) = TcpPacket::parse(payload) else { return };
+            let Some(mut seg) = TcpPacket::parse(payload) else { return };
+            // wave11 GH: counted (not dropped: the card checked the frame's CRC already)
+            if crate::net::tcp::compute_tcp_checksum(src, dst, payload) != 0 && !is_local(src) {
+                seg.csum_ok = false;
+                stat(ST_BADSUM);
+            }
             let mut stack = STACK.lock();
             let found = stack
                 .tcp
@@ -865,6 +946,7 @@ fn handle_ip(src: [u8; 4], dst: [u8; 4], proto: IpProtocol, payload: &[u8]) {
                         error: None,
                         listener: Some(lid),
                         reuse_addr,
+                        mss: if is_local(src) { MSS } else { peer_mss(seg.mss) },
                     };
                     c.send_segment(TcpFlags::SYN | TcpFlags::ACK, iss, &[]);
                     stack.tcp.insert(id, c);
@@ -882,6 +964,37 @@ fn handle_ip(src: [u8; 4], dst: [u8; 4], proto: IpProtocol, payload: &[u8]) {
                 return;
             }
             let ty = payload[0];
+            // wave11 GH: "fragmentation needed" (path MTU discovery): our segments with DF
+            // were too big for a link on the way (PPPoE, VPNs): smaller from now on
+            if ty == 3 && payload[1] == 4 && !is_v6(dst) && payload.len() >= 8 + 20 + 4 {
+                stat(ST_FRAG);
+                let mtu = u16::from_be_bytes([payload[6], payload[7]]) as usize;
+                let orig = &payload[8..];
+                let ihl = ((orig[0] & 0xF) as usize) * 4;
+                // (review: the quoted segment must be one of ours in flight; MTUs below 552,
+                // Linux's min_pmtu, count as 552: MSS 512)
+                if orig[9] == 6 && ihl >= 20 && orig.len() >= ihl + 8 {
+                    let osrc = [orig[12], orig[13], orig[14], orig[15]];
+                    let odst = [orig[16], orig[17], orig[18], orig[19]];
+                    let sport = u16::from_be_bytes([orig[ihl], orig[ihl + 1]]);
+                    let dport = u16::from_be_bytes([orig[ihl + 2], orig[ihl + 3]]);
+                    let oseq = u32::from_be_bytes([orig[ihl + 4], orig[ihl + 5], orig[ihl + 6], orig[ihl + 7]]);
+                    let new_mss = mtu.max(552) - 40;
+                    let mut stack = STACK.lock();
+                    if let Some(c) = stack.tcp.values_mut().find(|c| c.local_port == sport && c.remote_ip == odst && c.remote_port == dport && c.local_ip == osrc) {
+                        let in_flight = seq_le(c.snd_una, oseq) && seq_lt(oseq, c.snd_nxt);
+                        if in_flight && new_mss < c.mss && matches!(c.state, TcpState::Established | TcpState::CloseWait | TcpState::FinWait1 | TcpState::LastAck | TcpState::Closing) {
+                            c.mss = new_mss;
+                            // Resend what was lost at the smaller size (as the timer does)
+                            c.retries = 0;
+                            c.rto = RTO_INITIAL_TICKS;
+                            c.last_send = now();
+                            c.go_back_n();
+                        }
+                    }
+                }
+                return;
+            }
             let v6 = is_v6(dst);
             // Echo requests to us are answered by the kernel
             if (!v6 && ty == 8) || (v6 && ty == 128) {
@@ -953,6 +1066,7 @@ fn send_reset(src: [u8; 4], dst: [u8; 4], seg: &TcpPacket) {
         (0, seg.seq_num.wrapping_add(len), TcpFlags::RST | TcpFlags::ACK)
     };
     if let Ok(n) = TcpPacket::serialize(src, dst, seg.dst_port, seg.src_port, seq, ack, flags, 0, &[], &mut buf) {
+        stat(ST_RST_OUT);
         send_ip(src, dst, IpProtocol::Tcp, &buf[..n]);
     }
 }
@@ -1008,6 +1122,7 @@ pub fn tcp_connect(ip: [u8; 4], port: u16, local_port: Option<u16>) -> Result<u3
         error: None,
         listener: None,
         reuse_addr: local_port.is_some_and(|p| stack.binds.values().any(|b| b.port == p && b.reuse_addr)),
+        mss: if is_local(ip) { MSS } else { 536 },
     };
     c.send_segment(TcpFlags::SYN, iss, &[]);
     stack.tcp.insert(id, c);

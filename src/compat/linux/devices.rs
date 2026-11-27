@@ -1984,7 +1984,11 @@ fn boot_flag_files(t: &mut Tree, s: &mut ZfsServer, facts: &[(crate::fs::blockde
     let info = crate::arch::bootdisk::info();
     let boot_disk = facts.iter().find(|(d, _)| d.pool.is_some()).map(|(d, _)| alloc::format!("{}
 ", d.name));
-    let wanted: [(&str, Option<Vec<u8>>, u32); 3] = [
+    // wave11 GH: /run/hydra/nettest with the boot word nettest (hydra-live-setup then runs
+    // hydra-nettest a minute after the session starts)
+    let nettest = crate::arch::bootopts::say(&[b"nettest"]).then(|| b"1\n".to_vec());
+    let wanted: [(&str, Option<Vec<u8>>, u32); 4] = [
+        ("nettest", nettest, 0o644),
         ("live", info.live.then(|| b"1
 ".to_vec()), 0o644),
         ("setup.conf", info.setup_conf.clone(), 0o600),

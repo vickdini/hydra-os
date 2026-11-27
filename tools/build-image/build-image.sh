@@ -24,6 +24,8 @@
 #             kernel and boot files: on the stick's EFI partition and in its install set
 #             (/opt/hydra-install/esp in the live pool, what the installer copies to the disk).
 #             No pool snapshot and no cleaning: for a kernel-side change. Needs one VM boot.
+#             EXTRA="treepath=poolpath ..." also installs files of this tree into the live pool
+#             (mode 755), e.g. EXTRA="userland/hydra-logind/hydra-session=/usr/libexec/hydra-session".
 #   stick     out/hydra-live.img: GPT disk image, EFI partition (kernel, boot files, \hydra\live)
 #             + Hydra pool partition (work/live.raw)
 #
@@ -133,7 +135,26 @@ esp_tree() {
     # on an installed system; the stick waits longer (see the stick steps)
     mkdir -p "$d/hydra"
     printf '# Hydra start menu: shown at every start; entry 1 starts after this many seconds.\r\ntimeout=3\r\n' > "$d/hydra/menu"
+    log_files "$d/logs"
     return 0
+}
+
+# wave11 GH: the fixed log files (NUC runs 9-14: the firmware hung when Hydra created or
+# grew files on the EFI partition, on the first start after a fresh write). A start only
+# overwrites them in place: boot001.txt ... boot032.txt at the log's full size (2162688 bytes,
+# empty lines; logring::FILE_SIZE, logring::SLOTS) and steps.txt (64 lines of 160 bytes).
+log_files() {
+    local l=$1
+    mkdir -p "$l"
+    printf 'Hydra writes a log of every start into one of the files boot001.txt ... boot032.txt here.\r\nThe first line of each says the start number: the highest number is the newest log.\r\nPlease send the newest one (or all of them) back.\r\n' > "$l/README.TXT"
+    python3 -c "
+import sys
+d=sys.argv[1]
+fill=b'\r\n'*(2162688//2)
+for n in range(1,33):
+    open('%s/boot%03d.txt'%(d,n),'wb').write(fill)
+open(d+'/steps.txt','wb').write((b' '*158+b'\r\n')*64)
+" "$l"
 }
 
 # wave11 GH: the stick's EFI partition image (512 MiB FAT32) into file $1: the tree's EFI
@@ -147,9 +168,9 @@ esp_image() {
     mkdir -p "$R$WORK/esptree/hydra"
     printf 'Hydra live session: this file makes Hydra start as "try Hydra" from this stick.\r\n' > "$R$WORK/esptree/hydra/live"
     printf '# Hydra start menu: shown at every start; entry 1 starts after this many seconds.\r\ntimeout=5\r\n' > "$R$WORK/esptree/hydra/menu"
+    # Boot breadcrumbs (\logs\steps.txt and on screen) from the very first instruction
+    printf 'This file makes Hydra write each early start step into \\logs\\steps.txt (diagnostics).\r\n' > "$R$WORK/esptree/hydra/crumbs"
     printf '# Extra start words for Hydra, one or more per line (# starts a comment), e.g.\r\n#   verbose      boot messages instead of the logo\r\n#   iommu=off    no DMA remapping\r\n#   cpus=1       one processor\r\n' > "$R$WORK/esptree/hydra/options.txt"
-    mkdir -p "$R$WORK/esptree/logs"
-    printf 'Hydra writes a log of every start here: boot001.txt, boot002.txt, ... (the highest number is the newest).\r\nPlease send the newest one (or all of them) back.\r\n' > "$R$WORK/esptree/logs/README.TXT"
     mcopy -s -i "$E" "$R$WORK"/esptree/* ::/
     rm -rf "$R$WORK/esptree"
 }
@@ -259,6 +280,7 @@ EOF
         dd if="$E" of="$S" bs=1M seek=1 conv=notrunc,sparse status=none
         dd if="$L" of="$S" bs=1M seek=$((1 + ESP_MIB)) conv=notrunc,sparse status=none
         rm -f "$E"
+        python3 "$HERE/mbr-message.py" "$S"
         sfdisk --list "$S"
         (cd "$R$OUT" && sha256sum hydra-live.img > hydra-live.img.sha256)
         say "stick image: $OUT/hydra-live.img ($(numfmt --to=iec "$total")), $(cat "$R$OUT/hydra-live.img.sha256")"
@@ -276,12 +298,33 @@ EOF
         esp_tree "$R$WORK/esptree"
         tar -C "$R$WORK/esptree" -cf "$R$OUT/esp.tar" .
         rm -rf "$R$WORK/esptree"
+        # Files of this tree for the live pool (EXTRA), and the list the VM installs from
+        rm -rf "$R$OUT/extra" && mkdir -p "$R$OUT/extra"
+        : > "$R$OUT/extra/list"
+        i=0
+        for pair in ${EXTRA:-}; do
+            src=${pair%%=*}; dst=${pair#*=}
+            [ -f "$TREE/$src" ] || die "EXTRA: no $TREE/$src"
+            cp "$TREE/$src" "$R$OUT/extra/f$i"
+            echo "f$i $dst" >> "$R$OUT/extra/list"
+            i=$((i + 1))
+        done
         cat > "$R$OUT/restick-inside.sh" <<'INSIDE'
 #!/bin/bash
 # Runs inside the stick's live pool (booted from the build's test ISO): replaces the install
-# set's EFI files with the build host's, then powers off. Prints RESTICK-OK or RESTICK-FAILED.
+# set's EFI files with the build host's, installs the EXTRA files, then powers off. Prints
+# RESTICK-OK or RESTICK-FAILED.
 D=/opt/hydra-install
 ok=1
+curl -sSf --retry 3 -o /tmp/extra.list "http://10.0.2.2:$PORT/extra/list" || ok=0
+while read -r f dst; do
+    [ -n "$f" ] || continue
+    if curl -sSf --retry 3 -o "$dst.new" "http://10.0.2.2:$PORT/extra/$f"; then
+        chmod 755 "$dst.new" && mv "$dst.new" "$dst" && echo "installed $dst" || ok=0
+    else
+        ok=0
+    fi
+done < /tmp/extra.list
 curl -sSf --retry 3 -o /tmp/esp.tar "http://10.0.2.2:$PORT/esp.tar" || ok=0
 if [ $ok = 1 ] && [ -d "$D" ]; then
     rm -rf "$D/esp.new" && mkdir -p "$D/esp.new" && tar -C "$D/esp.new" -xf /tmp/esp.tar --no-same-owner || ok=0
@@ -301,6 +344,8 @@ INSIDE
             "linux chroot /ubuntu /usr/bin/bash -c \"curl -s http://10.0.2.2:$PORT/restick-inside.sh -o /tmp/r.sh; PORT=$PORT bash /tmp/r.sh\""
         stop_serving
         rm -f "$R$OUT/restick-inside.sh"
+        rm -rf "$R$OUT/extra"
+        grep -a "^installed " "$R$OUT/restick.log.txt" || true
         grep -q "^RESTICK-OK" "$R$OUT/restick.log.txt" || die "the install set was not updated (see $OUT/restick.log.txt)"
         grep -a "BOOTX64.EFI" "$R$OUT/restick.log.txt" | head -2 || true
         sha256sum "$TREE/dist/x86_64/bootx64.efi"
@@ -311,6 +356,7 @@ INSIDE
                 rm -f '$OUT/hydra-live.img'
                 qemu-img convert -O raw restick.qcow2 '$OUT/hydra-live.img'
                 rm -f restick.qcow2 esp.img"
+        python3 "$HERE/mbr-message.py" "$R$OUT/hydra-live.img"
         sfdisk --list "$R$OUT/hydra-live.img"
         (cd "$R$OUT" && sha256sum hydra-live.img > hydra-live.img.sha256)
         say "stick image: $OUT/hydra-live.img, $(cat "$R$OUT/hydra-live.img.sha256")"

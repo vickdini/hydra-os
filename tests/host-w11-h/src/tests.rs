@@ -108,6 +108,26 @@ fn file_names_and_numbers() {
     assert_eq!(file_number("readme.txt"), None);
 }
 
+// wave11 GH: fixed log files
+#[test]
+fn slots_first_unused_then_oldest() {
+    assert_eq!(choose_slot(&[]), None);
+    assert_eq!(choose_slot(&[(1, None), (2, None)]), Some((1, 1)));
+    assert_eq!(choose_slot(&[(1, Some(5)), (2, None), (3, None)]), Some((2, 6)));
+    assert_eq!(choose_slot(&[(1, Some(7)), (2, Some(5)), (3, Some(6))]), Some((2, 8)));
+    assert_eq!(choose_slot(&[(3, None), (1, Some(2)), (2, None)]), Some((2, 3)));
+}
+
+#[test]
+fn start_line_round_trip() {
+    let l = start_line(42);
+    assert_eq!(l.len(), START_LINE);
+    assert!(l.ends_with(b"\r\n"));
+    assert_eq!(parse_start(&l), Some(42));
+    assert_eq!(parse_start(b"\r\n\r\n"), None);
+    assert_eq!(parse_start(b"Hydra start x"), None);
+}
+
 #[test]
 fn next_number_counts_and_keeps_ten() {
     assert_eq!(next_number(&[], 10), (1, vec![]));
@@ -357,7 +377,12 @@ fn menu_file_and_keys() {
     assert_eq!(menu_choice('4'), Some(ONLY_CPUS1));
     assert_eq!(menu_choice('5'), Some(ONLY_NOPCID));
     assert_eq!(menu_choice('6'), Some(ONLY_NOIOMMU));
-    assert_eq!(menu_choice('7'), None);
+    // wave11 GH: run-11 bisect entries
+    assert_eq!(menu_choice('7'), Some(FW_GATES));
+    assert_eq!(menu_choice('8'), Some(FW_MEMORY));
+    assert_eq!(menu_choice('9'), Some(RUN13_BOTH));
+    assert!(RUN13_BOTH.contains("fwidt=on") && RUN13_BOTH.contains("fwmem=new"));
+    assert_eq!(menu_choice('0'), None);
     assert!(ONLY_CPUS1.contains("cpus=1") && !ONLY_CPUS1.contains("pcid") && !ONLY_CPUS1.contains("iommu"));
     assert!(ONLY_NOPCID.contains("pcid=off") && !ONLY_NOPCID.contains("cpus") && !ONLY_NOPCID.contains("iommu"));
     assert!(ONLY_NOIOMMU.contains("iommu=off") && !ONLY_NOIOMMU.contains("cpus") && !ONLY_NOIOMMU.contains("pcid"));
@@ -508,3 +533,4 @@ fn menu_other_key_waits_30_s_then_starts_entry_1() {
     let (_, i) = run(&mut m, &keys, 10_000);
     assert_eq!(i, 200 + MENU_IDLE_LIMIT as usize - 1);
 }
+

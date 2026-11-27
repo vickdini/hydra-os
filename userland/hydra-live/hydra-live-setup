@@ -43,4 +43,10 @@ if [ ! -e "$home/.config/hydra-live-prepared" ]; then
     touch "$home/.config/hydra-live-prepared"
     chown -R "$user:" "$home"
 fi
+# wave11 GH: with the start word nettest (the kernel then writes /run/hydra/nettest), the
+# network self-test once, about a minute after the session comes up, in the background (its
+# "[nettest]" lines go to the console and so to the boot log)
+if [ -e /run/hydra/nettest ] && [ -x /usr/local/bin/hydra-nettest ]; then
+    (sleep 60; /usr/local/bin/hydra-nettest) </dev/null >&2 2>&1 &
+fi
 exit 0

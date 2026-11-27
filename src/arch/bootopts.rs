@@ -137,7 +137,11 @@ fn menu(wait: u32) -> Option<&'static str> {
     // wave11 GG: one safe-mode change at a time (to find which one matters)
     out("    4  One processor only (cpus=1)\r\n");
     out("    5  No PCID only (pcid=off)\r\n");
-    out("    6  No IOMMU only (iommu=off)\r\n\r\n");
+    out("    6  No IOMMU only (iommu=off)\r\n");
+    // wave11 GH: the newer start's memory and interrupt ways, one at a time (NUC runs 11-13)
+    out("    7  Test: firmware interrupt gates (fwidt=on)\r\n");
+    out("    8  Test: memory from firmware blocks (fwmem=new)\r\n");
+    out("    9  Test: 7 and 8 (as runs 11-13)\r\n\r\n");
     if wait == 0 {
         return None;
     }
@@ -154,7 +158,7 @@ fn menu(wait: u32) -> Option<&'static str> {
         if m.counting && m.left / 10 != shown {
             shown = m.left / 10;
             let mut line = crate::console::FixedBuf::new();
-            let _ = core::fmt::Write::write_fmt(&mut line, format_args!("\r  Press 1 to 6. Starting entry 1 in {} s ", shown));
+            let _ = core::fmt::Write::write_fmt(&mut line, format_args!("\r  Press 1 to 9. Starting entry 1 in {} s ", shown));
             out(line.as_str());
         }
         let key = uefi::system::with_stdin(|i| i.read_key().ok().flatten()).map(|k| match k {
@@ -174,7 +178,7 @@ fn menu(wait: u32) -> Option<&'static str> {
             was_counting = false;
             // (the firmware restarts the machine after 5 minutes in a boot program otherwise)
             let _ = uefi::boot::set_watchdog_timer(0, 0x10000, None);
-            out("\r  Press 1 to 6 (entry 1 starts after 30 s without a key).   ");
+            out("\r  Press 1 to 9 (entry 1 starts after 30 s without a key).   ");
         }
         uefi::boot::stall(core::time::Duration::from_millis(100));
     }

@@ -239,6 +239,17 @@ pub mod arch {
         pub fn image_phys() -> Option<u64> {
             crate::fake::with(|s| s.image_phys)
         }
+        /// *stub* wave11 GH: the image's load range (none on the host: the move is tried).
+        pub fn load_range() -> Option<(u64, u64)> {
+            None
+        }
+        pub fn in_kept_low_slot(_start: u64, _size: u64) -> bool {
+            false
+        }
+        /// *stub* wave11 GH: the rest of the boot, on the same (test) stack.
+        pub fn run_on_kernel_stack(next: fn() -> !) -> ! {
+            next()
+        }
     }
     /// *stub*
     pub mod boottime {
@@ -257,6 +268,12 @@ pub mod arch {
     }
     /// *stub*
     pub mod boot_services {
+        /// *stub* wave11 GH: a takeover step's screen line.
+        pub fn mark(_n: u32, _what: &str) {}
+        /// *stub* wave11 GH: the first half of the takeover.
+        pub fn leave_firmware() -> Result<(), &'static str> {
+            Ok(())
+        }
         pub fn take_hardware_ownership() -> Result<(), &'static str> {
             crate::fake::log("take_hardware_ownership");
             crate::fake::with(|s| s.takeover_fail).map_or(Ok(()), Err)
@@ -283,6 +300,9 @@ pub mod arch {
         pub fn after_panic() {}
         pub fn append(_text: &[u8]) {}
         pub fn at_power(_what: &'static str) {}
+        pub fn file_on() -> bool {
+            false
+        }
     }
     /// The boot words' real logic.
     #[path = "../../../../src/arch/bootwords.rs"]
@@ -303,6 +323,24 @@ pub mod arch {
         }
         pub fn ucs2() -> Vec<u8> {
             words().ucs2()
+        }
+    }
+    /// *stub* Boot breadcrumbs: none.
+    pub mod crumb {
+        pub fn step(_name: &str) {}
+        pub fn step_fmt(_args: core::fmt::Arguments) {}
+        pub fn quiet_fmt(_args: core::fmt::Arguments) {}
+        pub fn read_fmt(_args: core::fmt::Arguments) {}
+        pub fn force_line(_args: core::fmt::Arguments) {}
+        pub fn screen_only_from_now() {}
+        pub fn machine_state() {}
+        pub fn end(_name: &str) {}
+        pub fn high_arrived() {}
+        pub fn want_high() -> bool {
+            true
+        }
+        pub fn pick_gop() -> Option<uefi::Handle> {
+            None
         }
     }
     // wave11 GH end
@@ -997,6 +1035,8 @@ pub mod fs {
 
     pub mod client {
         pub use super::ZfsClient;
+        /// *stub* wave11 GH: a boot file as `read_boot_files` gives it.
+        pub type BootFile = (alloc::string::String, alloc::vec::Vec<u8>);
         /// *stub* Joins `p` to `cwd` (".." and "." handled), in `buf`.
         pub fn normalize_path<'a>(cwd: &str, p: &str, buf: &'a mut [u8; 128]) -> &'a str {
             let full = if p.starts_with('/') { p.to_string() } else { format!("{}/{}", cwd.trim_end_matches('/'), p) };
@@ -1203,6 +1243,8 @@ pub mod memory {
     /// *stub*
     pub mod frame_allocator {
         pub const PAGE_SIZE: u64 = 4096;
+        /// *stub* wave11 GH: the boot word fwmem=old.
+        pub static OLD_PATH: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
         pub struct FrameAllocator;
         impl FrameAllocator {
             pub fn total_usable_memory(&self) -> u64 {

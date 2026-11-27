@@ -260,7 +260,7 @@ fn ata_args() -> Option<Vec<String>> {
 fn e1000_args() -> Option<Vec<String>> {
     let a = crate::net::e1000::find_adapter()?;
     crate::arch::iommu::attach(ENDPOINT_NET_DEV, "net_driver", &a.dev);
-    let mut args = alloc::vec![alloc::format!("bar0={:#x}", a.bar0), alloc::format!("model={}", a.model)];
+    let mut args = alloc::vec![alloc::format!("bar0={:#x}", a.bar0), alloc::format!("model={}", a.model), alloc::format!("dev={:#x}", a.dev.device_id)];
     if crate::arch::iommu::dma_test_enabled() {
         // QEMU's opt/hydra/iommu=test: the driver accepts the rogue-DMA test request
         args.push(String::from("dma_test=1"));

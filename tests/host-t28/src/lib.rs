@@ -61,6 +61,12 @@ pub mod arch {
         pub use crate::fake::{find_class, pci_read_u32, pci_read_u8, PciDevice};
         pub const PCI_REG_REVISION: u8 = 0x08;
     }
+    /// *stub* wave11 GH: no boot words.
+    pub mod bootopts {
+        pub fn say(_words: &[&[u8]]) -> bool {
+            false
+        }
+    }
     /// *stub*
     pub mod bootdisk {
         pub use crate::fake::{boot_info as info, BootInfo};

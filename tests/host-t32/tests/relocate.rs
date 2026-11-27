@@ -82,23 +82,33 @@ fn no_memory_for_the_tables() {
 }
 
 #[test]
-fn builds_the_high_tables_then_stops_without_a_stack() {
+fn stops_without_a_stack_before_touching_the_firmware_tables() {
+    // wave11 GH: the higher half goes into the firmware's own top-level table (CR3 stays);
+    // the stack comes first, so without one nothing is allocated or written
     let _g = serial();
     let fw = firmware_tables(false);
     hw::set_cr(3, fw);
-    host::RAM_TOP.set(6 << 30); // 6 GiB of RAM: 6 GiB of direct map
+    host::RAM_TOP.set(6 << 30);
     let before = FRAME_ALLOCATOR.lock().allocated_memory();
     relocate::go_high(never);
     let pages = (FRAME_ALLOCATOR.lock().allocated_memory() - before) / 4096;
-    // The PML4; the direct map: one PDPT and a PD per GiB; the image at the top of the
-    // address space: a PDPT, a PD and a PT per 2 MiB of image
-    let pts = (image_size() + 4095 & !4095).div_ceil(2 << 20);
-    assert!(pages >= 1 + 1 + 6 + 1 + 1 + pts && pages <= 1 + 1 + 6 + 1 + 1 + pts + 1, "{pages} pages for an image of {:#x}", image_size());
-    assert_eq!(relocate::image_phys(), None, "returned before the switch");
+    assert_eq!(pages, 0, "nothing built without a stack");
+    assert!((256..512).all(|i| unsafe { *((fw + i * 8) as *const u64) } & 1 == 0), "the firmware's upper half untouched");
+    assert_eq!(relocate::image_phys(), None, "returned before the move");
     assert_eq!(hw::cr(3), fw, "still on the firmware's tables");
     // Without NX: the same (the direct map is executable then)
     host::NX.set(false);
     relocate::go_high(never);
     host::NX.set(true);
     assert_eq!(relocate::image_phys(), None);
+}
+
+// wave11 GH: an image in the kept 2-4 GiB slot stays where the firmware loaded it
+#[test]
+fn image_in_the_kept_slot_stays_low() {
+    assert!(relocate::in_kept_low_slot(0xc73e_0000, 0x80_0000));
+    assert!(relocate::in_kept_low_slot(2 << 30, 4 << 20));
+    assert!(!relocate::in_kept_low_slot((4 << 30) - 0x10_0000, 0x20_0000), "crosses 4 GiB");
+    assert!(!relocate::in_kept_low_slot(0x7f00_0000, 0x80_0000), "below 2 GiB: programs' space");
+    assert!(!relocate::in_kept_low_slot(0x1_0000_0000, 0x80_0000), "above 4 GiB");
 }

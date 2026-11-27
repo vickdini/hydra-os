@@ -120,34 +120,86 @@ pub fn kernel_low_ranges(
 ///
 /// - Returns `Err("Hardware takeover (ExitBootServices) has already been executed.")` on duplicate invocation.
 /// - Returns `Err("Hardware GOP framebuffer driver not available.")` if video initialization failed.
-pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> {
-    let mut done = TAKEOVER_DONE.lock();
-    if *done {
+// wave11 GH begin
+/// The firmware's final memory map, from [`leave_firmware`] to [`take_hardware_ownership`]
+/// (handed over between two stacks: see `main::boot`).
+struct FinalMap(uefi::mem::memory_map::MemoryMapOwned);
+// (only the boot processor touches it, once, before anything else runs)
+unsafe impl Send for FinalMap {}
+static FINAL_MAP: Mutex<Option<FinalMap>> = Mutex::new(None);
+
+/// The first half of the takeover (steps 1 to 3): the console on the framebuffer, the
+/// ACPI tables read, and `ExitBootServices`. Runs on the firmware's stack: firmware code
+/// must never run on a higher-half stack (the NUC's firmware stopped there, wave 11);
+/// `main::boot` moves to the kernel's own stack only after this.
+pub fn leave_firmware() -> Result<(), &'static str> {
+    if *TAKEOVER_DONE.lock() || FINAL_MAP.lock().is_some() {
         return Err("Hardware takeover (ExitBootServices) has already been executed.");
     }
-
     // 1. Ensure GOP Linear Framebuffer driver is initialized
-    let fb_virt = if let Some(info) = crate::video::get_video_info() {
-        info.base_ptr as u64
-    } else {
+    if crate::video::get_video_info().is_none() {
         return Err("Hardware GOP framebuffer driver not available.");
-    };
+    }
 
     // 2. Route all console printing to VideoConsole
     enable_standalone_video(true);
     set_hardware_mode(true);
 
     // 2b. The processors (ACPI MADT) and the start-up pages for the others
+    crate::arch::crumb::step("takeover: console on the framebuffer; reading the MADT"); // wave11 GH
     crate::arch::smp::discover();
+    crate::arch::crumb::step("takeover: MADT read; DMAR next"); // wave11 GH
     // 2c. The IOMMU's ACPI table (DMAR) and boot options
     crate::arch::iommu::discover();
     // 2d. PCID's off switches
     crate::arch::pcid::discover();
+    crate::arch::crumb::step("takeover: DMAR and PCID read; FADT next"); // wave11 GH
     // 2e. ACPI power-off and reset values (wave11 GH)
     crate::arch::power::discover();
 
+    crate::arch::crumb::end("takeover: ExitBootServices next (last breadcrumb)"); // wave11 GH
     // 3. Terminate UEFI Boot Services
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
+    mark(1, "ExitBootServices returned");
+    // Hydra's own gates for the hardware vectors (the firmware's served until here)
+    x86_64::instructions::interrupts::disable();
+    crate::arch::idt::take_hardware_vectors();
+    mark(2, "interrupts off, Hydra's hardware gates");
+    // The firmware's free memory is Hydra's now: the frame allocator takes it
+    crate::memory::frame_allocator::add_after_firmware(memory_map.entries().map(|d| (d.ty, d.phys_start, d.page_count)));
+    mark(3, "the final map's free memory added to the frame allocator");
+    *FINAL_MAP.lock() = Some(FinalMap(memory_map));
+    Ok(())
+}
+
+/// A screen line (and the serial port) for one step from `ExitBootServices` to the takeover
+/// banner: the framebuffer console directly, no heap, no boot log (NUC run 11 stopped
+/// somewhere in there with nothing on the screen).
+pub fn mark(n: u32, what: &str) {
+    let mut line = crate::console::FixedBuf::new();
+    let _ = core::fmt::Write::write_fmt(&mut line, format_args!("[takeover] {:02} {}\n", n, what));
+    crate::console::print_raw(line.as_str());
+}
+// wave11 GH end
+
+/// The takeover ([`leave_firmware`] first, if it has not run), then everything after
+/// `ExitBootServices`: the low layout, GDT, IDT, page tables, interrupts, the other
+/// processors, the driver programs.
+pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> {
+    // wave11 GH begin
+    if FINAL_MAP.lock().is_none() {
+        leave_firmware()?;
+    }
+    let mut done = TAKEOVER_DONE.lock();
+    if *done {
+        return Err("Hardware takeover (ExitBootServices) has already been executed.");
+    }
+    let Some(FinalMap(memory_map)) = FINAL_MAP.lock().take() else {
+        return Err("the firmware's memory map is gone");
+    };
+    let fb_virt = crate::video::get_video_info().map_or(0, |info| info.base_ptr as u64);
+    mark(5, "on the kernel's stack; the low layout next");
+    // wave11 GH end
     let entries_count = memory_map.entries().count();
 
     // 3a. Which GiB slots of the low 512 GiB the kernel keeps in every address space: all
@@ -177,52 +229,65 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
         );
     }
 
+    mark(6, "low layout set; XSAVE next"); // wave11 GH
     // 3b. XSAVE and the AVX registers where the CPU has them (task switches, system calls
     // and signals then save and restore them); otherwise FXSAVE and no AVX
     crate::arch::idt::enable_xsave(true);
 
+    mark(7, "XSAVE on; GDT next"); // wave11 GH
     // 4. Load Hydra's GDT and reload segments
     crate::arch::gdt::load_and_switch();
     let selectors = crate::arch::gdt::get_selectors();
 
+    mark(8, "GDT loaded; IDT next"); // wave11 GH
     // 5. Update IDT with kernel CS (0x08) and enable IST 1 for Double Fault
     crate::arch::idt::enable_double_fault_ist();
     crate::arch::idt::reload_with_kernel_cs(selectors.kernel_code_selector.0);
 
+    mark(9, "IDT loaded; Hydra's page tables next"); // wave11 GH
     // 6. Switch CR3 to Hydra's autonomous PML4 table
     if let Some(ref space) = *crate::memory::paging::KERNEL_SPACE.lock() {
         unsafe {
             space.switch();
         }
     }
+    mark(10, "Hydra's page tables loaded; PCID next"); // wave11 GH
     crate::arch::cpu::sim_nx_off_now(); // wave11 GH: the NXE debug words
     let cr3_frame = Cr3::read().0.start_address().as_u64();
     // Tagged TLB entries (before the other processors start: they copy this CPU's CR4)
     crate::arch::pcid::init();
+    mark(11, "PCID set; direct map next"); // wave11 GH
     crate::task::update_cr3(cr3_frame);
     crate::memory::paging::KERNEL_PML4.store(cr3_frame, core::sync::atomic::Ordering::SeqCst);
     // Hydra's tables hold the direct map of physical memory: use it from now on
     crate::memory::frame_allocator::enable_direct_map();
+    mark(12, "direct map on; global pages next"); // wave11 GH
     // Global kernel pages (wave 4): the kernel half's TLB entries survive CR3 writes
     crate::arch::pcid::enable_global();
+    mark(13, "global pages on; PAT next"); // wave11 GH
     // wave11 GG: write-combining for the framebuffer (PAT entry 1), the console's view first
     crate::arch::pat::init_bsp();
     crate::video::gop::use_write_combining();
 
+    mark(14, "write-combining on; PIC next"); // wave11 GH
     // 7. Initialize and remap legacy 8259 dual-PIC (Master: IRQ 0..7 -> 32..39, Slave: IRQ 8..15 -> 40..47)
     crate::arch::pic::init();
 
+    mark(15, "PIC set; PIT and RTC next"); // wave11 GH
     // 8. Initialize 8254 PIT timer to 100 Hz (10ms tick interval on IRQ 0)
     crate::arch::pit::init(100);
     crate::arch::rtc::init();
 
+    mark(16, "PIT and RTC set; PS/2 next"); // wave11 GH
     // 8b. Initialize 8042 PS/2 Keyboard Controller for IRQ 1 interrupts
     crate::arch::keyboard::init();
     crate::arch::mouse::enable_irq();
 
+    mark(17, "PS/2 set; system calls next"); // wave11 GH
     // 8c. Initialize fast x86_64 hardware system call MSRs (EFER, STAR, LSTAR, FMASK)
     crate::arch::syscall::init();
 
+    mark(18, "system calls set; the takeover banner next"); // wave11 GH
     *done = true;
 
     // Clear display buffer and scrollback history so takeover begins on a clean screen

@@ -49,6 +49,32 @@ pub mod bootlog {
 }
 /// The boot words and the start menu.
 pub mod bootopts;
+/// Boot breadcrumbs on the boot volume (diagnostic stick).
+#[cfg(target_os = "uefi")]
+pub mod crumb;
+/// Host builds (unit tests): no breadcrumbs.
+#[cfg(not(target_os = "uefi"))]
+pub mod crumb {
+    pub fn step(_name: &str) {}
+    pub fn want_high() -> bool {
+        true
+    }
+    pub fn end(_name: &str) {}
+    pub fn prepare_arrival() {}
+    pub fn high_arrived() {}
+    pub fn step_fmt(_args: core::fmt::Arguments) {}
+    pub fn quiet_fmt(_args: core::fmt::Arguments) {}
+    pub fn read_fmt(_args: core::fmt::Arguments) {}
+    pub fn force_line(_args: core::fmt::Arguments) {}
+    pub fn screen_only_from_now() {}
+    pub fn machine_state() {}
+    pub fn fw_ptr_ok(_p: *const u8, _what: &str) -> bool {
+        true
+    }
+    pub fn pick_gop() -> Option<uefi::Handle> {
+        None
+    }
+}
 /// The boot words' plain logic.
 pub mod bootwords;
 /// The boot log's memory (plain logic).

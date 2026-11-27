@@ -64,8 +64,12 @@ pub fn framebuffer_phys() -> Option<(u64, u64)> {
 ///
 /// The discovered [`VideoModeInfo`] on success, or an error description string on failure.
 pub fn init_gop() -> Result<VideoModeInfo, &'static str> {
-    let handle = uefi::boot::get_handle_for_protocol::<GraphicsOutput>()
-        .map_err(|_| "Failed to find GraphicsOutput protocol handle")?;
+    // wave11 GH: the output that drives a display with a real framebuffer, not just the
+    // first handle (EDK2's console splitter offers one without a framebuffer)
+    let handle = match crate::arch::crumb::pick_gop() {
+        Some(h) => h,
+        None => uefi::boot::get_handle_for_protocol::<GraphicsOutput>().map_err(|_| "Failed to find GraphicsOutput protocol handle")?,
+    };
 
     let params = uefi::boot::OpenProtocolParams {
         handle,

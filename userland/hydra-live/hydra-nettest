@@ -1,0 +1,82 @@
+#!/bin/bash
+# hydra-nettest: a quick network self-test (wave 11, NUC run 15: https pages did not load
+# while ping worked). With the start word nettest it runs once by itself about a minute
+# after the live session starts (hydra-live-setup); from a terminal at any time. Every result is a "[nettest]" line
+# in the boot log (\logs\bootNNN.txt on the stick): on a terminal it is shown there as well.
+#
+# Tests: DNS (A and AAAA), TCP connects to the gateway and to example.com, curl over IPv4
+# (http, https), https over IPv6, and the network card's counters before and after; with
+# --download also a 5 MB download with its speed. At boot only with the start word nettest.
+
+if [ -t 2 ]; then
+    # From a terminal: on the screen, and into the boot log through syslog
+    say() { echo "[nettest] $*"; logger -t nettest -- "$*" 2>/dev/null; }
+else
+    # At boot (hydra-live-setup): standard error is the console, which the boot log keeps
+    say() { echo "[nettest] $*" >&2; }
+fi
+
+counters() {
+    local when=$1
+    # Interface lines of /proc/net/dev: bytes, packets, errors, drops (received / sent)
+    while read -r line; do
+        case "$line" in
+        *:*)
+            name=${line%%:*}
+            [ "$name" = lo ] && continue
+            set -- ${line#*:}
+            say "counters $when, $name: rx $2 packets ($1 bytes) errors $3 drops $4, tx ${10} packets (${9} bytes) errors ${11} drops ${12}"
+            ;;
+        esac
+    done < <(tail -n +3 /proc/net/dev)
+}
+
+say "start: $(date '+%F %T')"
+counters before
+addr=$(ip -4 -o addr show 2>/dev/null | awk '{print $2, $4}' | tr '\n' ' ')
+[ -n "$addr" ] || addr=$(hostname -I 2>/dev/null)
+say "address: ${addr:-unknown}"
+gw=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
+if [ -z "$gw" ]; then
+    # /proc/net/route: the default route's gateway, little-endian hex
+    h=$(awk '$2 == "00000000" {print $3; exit}' /proc/net/route 2>/dev/null)
+    [ -n "$h" ] && gw=$(printf '%d.%d.%d.%d' 0x${h:6:2} 0x${h:4:2} 0x${h:2:2} 0x${h:0:2})
+fi
+say "gateway: ${gw:-none}; DNS: $(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)"
+
+for host in example.com www.msn.com; do
+    a=$(timeout 15 getent ahostsv4 "$host" 2>&1 | awk '{print $1}' | sort -u | tr '\n' ' ')
+    aaaa=$(timeout 15 getent ahostsv6 "$host" 2>&1 | awk '{print $1}' | grep ':' | sort -u | tr '\n' ' ')
+    say "dns $host: A ${a:-none}; AAAA ${aaaa:-none}"
+done
+
+tcp() {
+    local start end
+    start=$(date +%s%N)
+    if timeout 10 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null; then
+        end=$(date +%s%N)
+        say "tcp connect $1:$2: ok in $(( (end - start) / 1000000 )) ms"
+    else
+        say "tcp connect $1:$2: FAILED (exit $?)"
+    fi
+}
+[ -n "$gw" ] && tcp "$gw" 80
+tcp example.com 80
+tcp example.com 443
+
+web() {
+    # curl's result: HTTP code, time, size and speed, or its error
+    local out rc
+    out=$(curl "$@" -sS -o /dev/null -w 'code %{http_code}, %{time_total} s, %{size_download} bytes, %{speed_download} bytes/s, connect %{time_connect} s, tls %{time_appconnect} s' 2>&1)
+    rc=$?
+    say "curl $*: ${out//$'\n'/ } (exit $rc)"
+}
+web -4 -m 30 http://example.com/
+web -4 -m 30 https://example.com/
+web -4 -m 30 https://www.msn.com/
+web -6 -m 30 https://www.msn.com/
+# The 5 MB download only when asked (hydra-nettest --download)
+[ "$1" = --download ] && web -4 -m 60 http://ipv4.download.thinkbroadband.com/5MB.zip
+
+counters after
+say "done: $(date '+%F %T')"

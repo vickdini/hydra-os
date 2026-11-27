@@ -371,10 +371,61 @@ pub fn init() {
         idt.entries[MSI_VECTOR_BASE as usize + i].set_handler_addr(handler, kernel_cs);
     }
 
+    // wave11 GH (boot word fwidt=on, not the default since NUC run 13): while the firmware
+    // runs (before ExitBootServices) its interrupts (timer, USB, ...) reach its own
+    // handlers: the hardware vectors (32..=255) keep the firmware's gates until
+    // `take_hardware_vectors` (the takeover); Hydra's exception gates (0..=31) are used
+    // from now on
+    #[cfg(target_os = "uefi")]
+    // wave11 GH: only with the word fwidt=on since NUC run 13 (the default hung there)
+    if !crate::console::is_hardware_mode() && crate::arch::bootopts::say(&[b"fwidt=on"]) {
+        let fw = x86_64::instructions::tables::sidt();
+        let fw_entries = (fw.limit as usize + 1) / core::mem::size_of::<IdtEntry>();
+        let mut saved = HYDRA_HW_VECTORS.lock();
+        if fw.base.as_u64() != 0 && fw_entries >= 33 && saved.is_none() {
+            let mut own = [IdtEntry::missing(); 224];
+            own.copy_from_slice(&idt.entries[32..256]);
+            *saved = Some(own);
+            let src = fw.base.as_u64() as *const IdtEntry;
+            for v in 32..fw_entries.min(256) {
+                idt.entries[v] = unsafe { core::ptr::read_unaligned(src.add(v)) };
+            }
+            // During boot services the CPU reads the table from a firmware page below
+            // 4 GiB at its identity address (the image may lie above 4 GiB and is reached
+            // at a higher-half address; firmware code that looks at the IDT expects neither)
+            if let Ok(page) = uefi::boot::allocate_pages(uefi::boot::AllocateType::MaxAddress(0xFFFF_FFFF), uefi::boot::MemoryType::LOADER_DATA, 1) {
+                let low = page.as_ptr() as *mut IdtEntry;
+                unsafe { core::ptr::copy_nonoverlapping(idt.entries.as_ptr(), low, 256) };
+                let idtr = x86_64::structures::DescriptorTablePointer {
+                    limit: (core::mem::size_of::<InterruptDescriptorTable>() - 1) as u16,
+                    base: x86_64::VirtAddr::new(low as u64),
+                };
+                unsafe { x86_64::instructions::tables::lidt(&idtr) };
+                drop(idt);
+                return;
+            }
+        }
+    }
     // Load IDT into CPU
     idt.load();
     drop(idt);
 }
+
+// wave11 GH begin
+/// Hydra's gates for the hardware vectors (32..=255) while the firmware's are in the IDT
+/// (see the end of [`init`]).
+static HYDRA_HW_VECTORS: Mutex<Option<[IdtEntry; 224]>> = Mutex::new(None);
+
+/// At the takeover (after `ExitBootServices`, interrupts off): Hydra's own gates for the
+/// hardware vectors, in place of the firmware's.
+pub fn take_hardware_vectors() {
+    if let Some(own) = HYDRA_HW_VECTORS.lock().take() {
+        let mut idt = IDT.lock();
+        idt.entries[32..256].copy_from_slice(&own);
+        idt.load();
+    }
+}
+// wave11 GH end
 
 /// Loads the shared IDT on the calling CPU (an application processor starting).
 pub fn load_on_this_cpu() {

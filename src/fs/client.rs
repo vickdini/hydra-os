@@ -1099,8 +1099,8 @@ impl ZfsClient {
         if let Some(cstr) = crate::fs::bootfs::path_to_cstr16(r"\bin", &mut [0u16; 16]) {
             if let Ok(handle) = root.open(cstr, uefi::proto::media::file::FileMode::Read, uefi::proto::media::file::FileAttribute::empty()) {
                 if let Some(mut dir) = handle.into_directory() {
-                    let mut entry_buf = [0u8; 512];
-                    while let Ok(Some(info)) = dir.read_entry(&mut entry_buf) {
+                    let mut entry_buf = crate::fs::bootfs::InfoBuf::new();
+                    while let Ok(Some(info)) = dir.read_entry(entry_buf.bytes()) {
                         let name = alloc::format!("{}", info.file_name());
                         if (name.ends_with(".elf") || name.ends_with(".so") || name.ends_with(".chk") || name.contains(".so.")) && !candidate_files.iter().any(|(_, z)| z.ends_with(&alloc::format!("/{}", name))) {
                             candidate_files.push((alloc::format!(r"\bin\{}", name), alloc::format!("/bin/{}", name)));
@@ -1121,6 +1121,7 @@ impl ZfsClient {
                 Some(c) => c,
                 None => continue,
             };
+            crate::arch::crumb::quiet_fmt(format_args!("boot file {}", fat_path)); // wave11 GH
             let handle = match root.open(cstr, uefi::proto::media::file::FileMode::Read, uefi::proto::media::file::FileAttribute::empty()) {
                 Ok(h) => h,
                 Err(_) => continue,
@@ -1129,9 +1130,9 @@ impl ZfsClient {
                 Some(f) => f,
                 None => continue,
             };
-            let mut info_buf = [0u8; 256];
+            let mut info_buf = crate::fs::bootfs::InfoBuf::new();
             let file_size = file
-                .get_info::<uefi::proto::media::file::FileInfo>(&mut info_buf)
+                .get_info::<uefi::proto::media::file::FileInfo>(info_buf.bytes())
                 .map(|i| i.file_size() as usize)
                 .unwrap_or(0);
             let mut file_buf = alloc::vec![0u8; file_size];

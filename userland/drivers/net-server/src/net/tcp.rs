@@ -56,6 +56,11 @@ pub struct TcpPacket<'a> {
     pub window_size: u16,
     /// Borrowed slice containing the segment's application data payload.
     pub payload: &'a [u8],
+    /// wave11 GH: the maximum segment size option (SYN segments), if present.
+    pub mss: Option<u16>,
+    /// wave11 GH: whether the checksum over the IPv4 pseudo-header is right (set by the
+    /// caller that knows the addresses; `true` from [`TcpPacket::parse`]).
+    pub csum_ok: bool,
 }
 
 impl<'a> TcpPacket<'a> {
@@ -93,6 +98,29 @@ impl<'a> TcpPacket<'a> {
 
         let payload = &buf[data_offset..];
 
+        // wave11 GH: the MSS option (kind 2, length 4); NOP (1) and end (0) as RFC 793
+        let mut mss = None;
+        let mut i = 20;
+        while i < data_offset {
+            match buf[i] {
+                0 => break,
+                1 => i += 1,
+                kind => {
+                    if i + 1 >= data_offset {
+                        break;
+                    }
+                    let len = buf[i + 1] as usize;
+                    if len < 2 || i + len > data_offset {
+                        break;
+                    }
+                    if kind == 2 && len == 4 {
+                        mss = Some(u16::from_be_bytes([buf[i + 2], buf[i + 3]]));
+                    }
+                    i += len;
+                }
+            }
+        }
+
         Some(Self {
             src_port,
             dst_port,
@@ -101,7 +129,42 @@ impl<'a> TcpPacket<'a> {
             flags,
             window_size,
             payload,
+            mss,
+            csum_ok: true,
         })
+    }
+
+    /// wave11 GH: as [`TcpPacket::serialize`], with TCP options (`opts`, a multiple of 4
+    /// bytes) after the 20-byte header.
+    pub fn serialize_opts(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+        seq_num: u32,
+        ack_num: u32,
+        flags: u8,
+        window_size: u16,
+        opts: &[u8],
+        payload: &[u8],
+        out_buf: &mut [u8],
+    ) -> Result<usize, &'static str> {
+        let hl = 20 + opts.len();
+        if opts.len() % 4 != 0 || opts.len() > 40 || out_buf.len() < hl + payload.len() {
+            return Err("bad TCP options or buffer too small");
+        }
+        out_buf[20..hl].copy_from_slice(opts);
+        // The header and payload, then the data offset and checksum redone with the options
+        let total = hl + payload.len();
+        out_buf[hl..total].copy_from_slice(payload);
+        Self::serialize(src_ip, dst_ip, src_port, dst_port, seq_num, ack_num, flags, window_size, &[], &mut out_buf[..20])?;
+        out_buf[12] = ((hl / 4) as u8) << 4;
+        out_buf[16] = 0;
+        out_buf[17] = 0;
+        let cksum = compute_tcp_checksum(src_ip, dst_ip, &out_buf[0..total]);
+        out_buf[16] = (cksum >> 8) as u8;
+        out_buf[17] = (cksum & 0xFF) as u8;
+        Ok(total)
     }
 
     /// Serializes a TCP segment including the 20-byte standard header and IPv4 pseudo-header checksum.
