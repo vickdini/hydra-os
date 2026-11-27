@@ -33,7 +33,9 @@ counters() {
 
 say "start: $(date '+%F %T')"
 counters before
-say "address: $(ip -4 -o addr show 2>/dev/null | awk '{print $2, $4}' | tr '\n' ' ')"
+addr=$(ip -4 -o addr show 2>/dev/null | awk '{print $2, $4}' | tr '\n' ' ')
+[ -n "$addr" ] || addr=$(hostname -I 2>/dev/null)
+say "address: ${addr:-unknown}"
 gw=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
 if [ -z "$gw" ]; then
     # /proc/net/route: the default route's gateway, little-endian hex
