@@ -97,6 +97,10 @@ pub mod arch {
         pub fn image_phys() -> Option<(u64, u64)> {
             None
         }
+        /// *stub* wave12 GV: the late path's floor is never chosen on the host (as before wave 12).
+        pub fn off_word() -> bool {
+            true
+        }
     }
 }
 

@@ -604,7 +604,7 @@ pub const DESKTOP_MIN_MB: u64 = 1400;
 /// at their identity addresses, which lie in the programs' low window, so this memory was
 /// never used (a 2.5 GB machine had 1.5 GB). Kept here at `ExitBootServices`, added by
 /// [`add_low_late`] once every frame is reached through the direct map.
-static LOW_HELD: Mutex<([(u64, u64); 64], usize)> = Mutex::new(([(0, 0); 64], 0)); // (wave12 GV: 64, was 32)
+static LOW_HELD: Mutex<([(u64, u64); 128], usize)> = Mutex::new(([(0, 0); 128], 0)); // (wave12 GV: 128, was 32: with the late path's 2 GiB floor it holds 1 MiB to 2 GiB; a fragmented firmware map has many free regions there)
 
 /// The lowest frame ever handed out (the real-mode area and the processors' start code
 /// below it).
@@ -649,7 +649,7 @@ fn hold_low(regions: impl Iterator<Item = (u64, u64)>, floor: u64) {
         }
     }
     if dropped > 0 {
-        crate::kprintln!("[mem] {} MiB of free RAM below 1 GiB left out (more than {} regions)", dropped * PAGE_SIZE >> 20, h.0.len());
+        crate::kprintln!("[mem] {} MiB ({} bytes) of free RAM below the floor {:#x} left out (more than {} regions)", dropped * PAGE_SIZE >> 20, dropped * PAGE_SIZE, floor, h.0.len());
     }
 }
 
@@ -677,11 +677,11 @@ pub fn add_low_late() {
             }
         }
         if dropped > 0 {
-            crate::kprintln!("[mem] {} MiB of RAM below 1 GiB left out: the frame allocator holds at most {} regions", dropped * PAGE_SIZE >> 20, MAX_REGIONS);
+            crate::kprintln!("[mem] {} MiB of RAM below the floor {:#x} left out: the frame allocator holds at most {} regions", dropped * PAGE_SIZE >> 20, early_floor(), MAX_REGIONS);
         }
     }
     if pages > 0 {
-        crate::kprintln!("[mem] {} MiB of RAM below 1 GiB added to the frame allocator (reached through the direct map)", pages * PAGE_SIZE >> 20);
+        crate::kprintln!("[mem] {} MiB of RAM below the floor {:#x} added to the frame allocator (reached through the direct map)", pages * PAGE_SIZE >> 20, early_floor());
     }
     let usable = FRAME_ALLOCATOR.lock().total_usable_memory() >> 20;
     if usable < DESKTOP_MIN_MB {

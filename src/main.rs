@@ -233,7 +233,9 @@ fn main() -> Status {
     } else if arch::crumb::want_high() {
         arch::relocate::go_high(boot);
     }
-    arch::crumb::step("staying at the load address (no higher-half move)");
+    // wave12 GV: also after nohigh / the N key: the late path once the firmware is gone (only
+    // the word high=off gives the layout before wave 12)
+    arch::crumb::step("staying at the load address (no higher-half move before ExitBootServices; the late path after it unless high=off)");
     boot()
 }
 

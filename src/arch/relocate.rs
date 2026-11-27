@@ -496,7 +496,7 @@ pub fn off_word() -> bool {
         return true;
     }
     let mut buf = [0u8; 16];
-    in_vm() && crate::arch::fwcfg::read_file_into("opt/hydra/high", &mut buf).is_some_and(|n| buf[..n].starts_with(b"off"))
+    in_vm() && crate::arch::fwcfg::read_file_into("opt/hydra/high", &mut buf).is_some_and(|n| n >= 3 && buf[..3].eq_ignore_ascii_case(b"off"))
 }
 
 /// Whether the CPU runs under a hypervisor (CPUID leaf 1, ECX bit 31): only then are QEMU's
