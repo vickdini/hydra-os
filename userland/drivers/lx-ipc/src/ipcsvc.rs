@@ -13,6 +13,8 @@ use crate::client::Cx;
 
 const EINVAL: i64 = -22;
 const ENOTTY: i64 = -25;
+/// wave12 GV: not a socket.
+const ENOTSOCK: i64 = -88;
 
 /// Whether `kind` is an object kind of this service.
 pub fn owns_kind(kind: u32) -> bool {
@@ -42,6 +44,11 @@ pub fn dispatch(cx: &Cx) -> Option<(i64, u64)> {
         // AF_UNIX sockets (Group 13)
         41 | 53 if cx.args[0] == 1 => crate::unix::create(cx),
         42..=52 | 54 | 55 | 288 | 299 | 307 if kind == LX_OBJ_KIND_UNIX => crate::unix::call(cx),
+        // wave12 GV: a socket call on a pipe, eventfd, timerfd, ... of ours: not a socket, as
+        // on Linux (it was ENOSYS: PulseAudio's pa_write() tries send() first and falls back
+        // to write() only on ENOTSOCK, so its mainloop wake-ups failed and Firefox's audio
+        // output, and with it every video, stalled at "loading")
+        n if crate::sockcall::not_a_socket(n, c.obj != LX_OBJ_NONE && owns_kind(kind), kind == LX_OBJ_KIND_UNIX) => (ENOTSOCK, 0),
         // eventfd, pipes, FIFOs, pidfd, signalfd, timerfd (Group 13)
         284 | 290 => crate::eventfd::create(cx),
         22 | 293 => crate::pipe::create(cx),
