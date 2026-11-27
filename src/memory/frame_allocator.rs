@@ -579,15 +579,29 @@ pub fn low_parts(regions: impl Iterator<Item = (u64, u64)>, floor: u64) -> alloc
     out
 }
 
+/// Set by the first [`hold_low`]: a second final map (never expected) adds nothing twice.
+static LOW_TAKEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 fn hold_low(regions: impl Iterator<Item = (u64, u64)>, floor: u64) {
+    // (not behind add_after_firmware's EARLY guard: the default path has EARLY off; review:
+    // a guard of its own against a second call)
+    if LOW_TAKEN.swap(true, core::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let parts = low_parts(regions, floor);
     let mut h = LOW_HELD.lock();
+    let mut dropped = 0u64;
     for p in parts {
         if h.1 < h.0.len() {
             let n = h.1;
             h.0[n] = p;
             h.1 += 1;
+        } else {
+            dropped += p.1;
         }
+    }
+    if dropped > 0 {
+        crate::kprintln!("[mem] {} MiB of free RAM below 1 GiB left out (more than {} regions)", dropped * PAGE_SIZE >> 20, h.0.len());
     }
 }
 
@@ -604,12 +618,18 @@ pub fn add_low_late() {
     {
         let mut alloc = FRAME_ALLOCATOR.lock();
         let limit = if alloc.refcount_entries > 0 { alloc.refcount_entries * PAGE_SIZE } else { u64::MAX };
+        let mut dropped = 0;
         for &(s, p) in &held[..n] {
             let p = p.min(limit.saturating_sub(s) / PAGE_SIZE);
             if p > 0 && alloc.region_count < MAX_REGIONS {
                 alloc.add_region(PhysAddr::new(s), p);
                 pages += p;
+            } else {
+                dropped += p;
             }
+        }
+        if dropped > 0 {
+            crate::kprintln!("[mem] {} MiB of RAM below 1 GiB left out: the frame allocator holds at most {} regions", dropped * PAGE_SIZE >> 20, MAX_REGIONS);
         }
     }
     if pages > 0 {

@@ -133,6 +133,12 @@ pub const fn shape(nr: u64) -> Option<Shape> {
 /// The numbers vfs-server claimed (bit `nr`), below the table's 512.
 static CLAIMED: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 
+/// wave11 GK: whether `nr` is a file-service number vfs-server may still claim (not yet
+/// claimed): the only numbers whose route changes at run time.
+pub fn claimable(nr: u64) -> bool {
+    shape(nr).is_some() && !claimed(nr)
+}
+
 /// Whether vfs-server claimed call `nr`.
 pub fn claimed(nr: u64) -> bool {
     nr < 512 && CLAIMED[nr as usize / 64].load(Ordering::Acquire) & (1 << (nr % 64)) != 0

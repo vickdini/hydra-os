@@ -298,9 +298,9 @@ fn device_programs_stay_while_lx_sec_restarts() {
 fn a_first_start_is_waited_for_and_is_not_a_restart() {
     let sim = world();
     configure(T, RestartClass::Transparent);
-    assert!(!starting(T) && !any_starting() && !waitable(T));
+    assert!(!starting(T) && !waitable(T));
     first_start(T);
-    assert!(starting(T) && any_starting() && waitable(T) && !restarting(T));
+    assert!(starting(T) && waitable(T) && !restarting(T));
     // A caller waits for it (one log line), and goes on when it is online
     let flag = StdArc::new(std::sync::atomic::AtomicBool::new(false));
     let f2 = flag.clone();
@@ -313,7 +313,7 @@ fn a_first_start_is_waited_for_and_is_not_a_restart() {
     assert!(crate::fake::logged("which is still starting"));
     assert_eq!(START_WAITED.load(core::sync::atomic::Ordering::Relaxed), 1);
     assert_eq!(WAITED.load(core::sync::atomic::Ordering::Relaxed), 0);
-    assert!(!starting(T) && !any_starting());
+    assert!(!starting(T));
     // The ladder did not count it: the first crash after it is handled in the configured class
     let d = gone(T);
     assert!(d.restart && d.class == RestartClass::Transparent && !d.reset_kept);
@@ -352,17 +352,14 @@ fn a_failed_first_start_stops_the_waiting() {
     assert!(!starting(T));
     // start_failed of a service not starting: nothing
     start_failed(T);
-    assert!(!any_starting());
+    assert!(!starting(T));
     // A signal ends a first-start wait with ERESTARTSYS
     first_start(T);
     crate::fake::set_signal(100, true);
     assert_eq!(wait_online(T, &|| false), Err(crate::compat::linux::proc::ERESTARTSYS));
-    wait_first_starts(&|_| false);
     assert!(starting(T));
     crate::fake::set_signal(100, false);
-    // Online: wait_first_starts returns at once
     online(T);
-    wait_first_starts(&|_| true);
     assert!(summary().contains("waited for a first start"), "{}", summary());
 }
 // wave11 GK end

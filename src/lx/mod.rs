@@ -671,10 +671,13 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
     let nr = frame.rax;
     let e = entry(nr);
     if e == 0 {
-        // wave11 GK begin: services still in their first start claim their numbers only when
-        // they come online: wait for them (bounded), then look the number up again
-        if restart::any_starting() && nr != LX_NULL_NR && nr != crate::ipc::protocol::LX_ROUTE_NR {
-            restart::wait_first_starts(&|s| svc::host(s).is_some_and(|h| h.is_online()));
+        // wave11 GK begin: the only numbers claimed at run time are the file service's
+        // (`fileh::shape`; every other service's routes are fixed): a file call vfs-server has
+        // not claimed yet waits for vfs-server's first start (bounded), then is looked up
+        // again. Calls the kernel answers itself (mmap, futex, ...) never wait (review 1).
+        if fileh::claimable(nr) && restart::starting(svc::host_of(crate::ipc::protocol::LXS_VFS)) {
+            let vfs = svc::host_of(crate::ipc::protocol::LXS_VFS);
+            let _ = restart::wait_online(vfs, &|| svc::host(vfs).is_some_and(|h| h.is_online()) && fileh::claimed(nr));
             if entry(nr) != 0 {
                 return forward(frame);
             }

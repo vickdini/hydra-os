@@ -729,11 +729,15 @@ impl Supervisor {
         // restart; decided when its endpoint went, in `retire`)
         if svc.lx_svc != 0 && !crate::lx::restart::may_restart(svc.lx_svc) {
             svc.state = ServiceState::Faulted;
+            crate::lx::restart::start_failed(svc.lx_svc); // wave11 GK (review 2)
             crate::kprintln!("[supervisor] '{}' crashed three times within 30 s of its restarts; not restarting it (its calls fail with EIO)", svc.name);
             return Err("restart ladder: given up");
         }
         if svc.restart_count >= svc.max_restarts {
             svc.state = ServiceState::Faulted;
+            if svc.lx_svc != 0 {
+                crate::lx::restart::start_failed(svc.lx_svc); // wave11 GK (review 2)
+            }
             crate::kprintln!("[supervisor] '{}' failed {} times; not restarting it", svc.name, svc.restart_count);
             return Err("restart limit reached");
         }
@@ -744,7 +748,17 @@ impl Supervisor {
         if svc.lx_svc != 0 && crate::lx::restart::starting(svc.lx_svc) {
             crate::lx::restart::first_start(svc.lx_svc);
         }
-        let id = self.launch(idx)?;
+        // wave11 GK (review 2): a failed launch ends a first start's wait too
+        let id = match self.launch(idx) {
+            Ok(id) => id,
+            Err(e) => {
+                let lx = self.services[idx].lx_svc;
+                if lx != 0 {
+                    crate::lx::restart::start_failed(lx);
+                }
+                return Err(e);
+            }
+        };
         let svc = &self.services[idx];
         crate::kprintln!("[supervisor] restarted '{}' as process {} (restart {}/{})", svc.name, id.0, svc.restart_count, svc.max_restarts);
         Ok(id)
@@ -1034,6 +1048,7 @@ pub fn start_all() {
                     crate::lx::restart::start_failed(lx); // wave11 GK: its callers stop waiting
                     crate::kprintln!("[supervisor] '{}' (process {}) exited without registering: no device", name, id.0);
                 } else {
+                    crate::lx::restart::start_failed(lx); // wave11 GK (review 2): callers stop waiting
                     crate::kprintln!("[supervisor] '{}' (process {}) did not register", name, id.0);
                 }
             }

@@ -141,9 +141,10 @@ static START_MS: [AtomicU64; MAX_SVC] = [const { AtomicU64::new(0) }; MAX_SVC];
 static START_LOGGED: [AtomicBool; MAX_SVC] = [const { AtomicBool::new(false) }; MAX_SVC];
 /// Calls that waited for a service's first start since boot.
 pub static START_WAITED: AtomicU64 = AtomicU64::new(0);
-/// How long a caller waits for a service's first start (ms after it began): longer than a
-/// restart's 30 s, since vfs-server imports the pool first (a slow stick on real hardware).
-pub const START_WAIT_MS: u64 = 60_000;
+/// How long a caller waits for a service's first start (ms after it began, the launch: it
+/// includes registering and vfs-server's pool import): longer than a restart's 30 s, for a
+/// slow stick on real hardware (review 3: 120 s, was 60).
+pub const START_WAIT_MS: u64 = 120_000;
 
 /// The supervisor starts service `svc` for the first time (at boot): until it is online its
 /// callers wait for it. Called again when a first start failed and the process is started
@@ -170,27 +171,6 @@ pub fn start_failed(svc: u8) {
 #[inline]
 pub fn starting(svc: u8) -> bool {
     STARTING.load(Ordering::Acquire) & 1 << idx(svc) != 0
-}
-
-/// Whether any service is in its first start (one load: the dispatcher asks it for every
-/// call no service claimed).
-#[inline]
-pub fn any_starting() -> bool {
-    STARTING.load(Ordering::Relaxed) != 0
-}
-
-/// A call no service claimed (`nr`) while services are in their first start: the number may
-/// be one of theirs, claimed only when they come online (seen: `pipe` before lx-ipc was
-/// online). Waits for each starting service (bounded by [`START_WAIT_MS`] after its start;
-/// a signal ends the wait), so the caller looks the number up again afterwards.
-pub fn wait_first_starts(is_online: &dyn Fn(u8) -> bool) {
-    let mask = STARTING.load(Ordering::Acquire);
-    for i in (1..MAX_SVC).filter(|&i| mask & 1 << i != 0) {
-        let svc = i as u8;
-        if wait_online(svc, &|| is_online(svc)) == Err(crate::compat::linux::proc::ERESTARTSYS) {
-            return; // (a signal: the caller goes on; the kernel answers as before)
-        }
-    }
 }
 
 /// Whether callers of `svc` should wait for it rather than fail: it is restarting, or in its
