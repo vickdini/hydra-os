@@ -1019,6 +1019,18 @@ pub mod lx {
         pub fn started_by_hand(svc: u8) {
             note("started_by_hand", svc)
         }
+        // wave11 GK begin: *stub* the first start (supervisor's start_all, watchdog)
+        pub const START_WAIT_MS: u64 = 60_000;
+        pub fn first_start(svc: u8) {
+            note("first_start", svc)
+        }
+        pub fn start_failed(svc: u8) {
+            note("start_failed", svc)
+        }
+        pub fn starting(_svc: u8) -> bool {
+            false
+        }
+        // wave11 GK end
         pub fn may_restart(svc: u8) -> bool {
             note("may_restart", svc);
             crate::fake::LX_MAY_RESTART.load(core::sync::atomic::Ordering::SeqCst)
