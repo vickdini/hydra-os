@@ -108,6 +108,26 @@ fn file_names_and_numbers() {
     assert_eq!(file_number("readme.txt"), None);
 }
 
+// wave11 GH: fixed log files
+#[test]
+fn slots_first_unused_then_oldest() {
+    assert_eq!(choose_slot(&[]), None);
+    assert_eq!(choose_slot(&[(1, None), (2, None)]), Some((1, 1)));
+    assert_eq!(choose_slot(&[(1, Some(5)), (2, None), (3, None)]), Some((2, 6)));
+    assert_eq!(choose_slot(&[(1, Some(7)), (2, Some(5)), (3, Some(6))]), Some((2, 8)));
+    assert_eq!(choose_slot(&[(3, None), (1, Some(2)), (2, None)]), Some((2, 3)));
+}
+
+#[test]
+fn start_line_round_trip() {
+    let l = start_line(42);
+    assert_eq!(l.len(), START_LINE);
+    assert!(l.ends_with(b"\r\n"));
+    assert_eq!(parse_start(&l), Some(42));
+    assert_eq!(parse_start(b"\r\n\r\n"), None);
+    assert_eq!(parse_start(b"Hydra start x"), None);
+}
+
 #[test]
 fn next_number_counts_and_keeps_ten() {
     assert_eq!(next_number(&[], 10), (1, vec![]));

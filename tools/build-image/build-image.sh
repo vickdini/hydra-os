@@ -135,7 +135,26 @@ esp_tree() {
     # on an installed system; the stick waits longer (see the stick steps)
     mkdir -p "$d/hydra"
     printf '# Hydra start menu: shown at every start; entry 1 starts after this many seconds.\r\ntimeout=3\r\n' > "$d/hydra/menu"
+    log_files "$d/logs"
     return 0
+}
+
+# wave11 GH: the fixed log files (NUC runs 9-14: the firmware hung when Hydra created or
+# grew files on the EFI partition, on the first start after a fresh write). A start only
+# overwrites them in place: boot001.txt ... boot032.txt at the log's full size (2162688 bytes,
+# empty lines; logring::FILE_SIZE, logring::SLOTS) and steps.txt (64 lines of 160 bytes).
+log_files() {
+    local l=$1
+    mkdir -p "$l"
+    printf 'Hydra writes a log of every start into one of the files boot001.txt ... boot032.txt here.\r\nThe first line of each says the start number: the highest number is the newest log.\r\nPlease send the newest one (or all of them) back.\r\n' > "$l/README.TXT"
+    python3 -c "
+import sys
+d=sys.argv[1]
+fill=b'\r\n'*(2162688//2)
+for n in range(1,33):
+    open('%s/boot%03d.txt'%(d,n),'wb').write(fill)
+open(d+'/steps.txt','wb').write((b' '*158+b'\r\n')*64)
+" "$l"
 }
 
 # wave11 GH: the stick's EFI partition image (512 MiB FAT32) into file $1: the tree's EFI
@@ -152,8 +171,6 @@ esp_image() {
     # Boot breadcrumbs (\logs\steps.txt and on screen) from the very first instruction
     printf 'This file makes Hydra write each early start step into \\logs\\steps.txt (diagnostics).\r\n' > "$R$WORK/esptree/hydra/crumbs"
     printf '# Extra start words for Hydra, one or more per line (# starts a comment), e.g.\r\n#   verbose      boot messages instead of the logo\r\n#   iommu=off    no DMA remapping\r\n#   cpus=1       one processor\r\n' > "$R$WORK/esptree/hydra/options.txt"
-    mkdir -p "$R$WORK/esptree/logs"
-    printf 'Hydra writes a log of every start here: boot001.txt, boot002.txt, ... (the highest number is the newest).\r\nPlease send the newest one (or all of them) back.\r\n' > "$R$WORK/esptree/logs/README.TXT"
     mcopy -s -i "$E" "$R$WORK"/esptree/* ::/
     rm -rf "$R$WORK/esptree"
 }

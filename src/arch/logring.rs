@@ -53,12 +53,15 @@ pub struct Header {
     pub ring_written: u64,
     /// Unique GUID of the partition whose log directory holds the file (on-disk byte order).
     pub part: [u8; 16],
+    /// wave11 GH: the start's number (first line of its file, [`start_line`]): the newest
+    /// log has the highest; 0 when unknown.
+    pub start: u32,
 }
 
 impl Header {
     /// A fresh header for boot `seq`.
     pub fn new(seq: u32) -> Self {
-        Header { magic: MAGIC, check: !MAGIC ^ seq as u64, seq, flags: 0, head_len: 0, ring_written: 0, part: [0; 16] }
+        Header { magic: MAGIC, check: !MAGIC ^ seq as u64, seq, flags: 0, head_len: 0, ring_written: 0, part: [0; 16], start: 0 }
     }
 
     /// Whether this is a header [`Header::new`] made, with lengths that fit.
@@ -193,6 +196,43 @@ pub fn next_number(have: &[u32], keep: usize) -> (u32, Vec<u32>) {
     }
     (next, delete)
 }
+
+// wave11 GH begin: fixed log files (NUC runs 9-14: creating or growing a file through the
+// firmware hung the first start after a fresh stick write)
+/// Log files the stick and the installed system's EFI partition carry, made at their full
+/// size when the image is built (`boot001.txt` ... ): a start only overwrites one.
+pub const SLOTS: u32 = 32;
+
+/// Length of [`start_line`].
+pub const START_LINE: usize = 64;
+
+/// The first line of a log file: the start's number, padded to [`START_LINE`] bytes.
+pub fn start_line(start: u32) -> Vec<u8> {
+    let mut l = alloc::format!("Hydra start {:06} (the highest number is the newest log)", start).into_bytes();
+    l.resize(START_LINE - 2, b' ');
+    l.extend_from_slice(b"\r\n");
+    l
+}
+
+/// The start number in a log file's first bytes, if it has one (`None`: never written,
+/// the file still holds its empty lines).
+pub fn parse_start(first: &[u8]) -> Option<u32> {
+    let rest = first.strip_prefix(b"Hydra start ")?;
+    let digits: Vec<u8> = rest.iter().copied().take_while(|c| c.is_ascii_digit()).collect();
+    core::str::from_utf8(&digits).ok()?.parse().ok()
+}
+
+/// Which file this start overwrites, and its start number: `slots` are the full-size log
+/// files found (`(file number, start number or None when unused)`). The first unused file
+/// (lowest number), else the oldest (lowest start number); the start number one above the
+/// highest found. `None` without files.
+pub fn choose_slot(slots: &[(u32, Option<u32>)]) -> Option<(u32, u32)> {
+    let newest = slots.iter().filter_map(|s| s.1).max().unwrap_or(0);
+    let unused = slots.iter().filter(|s| s.1.is_none()).map(|s| s.0).min();
+    let slot = unused.or_else(|| slots.iter().min_by_key(|s| (s.1, s.0)).map(|s| s.0))?;
+    Some((slot, newest + 1))
+}
+// wave11 GH end
 
 /// A 64-bit fingerprint (FNV-1a) of a log file's bytes: whether a copy is still current.
 pub fn fingerprint(data: &[u8]) -> u64 {

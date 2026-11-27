@@ -18,6 +18,9 @@ static STATE: AtomicU8 = AtomicU8::new(0);
 static COUNT: AtomicU32 = AtomicU32::new(0);
 /// A firmware page at an identity address for the file writes (0: none yet).
 static BOUNCE: AtomicU64 = AtomicU64::new(0);
+/// wave11 GH: lines `\logs\steps.txt` has room for (the image makes it at its full size; a
+/// start only overwrites lines, never makes the file or makes it longer: NUC runs 9-14).
+static STEPS_LINES: AtomicU32 = AtomicU32::new(0);
 
 /// Bytes per line in the file (fixed: line `n` is at `n * LINE`).
 const LINE: usize = 160;
@@ -145,33 +148,41 @@ fn decide() -> bool {
     }
     let Ok(p) = uefi::boot::allocate_pages(uefi::boot::AllocateType::MaxAddress(0xFFFF_FFFF), uefi::boot::MemoryType::LOADER_DATA, 1) else { return false };
     BOUNCE.store(p.as_ptr() as u64, Ordering::Relaxed);
-    // A fresh file for this start
+    // wave11 GH: the fixed file's size (lines are overwritten in place; no file, no lines)
     let mut b2 = [0u16; 32];
     if let Some(c) = crate::fs::bootfs::path_to_cstr16("logs\\steps.txt", &mut b2) {
-        if let Ok(f) = root.open(c, FileMode::ReadWrite, FileAttribute::empty()) {
-            let _ = f.delete();
+        if let Some(mut f) = root.open(c, FileMode::Read, FileAttribute::empty()).ok().and_then(|h| h.into_regular_file()) {
+            let mut ib = crate::fs::bootfs::InfoBuf::new();
+            if let Ok(info) = f.get_info::<uefi::proto::media::file::FileInfo>(ib.bytes()) {
+                STEPS_LINES.store((info.file_size() / LINE as u64) as u32, Ordering::Relaxed);
+            }
+            f.close();
         }
     }
     true
 }
 
-/// Writes line `n` of `\logs\steps.txt` (made with its folder when missing), flushed.
+/// Overwrites line `n` of `\logs\steps.txt` and blanks the next (the end of this start's
+/// lines), flushed. wave11 GH: only inside the fixed file (see [`STEPS_LINES`]): never makes
+/// the file or its folder, never makes it longer.
 fn write_line(n: u32, line: &[u8; LINE]) -> bool {
     use uefi::proto::media::file::{File, FileAttribute, FileMode};
     let bounce = BOUNCE.load(Ordering::Relaxed);
-    if bounce == 0 {
+    let cap = STEPS_LINES.load(Ordering::Relaxed);
+    if bounce == 0 || n >= cap {
         return false;
     }
     let Ok(mut root) = open_root() else { return false };
-    let mut b = [0u16; 32];
-    let Some(c) = crate::fs::bootfs::path_to_cstr16("logs", &mut b) else { return false };
-    let Some(mut dir) = root.open(c, FileMode::CreateReadWrite, FileAttribute::DIRECTORY).ok().and_then(|h| h.into_directory()) else { return false };
     let mut b2 = [0u16; 32];
-    let Some(c) = crate::fs::bootfs::path_to_cstr16("steps.txt", &mut b2) else { return false };
-    let Some(mut f) = dir.open(c, FileMode::CreateReadWrite, FileAttribute::empty()).ok().and_then(|h| h.into_regular_file()) else { return false };
-    let buf = unsafe { core::slice::from_raw_parts_mut(bounce as *mut u8, LINE) };
-    buf.copy_from_slice(line);
-    let ok = f.set_position(n as u64 * LINE as u64).is_ok() && f.write(buf).is_ok() && f.flush().is_ok();
+    let Some(c) = crate::fs::bootfs::path_to_cstr16("logs\\steps.txt", &mut b2) else { return false };
+    let Some(mut f) = root.open(c, FileMode::ReadWrite, FileAttribute::empty()).ok().and_then(|h| h.into_regular_file()) else { return false };
+    let two = if n + 1 < cap { 2 } else { 1 };
+    let buf = unsafe { core::slice::from_raw_parts_mut(bounce as *mut u8, 2 * LINE) };
+    buf[..LINE].copy_from_slice(line);
+    buf[LINE..].fill(b' ');
+    buf[2 * LINE - 2] = b'\r';
+    buf[2 * LINE - 1] = b'\n';
+    let ok = f.set_position(n as u64 * LINE as u64).is_ok() && f.write(&buf[..two * LINE]).is_ok() && f.flush().is_ok();
     f.close();
     ok
 }

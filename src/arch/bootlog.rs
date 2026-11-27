@@ -2,17 +2,18 @@
 //!
 //! Everything the kernel and the services print (what a test harness reads from the serial
 //! port) is also kept in memory ([`super::logring`]) and written to a file on the EFI
-//! system partition Hydra started from: `\logs\bootNNN.txt` (the newest has the highest
-//! number; the last 10 are kept). On the installation stick that partition is the drive
+//! system partition Hydra started from: one of the fixed files `\logs\boot001.txt` ...
+//! (`logring::SLOTS`, made at their full size with the image), whose first line says the
+//! start's number (the newest log has the highest). On the installation stick that partition is the drive
 //! Windows shows when the stick is plugged in, so the log can be read and sent on another
 //! computer. Only when Hydra started from a GPT partition (a stick, an installed disk):
 //! booted from a CD or ISO (the test harnesses) nothing is written.
 //!
 //! How the text reaches the file, so that a hang or a crash still leaves a log:
-//! 1. **Before `ExitBootServices`** ([`prepare_file`]): the firmware's own FAT driver
-//!    creates the file at its full size ([`logring::FILE_SIZE`], empty lines) and writes
-//!    what the log has so far. The file never changes size afterwards, so the FAT never
-//!    changes either.
+//! 1. **Before `ExitBootServices`** ([`prepare_file`]): the file is picked (the first one
+//!    never written, else the oldest), reading only. Nothing is created, deleted or made
+//!    longer through the firmware (that hung the NUC's firmware: wave 11), so the FAT never
+//!    changes.
 //! 2. **While Hydra runs** ([`start_writer`]): a kernel task finds the file's clusters on
 //!    the partition (read-only FAT walk, [`crate::fs::fat32`]) and rewrites the new part
 //!    of the log into them every [`PERIOD_MS`] through the disk driver
@@ -34,8 +35,6 @@ use spin::Mutex;
 pub const PERIOD_MS: u64 = 20_000;
 /// How long the panic screen stays before the restart that saves the log.
 pub const PANIC_WAIT_S: u64 = 60;
-/// Log files kept on the partition.
-const KEEP: usize = 10;
 /// Directory of the log files (8.3 names: the kernel's FAT walk reads only those).
 const DIR: &str = "logs";
 
@@ -171,81 +170,102 @@ fn fw_write(file: &mut uefi::proto::media::file::RegularFile, at: u64, data: &[u
 }
 
 /// Before `ExitBootServices`, with the heap (step 6 of boot): when Hydra started from a GPT
-/// partition, makes this boot's log file (deleting the oldest beyond [`KEEP`]), writes a
-/// previous boot's unsaved log into its file, and writes the log so far.
+/// partition, picks this boot's log file among the fixed ones in `\logs` and writes a
+/// previous boot's unsaved log into its own file.
+///
+/// wave11 GH (NUC runs 9-14): no file is created, deleted or made longer through the
+/// firmware: the image carries `\logs\boot001.txt` ... (`logring::SLOTS`) at their full size,
+/// a start only overwrites one in place (the kernel's writer, after `ExitBootServices`).
+/// Making the file here hung the NUC's firmware on the first start after a fresh stick write.
+/// Every firmware file call leaves a screen line.
 pub fn prepare_file() {
     use uefi::boot::{allocate_pages, free_pages, AllocateType, MemoryType};
-    use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
+    use uefi::proto::media::file::{File, FileAttribute, FileMode};
+    use crate::arch::crumb::read_fmt as mark;
     if REGION.load(Ordering::Acquire) == 0 || crate::arch::bootdisk::info().boot_part.is_none() {
         return;
     }
+    mark(format_args!("bootlog: opening the volume"));
     let Ok(mut root) = crate::fs::bootfs::open_root_volume() else { return };
     let mut name = [0u16; 64];
     let Some(dname) = crate::fs::bootfs::path_to_cstr16(DIR, &mut name) else { return };
-    let Some(mut dir) = root.open(dname, FileMode::CreateReadWrite, FileAttribute::DIRECTORY).ok().and_then(|h| h.into_directory()) else {
-        crate::kprintln!("[bootlog] cannot make \\{} on the EFI partition (read-only?): no log file", DIR);
+    mark(format_args!("bootlog: opening \\{} (read only)", DIR));
+    let Some(mut dir) = root.open(dname, FileMode::Read, FileAttribute::empty()).ok().and_then(|h| h.into_directory()) else {
+        crate::kprintln!("[bootlog] no \\{} folder on the EFI partition: no log file", DIR);
         return;
     };
-    // The files there
-    let mut have = Vec::new();
+    // The full-size log files there, and the start number in each one's first line
+    let mut names = Vec::new();
     #[repr(C, align(8))]
     struct EntryBuf([u8; 1024]);
     let mut eb = EntryBuf([0; 1024]);
+    mark(format_args!("bootlog: listing \\{}", DIR));
     while let Ok(Some(info)) = dir.read_entry(&mut eb.0) {
         let n = alloc::format!("{}", info.file_name());
         if let Some(k) = logring::file_number(&n) {
-            if !info.attribute().contains(FileAttribute::DIRECTORY) {
-                have.push(k);
+            if !info.attribute().contains(FileAttribute::DIRECTORY) && info.file_size() as usize == logring::FILE_SIZE {
+                names.push(k);
             }
         }
     }
-    let Ok(bounce) = allocate_pages(AllocateType::MaxAddress(0xFFFF_FFFF), MemoryType::LOADER_DATA, 16) else { return };
-    let bounce = unsafe { core::slice::from_raw_parts_mut(bounce.as_ptr(), 16 * 4096) };
     let open = |dir: &mut uefi::proto::media::file::Directory, n: u32, mode: FileMode| {
         let mut buf = [0u16; 32];
         let fname = logring::file_name(n);
         let c = crate::fs::bootfs::path_to_cstr16(&fname, &mut buf)?;
         dir.open(c, mode, FileAttribute::empty()).ok()?.into_regular_file()
     };
-    // The previous boot's log that it could not write itself
+    let mut slots = Vec::new();
+    for &n in &names {
+        mark(format_args!("bootlog: reading the first line of {}", logring::file_name(n)));
+        let mut first = [0u8; logring::START_LINE];
+        let start = match open(&mut dir, n, FileMode::Read) {
+            Some(mut f) => {
+                let got = crate::fs::bootfs::fw_read(&mut f, &mut first).unwrap_or(0);
+                f.close();
+                logring::parse_start(&first[..got])
+            }
+            None => continue,
+        };
+        slots.push((n, start));
+    }
+    // The previous boot's log that it could not write itself: into its own file, in place
     let prev = PREV.swap(0, Ordering::Relaxed);
     if prev != 0 {
         let r = unsafe { region(prev) };
         let h = logring::header(r);
-        let text = logring::render(r);
         // (only into this partition's files: the last start may have been from another disk)
-        if have.contains(&h.seq) && Some(h.part) == crate::arch::bootdisk::info().boot_part {
-            if let Some(mut f) = open(&mut dir, h.seq, FileMode::ReadWrite) {
-                let mut ok = fw_write(&mut f, 0, &text, bounce);
+        if names.contains(&h.seq) && Some(h.part) == crate::arch::bootdisk::info().boot_part {
+            if let Ok(bounce) = allocate_pages(AllocateType::MaxAddress(0xFFFF_FFFF), MemoryType::LOADER_DATA, 16) {
+                let bounce_s = unsafe { core::slice::from_raw_parts_mut(bounce.as_ptr(), 16 * 4096) };
+                let mut text = logring::start_line(h.start);
+                text.extend_from_slice(&logring::render(r));
                 let why = if h.flags & logring::F_PANIC != 0 { "a kernel panic" } else { "a restart to save it" };
-                let end = alloc::format!("\r\n--- end of the log: saved by the next start of Hydra after {} ---\r\n", why);
-                ok &= fw_write(&mut f, text.len() as u64, end.as_bytes(), bounce);
-                let _ = f.flush();
-                crate::kprintln!("[bootlog] the previous start's log ({} bytes, {}) {} {}", text.len(), why, if ok { "saved to" } else { "could NOT be saved to" }, logring::file_name(h.seq));
+                text.extend_from_slice(alloc::format!("\r\n--- end of the log: saved by the next start of Hydra after {} ---\r\n", why).as_bytes());
+                text.truncate(logring::FILE_SIZE);
+                mark(format_args!("bootlog: writing the previous start's log into {} (in place)", logring::file_name(h.seq)));
+                if let Some(mut f) = open(&mut dir, h.seq, FileMode::ReadWrite) {
+                    let ok = fw_write(&mut f, 0, &text, bounce_s);
+                    let _ = f.flush();
+                    f.close();
+                    mark(format_args!("bootlog: written"));
+                    crate::kprintln!("[bootlog] the previous start's log ({} bytes, {}) {} {}", text.len(), why, if ok { "saved to" } else { "could NOT be saved to" }, logring::file_name(h.seq));
+                    // That file is now the newest log: not this start's
+                    for s in slots.iter_mut() {
+                        if s.0 == h.seq {
+                            s.1 = Some(h.start.max(1));
+                        }
+                    }
+                }
+                let _ = unsafe { free_pages(bounce, 16) };
             }
         }
         let _ = unsafe { free_pages(core::ptr::NonNull::new_unchecked(prev as *mut u8), PAGES) };
     }
-    let (next, delete) = logring::next_number(&have, KEEP);
-    for n in delete {
-        if let Some(f) = open(&mut dir, n, FileMode::ReadWrite) {
-            let _ = f.delete();
-        }
-    }
-    let Some(mut f) = open(&mut dir, next, FileMode::CreateReadWrite) else {
-        crate::kprintln!("[bootlog] cannot create \\{}\\{}: no log file", DIR, logring::file_name(next));
+    let Some((next, start)) = logring::choose_slot(&slots) else {
+        crate::kprintln!("[bootlog] no log files of full size in \\{} (the image makes them): no log file", DIR);
         return;
     };
-    // Its full size first (the clusters the writer task fills later), then the log so far
-    let fill = logring::filler(bounce.len());
-    let mut ok = true;
-    let mut at = 0u64;
-    while ok && (at as usize) < logring::FILE_SIZE {
-        let n = (logring::FILE_SIZE - at as usize).min(fill.len());
-        ok = fw_write(&mut f, at, &fill[..n], bounce);
-        at += n as u64;
-    }
-    // This boot's number in the header (the log so far is written with it)
+    // This boot's file and start number in the header (the writer finds the file by them)
     {
         let at = REGION.load(Ordering::Acquire);
         let _g = LOCK.lock();
@@ -255,25 +275,22 @@ pub fn prepare_file() {
         h.head_len = old.head_len;
         h.ring_written = old.ring_written;
         h.part = crate::arch::bootdisk::info().boot_part.unwrap_or_default();
+        h.start = start;
         logring::set_header(r, &h);
     }
-    crate::kprintln!("[bootlog] this start's log: \\{}\\{} on the EFI partition", DIR, logring::file_name(next));
-    if let Some((text, _)) = snapshot() {
-        ok &= fw_write(&mut f, 0, &text, bounce);
+    crate::kprintln!("[bootlog] this start's log: \\{}\\{} on the EFI partition (start {}; written from when the disk drivers run)", DIR, logring::file_name(next), start);
+    // From the stick: the installed system's logs too (only with the word disklogs: it
+    // makes files through the firmware)
+    if crate::arch::bootdisk::info().live && crate::arch::bootopts::say(&[b"disklogs"]) {
+        if let Ok(bounce) = allocate_pages(AllocateType::MaxAddress(0xFFFF_FFFF), MemoryType::LOADER_DATA, 16) {
+            let bounce_s = unsafe { core::slice::from_raw_parts_mut(bounce.as_ptr(), 16 * 4096) };
+            if let Some(mut wdir) = root.open(dname, FileMode::ReadWrite, FileAttribute::empty()).ok().and_then(|h| h.into_directory()) {
+                collect_disk_logs(&mut wdir, bounce_s);
+            }
+            let _ = unsafe { free_pages(bounce, 16) };
+        }
     }
-    let _ = f.flush();
-    let size = f.get_info::<FileInfo>(crate::fs::bootfs::InfoBuf::new().bytes()).map(|i| i.file_size()).unwrap_or(0);
-    f.close();
-    // From the stick: the installed system's logs too, so one stick carries them all
-    if crate::arch::bootdisk::info().live {
-        collect_disk_logs(&mut dir, bounce);
-    }
-    let _ = unsafe { free_pages(core::ptr::NonNull::new_unchecked(bounce.as_mut_ptr()), 16) };
-    if ok && size as usize == logring::FILE_SIZE {
-        FILE_ON.store(true, Ordering::Release);
-    } else {
-        crate::kprintln!("[bootlog] the log file could not be made at its full size ({} bytes): no log file", size);
-    }
+    FILE_ON.store(true, Ordering::Release);
 }
 
 /// The live stick's start (before `ExitBootServices`): copies the log files of every other
@@ -472,8 +489,13 @@ fn write_out(end: &str, last: bool, wait_ms: u64) -> bool {
         STOPPED.store(true, Ordering::Release);
         return false;
     }
-    let Some((mut text, h)) = snapshot() else { return false };
-    let from = if logring::wrapped(&h) { (h.head_len as usize).min(t.written) } else { t.written };
+    let Some((body, h)) = snapshot() else { return false };
+    // wave11 GH: the start number first (which file is the newest, and which the next start
+    // overwrites)
+    let mut text = logring::start_line(h.start);
+    text.extend_from_slice(&body);
+    let head_len = h.head_len as usize + logring::START_LINE;
+    let from = if logring::wrapped(&h) { head_len.min(t.written) } else { t.written };
     let from = from & !4095;
     text.extend_from_slice(end.as_bytes());
     text.truncate(logring::FILE_SIZE);
