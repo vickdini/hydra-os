@@ -317,6 +317,8 @@ pub static COMMANDS: &[Command] = &[
     cmd("wget", &["fetch", "curl"], "wget <server_ip_or_url> <port> <remote_path> <dest_zfs_path>", "Download a file over HTTP into the pool", net::wget),
     // The Linux root
     cmd("linux", &["linux64", "lx"], "linux [status|test|run <path> [args]|chroot <dir> <program> [args]|plasma [dir] [nologin]|trace on [name]|off|prof ...]", "The Linux layer: programs, diagnostics, the desktop", linux::linux),
+    // wave12 FK: the FreeBSD root
+    cmd("freebsd", &["fbsd"], "freebsd [program [args]]", "Run a FreeBSD program in the FreeBSD root (/freebsd or /ubuntu/freebsd; a bare name is looked up in its bin directories; none: /bin/sh)", linux::freebsd),
     // Power and fault tests
     cmd("shutdown", &["poweroff"], "shutdown", "Power off", system::shutdown),
     cmd("reboot", &["restart"], "reboot", "Restart the computer", system::reboot),

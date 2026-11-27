@@ -223,6 +223,18 @@ pub const FREEBSD_SIGCODE: [u8; 22] = [
     0xF4, 0xEB, 0xFD, // hlt; jmp .-1
 ];
 
+/// Where `thr_new`'s threads start (wave 12): on the shared page after the trampoline.
+pub const FREEBSD_THR_START_ADDR: u64 = FREEBSD_SIGCODE_ADDR + 32;
+
+/// The start of a thread made by `thr_new`: `clone` gives the new thread its creator's
+/// registers, with `start_func` in `r12` and `arg` in `r13`: `mov %r13, %rdi`;
+/// `xor %ebp, %ebp`; `jmp *%r12` (the stack is already as if `start_func` had been called).
+pub const FREEBSD_THR_START: [u8; 8] = [
+    0x4C, 0x89, 0xEF, // mov %r13,%rdi
+    0x31, 0xED, // xor %ebp,%ebp
+    0x41, 0xFF, 0xE4, // jmp *%r12
+];
+
 // ----------------------------------------------------------------------
 // The FreeBSD exec layout
 // ----------------------------------------------------------------------

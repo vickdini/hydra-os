@@ -32,15 +32,23 @@
 //! - **Signals**: the kernel numbers signals as Linux does; each personality has its maps
 //!   ([`abi`]) and its own frame builder ([`Table::frame`], called from the one dispatch
 //!   point at the top of `compat::linux::proc::build_frame`).
-//! - **The FreeBSD stub table** ([`freebsd`], test only): with QEMU's fw_cfg
-//!   `opt/hydra/persona=fbsd-stub` or the boot option word `persona=fbsd-stub`, FreeBSD
-//!   programs start with the FreeBSD personality and a small stub table (design 2.9), which
-//!   proves the hook before wave 11's front end. Off by default.
+//! - **The FreeBSD table** ([`freebsd`], wave 12): FreeBSD programs run with it by default.
+//!   QEMU's fw_cfg `opt/hydra/persona` or the boot option word `persona=...` switch it:
+//!   `persona=fbsd-stub` gives the wave 5 stub table instead (design 2.9), `persona=off`
+//!   refuses FreeBSD programs with `ENOEXEC` as before wave 12.
+//! - **Services see the personality** in `LxCall::pers` of every forwarded call ([`lx_pers`],
+//!   filled in `lx::place`): stage 2 of wave 12 keys FreeBSD layouts on it.
 
 pub mod abi;
+pub mod fbsd_calls;
+pub mod fbsd_sysctl;
+pub mod fbsd_thr;
+pub mod fbsd_tmp;
+pub mod fbsd_xlat;
 pub mod freebsd;
+pub mod umtx;
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::arch::idt::FpuState;
 use crate::arch::syscall::SyscallFrame;
@@ -59,24 +67,76 @@ const EINTR: i64 = -4;
 
 /// The boot entry asked for the FreeBSD stub table (`persona=fbsd-stub`).
 pub static STUB_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
-/// FreeBSD programs start with the stub table (else they are refused).
-static FREEBSD_STUB: AtomicBool = AtomicBool::new(false);
+/// The boot entry asked to refuse FreeBSD programs (`persona=off`).
+pub static OFF_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
+/// FreeBSD programs: [`MODE_FULL`], [`MODE_STUB`] or [`MODE_OFF`].
+static MODE: AtomicU8 = AtomicU8::new(MODE_FULL);
+/// FreeBSD programs run with the full table (the default).
+pub const MODE_FULL: u8 = 0;
+/// FreeBSD programs run with the wave 5 stub table (`persona=fbsd-stub`).
+pub const MODE_STUB: u8 = 1;
+/// FreeBSD programs are refused (`persona=off`).
+pub const MODE_OFF: u8 = 2;
 
-/// Reads the switch for the FreeBSD stub table (fw_cfg `opt/hydra/persona` or the boot
-/// option word, see [`STUB_BY_BOOT_OPTION`]); called once at boot.
+/// Reads the FreeBSD switch (fw_cfg `opt/hydra/persona` or the boot option word, see
+/// [`STUB_BY_BOOT_OPTION`], [`OFF_BY_BOOT_OPTION`]); called once at boot.
 pub fn init() {
     let mut cfg = [0u8; 16];
     let fw = crate::arch::fwcfg::read_file_into("opt/hydra/persona", &mut cfg).map(|n| &cfg[..n]);
-    let on = fw.is_some_and(|v| v.starts_with(b"fbsd-stub")) || STUB_BY_BOOT_OPTION.load(Ordering::Acquire);
-    FREEBSD_STUB.store(on, Ordering::Release);
-    if on {
-        crate::kprintln!("[persona] FreeBSD programs start with the stub table (test switch persona=fbsd-stub)");
+    let mode = if fw.is_some_and(|v| v.starts_with(b"off")) || OFF_BY_BOOT_OPTION.load(Ordering::Acquire) {
+        MODE_OFF
+    } else if fw.is_some_and(|v| v.starts_with(b"fbsd-stub")) || STUB_BY_BOOT_OPTION.load(Ordering::Acquire) {
+        MODE_STUB
+    } else {
+        MODE_FULL
+    };
+    MODE.store(mode, Ordering::Release);
+    match mode {
+        MODE_STUB => crate::kprintln!("[persona] FreeBSD programs start with the stub table (test switch persona=fbsd-stub)"),
+        MODE_OFF => crate::kprintln!("[persona] FreeBSD programs are refused (persona=off)"),
+        _ => {}
     }
 }
 
 /// Whether the FreeBSD stub table is switched on.
 pub fn freebsd_stub() -> bool {
-    FREEBSD_STUB.load(Ordering::Relaxed)
+    MODE.load(Ordering::Relaxed) == MODE_STUB
+}
+
+/// The personality word of a forwarded call (`LxCall::pers`, read by the services): 0 for
+/// Linux and native callers, else `TaskPersonality as u32` (2 FreeBSD, 3 macOS), from this
+/// CPU's table pointer (one per-CPU load; null for Linux and native tasks).
+#[inline(always)]
+pub fn lx_pers() -> u32 {
+    let t = CURRENT_TABLE.load(Ordering::Relaxed);
+    if t.is_null() {
+        0
+    } else {
+        // SAFETY: tables are statics
+        unsafe { (*t).pers as u32 }
+    }
+}
+
+/// FreeBSD calls already reported missing (one log line each, design: "easy to find").
+static MISSING: spin::Mutex<[u64; TABLE_LEN / 64]> = spin::Mutex::new([0; TABLE_LEN / 64]);
+
+/// Logs, once per call number, that FreeBSD call `nr` (with a detail such as an `fcntl`
+/// command) is not implemented yet.
+pub fn note_missing(nr: u64, detail: Option<u64>) {
+    let i = (nr as usize).min(TABLE_LEN - 1);
+    {
+        let mut m = MISSING.lock();
+        if m[i / 64] & (1 << (i % 64)) != 0 {
+            return;
+        }
+        m[i / 64] |= 1 << (i % 64);
+    }
+    let prog = crate::task::with_current_task_mut(|t| alloc::string::String::from(t.exe_path())).unwrap_or_default();
+    let name = fbsd_xlat::name(nr).unwrap_or("(not a FreeBSD call)");
+    match detail {
+        Some(d) => crate::kprintln!("[persona] FreeBSD {}: {} ({}) command {} not implemented yet: ENOSYS", prog, name, nr, d),
+        None => crate::kprintln!("[persona] FreeBSD {}: {} ({}) not implemented yet: ENOSYS", prog, name, nr),
+    }
 }
 
 /// The personality the program file starting with `head` runs with, or `-ENOEXEC` (with a
@@ -84,9 +144,9 @@ pub fn freebsd_stub() -> bool {
 pub fn choose(head: &[u8], path: &str) -> Result<TaskPersonality, i64> {
     match abi::classify(head) {
         abi::Kind::Linux => Ok(TaskPersonality::Linux),
-        abi::Kind::FreeBsd if freebsd_stub() => Ok(TaskPersonality::FreeBsd),
+        abi::Kind::FreeBsd if MODE.load(Ordering::Relaxed) != MODE_OFF => Ok(TaskPersonality::FreeBsd),
         abi::Kind::FreeBsd => {
-            crate::kprintln!("[exec] {}: a FreeBSD program (ELF OS/ABI {}): refused, ENOEXEC (no FreeBSD front end yet)", path, head[7]);
+            crate::kprintln!("[exec] {}: a FreeBSD program (ELF OS/ABI {}): refused, ENOEXEC (persona=off)", path, head[7]);
             Err(ENOEXEC)
         }
         abi::Kind::MachO => {
@@ -209,6 +269,7 @@ pub static CURRENT_TABLE: crate::arch::percpu::PerCpuPtr<Table> = crate::arch::p
 #[inline(always)]
 pub fn table_for(p: TaskPersonality) -> *mut Table {
     match p {
+        TaskPersonality::FreeBsd if freebsd_stub() => &freebsd::STUB_TABLE as *const Table as *mut Table,
         TaskPersonality::FreeBsd => &freebsd::TABLE as *const Table as *mut Table,
         _ => core::ptr::null_mut(),
     }
@@ -342,8 +403,13 @@ pub fn syscall(frame: &mut SyscallFrame, fpu: *mut FpuState, t: &'static Table) 
             Ret::of(crate::compat::linux::dispatch_linux_syscall(frame))
         }
         R_KERNEL => (t.local)(arg, frame, args),
-        R_ENOSYS | R_SERVER | R_MACH => Ret::of(ENOSYS),
+        R_ENOSYS => {
+            note_missing(nr, None);
+            Ret::of(ENOSYS)
+        }
+        R_SERVER | R_MACH => Ret::of(ENOSYS),
         _ => {
+            note_missing(nr, None);
             // Unknown: ENOSYS, and the personality's signal (FreeBSD's nosys sends SIGSYS)
             if t.nosys_signal != 0 {
                 let (tid, pid) = crate::compat::linux::proc::current_ids();

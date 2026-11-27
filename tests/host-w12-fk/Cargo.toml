@@ -1,0 +1,13 @@
+[package]
+name = "hydra_hosttests_w12_fk"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Group FK host unit tests (wave 12): the FreeBSD personality's pure parts (src/personality/fbsd_xlat.rs, fbsd_tmp.rs, abi.rs): flag and constant translations, the call table's names, ucontext layout, _umtx_op decoding, the temporary stat/dirent/statfs/sysctl translations"
+
+# Standalone workspace: never pulled into the kernel or driver builds.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false

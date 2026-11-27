@@ -1574,6 +1574,12 @@ fn place(x: &Host, s: &mut svc::Lx, me: u64, my_idx: usize, c: &mut LxCall, copi
         }
     };
     let has_copy = !matches!(copies, copy::Src::None);
+    // wave12 GFK begin: the caller's personality for the services (stage 2 keys FreeBSD
+    // layouts on it; a call between services keeps what its service set)
+    if c.pers == 0 {
+        c.pers = crate::personality::lx_pers();
+    }
+    // wave12 GFK end
     let id = (x.id as u64) << LX_REQ_SVC_SHIFT | (s.next_id & ((1 << LX_REQ_SVC_SHIFT) - 1));
     s.next_id += 1;
     c.id = id;
