@@ -525,7 +525,7 @@ fn early_floor() -> u64 {
 fn early_grow(alloc: &mut PhysicalMemoryManager) -> bool {
     // (review: no block when the region table is full, else allocate_frame_raw would take
     // block after block it cannot use)
-    if !EARLY.load(core::sync::atomic::Ordering::SeqCst) || alloc.region_count >= MAX_REGIONS {
+    if !may_grow_early(EARLY.load(core::sync::atomic::Ordering::SeqCst), alloc) {
         return false;
     }
     // Below 4 GiB first, where the frames came from before (the kernel's first page tables
@@ -537,6 +537,18 @@ fn early_grow(alloc: &mut PhysicalMemoryManager) -> bool {
     crate::kprintln!("[mem] {} MiB from the firmware at {:#x} (frames before ExitBootServices)", EARLY_BLOCK_PAGES * PAGE_SIZE >> 20, pa);
     true
 }
+
+// wave11 GK begin
+/// Whether [`early_grow`] may take one more block from the firmware: boot services still run
+/// (`early`) and `alloc`'s region table has room to record it (a block it cannot record would
+/// be lost, and the next allocation would take another). Host-tested (`tests/host-t32`).
+pub fn may_grow_early(early: bool, alloc: &PhysicalMemoryManager) -> bool {
+    early && alloc.region_count < MAX_REGIONS
+}
+
+/// The region table's size (host tests).
+pub const REGION_SLOTS: usize = MAX_REGIONS;
+// wave11 GK end
 
 /// `pages` contiguous pages the firmware allocates for Hydra (loader data) in
 /// [`floor`, `ceiling`): the top of the highest free region that has them. Boot services only.

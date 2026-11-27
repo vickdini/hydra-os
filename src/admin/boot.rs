@@ -111,7 +111,6 @@ fn start_desktop(emergency: bool) {
         set_color(Color::LightCyan, Color::Black);
         crate::println!("[*] Starting KDE Plasma (the Hydra shell is on Ctrl+Alt+F1)");
         set_color(Color::White, Color::Black);
-        wait_for_linux_services(); // wave11 GH
         super::linux::plasma("/ubuntu", false);
         if !crate::video::splash::is_desktop_starting() {
             // No desktop to wait for: the boot logo makes way for the console
@@ -120,48 +119,8 @@ fn start_desktop(emergency: bool) {
     }
 }
 
-// wave11 GH begin
-/// Waits (at most 30 s) until the Linux services the desktop's first programs call are
-/// online. The supervisor starts them before the desktop, but one may register only later
-/// (seen on stick starts: lx-ipc online after the session script's first pipe(2), which then
-/// failed and no desktop came). A service that never comes is logged, and the desktop
-/// starts anyway.
-#[cfg(target_os = "uefi")]
-fn wait_for_linux_services() {
-    use crate::ipc::protocol::{LXS_DISPLAY, LXS_INPUT, LXS_IPC, LXS_LINUX, LXS_NET, LXS_PROC, LXS_SEC, LXS_TTY, LXS_VFS};
-    const NEEDED: [(u8, &str); 9] = [
-        (LXS_LINUX, "linux"),
-        (LXS_VFS, "vfs"),
-        (LXS_IPC, "ipc"),
-        (LXS_NET, "net"),
-        (LXS_PROC, "proc"),
-        (LXS_SEC, "sec"),
-        (LXS_TTY, "tty"),
-        (LXS_DISPLAY, "display"),
-        (LXS_INPUT, "input"),
-    ];
-    let start = crate::arch::pit::ticks();
-    let mut waited = false;
-    loop {
-        let missing = NEEDED.iter().find(|(s, _)| !crate::lx::svc::online(*s));
-        let Some((_, name)) = missing else { break };
-        let elapsed_ms = crate::arch::pit::ticks().saturating_sub(start) * 10;
-        if elapsed_ms >= 30_000 {
-            crate::kprintln!("[boot] the Linux service {} is not online after 30 s; starting the desktop anyway", name);
-            return;
-        }
-        waited = true;
-        crate::task::sleep_ms(50);
-    }
-    if waited {
-        crate::kprintln!("[boot] waited {} ms for the Linux services before the desktop", crate::arch::pit::ticks().saturating_sub(start) * 10);
-    }
-}
-
-/// Host builds (unit tests): nothing to wait for.
-#[cfg(not(target_os = "uefi"))]
-fn wait_for_linux_services() {}
-// wave11 GH end
+// wave11 GK: (wave11 GH's desktop wait for the Linux services is gone: a call made before
+// a service is online waits for its first start, `lx::restart::first_start`)
 
 /// Runs the console for good: the desktop, then `hydra-shell` (started again whenever it
 /// ends), or the emergency prompt when it cannot run.

@@ -16,6 +16,12 @@ pub(crate) fn reset() {
     }
     *INSTALLS.lock() = [(0, 0, -1); 64];
     INSTALL_NEXT.store(0, Ordering::Release);
+    // wave11 GK: no first starts
+    STARTING.store(0, Ordering::Release);
+    for l in START_LOGGED.iter() {
+        l.store(false, Ordering::Release);
+    }
+    START_WAITED.store(0, Ordering::Release);
     RESENT.store(0, Ordering::Release);
     WAITED.store(0, Ordering::Release);
     FAILED.store(0, Ordering::Release);

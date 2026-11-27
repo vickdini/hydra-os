@@ -113,3 +113,27 @@ fn global_helpers() {
     // Identity until the direct map is turned on (never on the host)
     assert_eq!(fa::phys_to_virt(0x1234) as u64, 0x1234);
 }
+
+// wave11 GK begin
+/// `early_grow`'s capacity stop (`fwmem=new`): no block from the firmware when the region
+/// table is full (it could not be recorded) or after `ExitBootServices`.
+#[test]
+fn early_grow_stops_at_a_full_region_table() {
+    let mut m = PhysicalMemoryManager::new();
+    assert!(fa::may_grow_early(true, &m), "room, boot services run");
+    assert!(!fa::may_grow_early(false, &m), "after ExitBootServices: never");
+    for i in 0..fa::REGION_SLOTS as u64 - 1 {
+        m.add_region(PhysAddr::new(0x1000_0000 + i * 0x2000), 1);
+    }
+    assert!(fa::may_grow_early(true, &m), "one slot left");
+    m.add_region(PhysAddr::new(0x3000_0000), 1);
+    assert!(!fa::may_grow_early(true, &m), "table full: stop");
+    // A region past the table is not recorded either (add_region's own stop)
+    let total = m.total_usable_memory();
+    m.add_region(PhysAddr::new(0x4000_0000), 16);
+    assert_eq!(m.total_usable_memory(), total);
+    assert!(!fa::may_grow_early(true, &m));
+    // Not early: no firmware block whatever the table
+    assert!(!fa::is_early());
+}
+// wave11 GK end

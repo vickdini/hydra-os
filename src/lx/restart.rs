@@ -36,7 +36,7 @@
 //! for a restarting service holds the kernel lock (taken here if the lock-free path came
 //! without it): restarts are rare, so this path is never hot.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 pub use super::restart_policy::{RestartClass, LX_RESEND, LX_RESEND_MAYBE};
@@ -128,6 +128,78 @@ pub fn gone_gen(svc: u8) -> u64 {
     GONE_GEN[idx(svc)].load(Ordering::Acquire)
 }
 // wave11 GR end
+
+// wave11 GK begin: the first start is not a restart
+/// Per service: started by the supervisor at boot and not online yet (its first start). Its
+/// callers wait for it as for a restarting service (at most [`WAIT_MS`] after the start,
+/// interruptible), instead of failing because it registered late; it is not a restart: the
+/// ladder does not count it, and no objects are kept or made stale.
+static STARTING: AtomicU32 = AtomicU32::new(0);
+/// Per service: when its first start began (ms since boot), for the wait's deadline.
+static START_MS: [AtomicU64; MAX_SVC] = [const { AtomicU64::new(0) }; MAX_SVC];
+/// Per service: a caller already waited for its first start (one log line per service).
+static START_LOGGED: [AtomicBool; MAX_SVC] = [const { AtomicBool::new(false) }; MAX_SVC];
+/// Calls that waited for a service's first start since boot.
+pub static START_WAITED: AtomicU64 = AtomicU64::new(0);
+/// How long a caller waits for a service's first start (ms after it began): longer than a
+/// restart's 30 s, since vfs-server imports the pool first (a slow stick on real hardware).
+pub const START_WAIT_MS: u64 = 60_000;
+
+/// The supervisor starts service `svc` for the first time (at boot): until it is online its
+/// callers wait for it. Called again when a first start failed and the process is started
+/// once more: the deadline counts from the newest start.
+pub fn first_start(svc: u8) {
+    let i = idx(svc);
+    if svc == 0 || state(|s| s[i].ladder.crashes) != 0 {
+        return; // (it was online once and crashed since: a restart, not a first start)
+    }
+    START_MS[i].store(now_ms(), Ordering::Release);
+    STARTING.fetch_or(1 << i, Ordering::AcqRel);
+}
+
+/// Service `svc`'s first start ended without it coming online (no device, or the
+/// supervisor gave up): its waiting callers fail now.
+pub fn start_failed(svc: u8) {
+    let i = idx(svc);
+    if STARTING.fetch_and(!(1 << i), Ordering::AcqRel) & 1 << i != 0 {
+        ONLINE_WQ[i].wake_all();
+    }
+}
+
+/// Whether `svc` is in its first start (see [`STARTING`]).
+#[inline]
+pub fn starting(svc: u8) -> bool {
+    STARTING.load(Ordering::Acquire) & 1 << idx(svc) != 0
+}
+
+/// Whether any service is in its first start (one load: the dispatcher asks it for every
+/// call no service claimed).
+#[inline]
+pub fn any_starting() -> bool {
+    STARTING.load(Ordering::Relaxed) != 0
+}
+
+/// A call no service claimed (`nr`) while services are in their first start: the number may
+/// be one of theirs, claimed only when they come online (seen: `pipe` before lx-ipc was
+/// online). Waits for each starting service (bounded by [`START_WAIT_MS`] after its start;
+/// a signal ends the wait), so the caller looks the number up again afterwards.
+pub fn wait_first_starts(is_online: &dyn Fn(u8) -> bool) {
+    let mask = STARTING.load(Ordering::Acquire);
+    for i in (1..MAX_SVC).filter(|&i| mask & 1 << i != 0) {
+        let svc = i as u8;
+        if wait_online(svc, &|| is_online(svc)) == Err(crate::compat::linux::proc::ERESTARTSYS) {
+            return; // (a signal: the caller goes on; the kernel answers as before)
+        }
+    }
+}
+
+/// Whether callers of `svc` should wait for it rather than fail: it is restarting, or in its
+/// first start.
+#[inline]
+pub fn waitable(svc: u8) -> bool {
+    restarting(svc) || starting(svc)
+}
+// wave11 GK end
 
 /// Calls sent again to a restarted service since boot.
 pub static RESENT: AtomicU64 = AtomicU64::new(0);
@@ -237,6 +309,23 @@ pub fn started_by_hand(svc: u8) {
 pub fn gone(svc: u8) -> Decision {
     let i = idx(svc);
     let now = now_ms();
+    // wave11 GK begin: gone during its first start (never online): not a crash for the
+    // ladder; nothing of it is kept or in flight; its callers go on waiting for the next
+    // start (the supervisor's own restart limit bounds a start that keeps failing)
+    if starting(svc) {
+        let d = Decision { class: RestartClass::FailObjects, reset_kept: false, restart: true };
+        state(|s| {
+            let v = &mut s[i];
+            v.deliberate = false;
+            v.adopted = false;
+            v.last = Some(d);
+        });
+        GONE_GEN[i].fetch_add(1, Ordering::AcqRel);
+        crate::kprintln!("[lx] service {} went away during its first start: not a restart (the ladder does not count it)", svc);
+        ONLINE_WQ[i].wake_all();
+        return d;
+    }
+    // wave11 GK end
     let mut before = None;
     let d = state(|s| {
         let v = &mut s[i];
@@ -348,6 +437,7 @@ pub fn online(svc: u8) {
     });
     RESTARTING[i].store(false, Ordering::Release);
     DOWN[i].store(false, Ordering::Release);
+    STARTING.fetch_and(!(1 << i), Ordering::AcqRel); // wave11 GK: its first start is over
     ONLINE_WQ[i].wake_all();
 }
 
@@ -378,14 +468,25 @@ pub fn wait_online(svc: u8, is_online: &dyn Fn() -> bool) -> Result<(), i64> {
     if is_online() {
         return Ok(());
     }
-    if !restarting(svc) {
+    if !waitable(svc) {
         return Err(EIO);
     }
     if !crate::arch::smp::bkl_held() {
         crate::arch::smp::bkl_enter();
     }
-    WAITED.fetch_add(1, Ordering::Relaxed);
-    let since = state(|s| s[i].since_ms);
+    // wave11 GK begin: a service in its first start: the deadline counts from its start
+    let first = !restarting(svc);
+    let (since, limit) = if first {
+        START_WAITED.fetch_add(1, Ordering::Relaxed);
+        if !START_LOGGED[i].swap(true, Ordering::AcqRel) {
+            crate::kprintln!("[lx] a call waits for service {}, which is still starting (registered late)", svc);
+        }
+        (START_MS[i].load(Ordering::Acquire), START_WAIT_MS)
+    } else {
+        WAITED.fetch_add(1, Ordering::Relaxed);
+        (state(|s| s[i].since_ms), WAIT_MS)
+    };
+    // wave11 GK end
     let freq = crate::arch::pit::frequency_hz().max(1);
     loop {
         ONLINE_WQ[i].register();
@@ -393,16 +494,21 @@ pub fn wait_online(svc: u8, is_online: &dyn Fn() -> bool) -> Result<(), i64> {
             ONLINE_WQ[i].unregister();
             return Ok(());
         }
-        if !restarting(svc) {
+        if !waitable(svc) {
             ONLINE_WQ[i].unregister();
             FAILED.fetch_add(1, Ordering::Relaxed);
             return Err(EIO);
         }
         let now = now_ms();
-        if now >= since + WAIT_MS {
+        if now >= since + limit {
             ONLINE_WQ[i].unregister();
             FAILED.fetch_add(1, Ordering::Relaxed);
-            crate::kprintln!("[lx] service {} did not come back within 30 s: a call fails with EIO", svc);
+            if first {
+                crate::kprintln!("[lx] service {} did not come online within {} s of its start: a call fails with EIO", svc, limit / 1000);
+                start_failed(svc); // (later callers do not wait again)
+            } else {
+                crate::kprintln!("[lx] service {} did not come back within 30 s: a call fails with EIO", svc);
+            }
             return Err(EIO);
         }
         if crate::compat::linux::proc::signal_pending() {
@@ -410,7 +516,7 @@ pub fn wait_online(svc: u8, is_online: &dyn Fn() -> bool) -> Result<(), i64> {
             return Err(crate::compat::linux::proc::ERESTARTSYS);
         }
         // Woken when the service is online (or gives up); a look every 100 ms besides
-        let wait_ms = (since + WAIT_MS - now).min(100);
+        let wait_ms = (since + limit - now).min(100);
         crate::task::wait::wait(Some(crate::arch::pit::ticks() + (wait_ms * freq).div_ceil(1000).max(1)));
     }
 }
@@ -579,10 +685,11 @@ fn list(x: &super::svc::Host, buf: u64, cap: u64, start: u64) -> i64 {
 /// One line per service with restart state, for `linux prof show` and the task dump.
 pub fn summary() -> alloc::string::String {
     let mut out = alloc::format!(
-        "restarts: {} calls waited, {} sent again, {} failed;",
+        "restarts: {} calls waited, {} sent again, {} failed; {} waited for a first start;",
         WAITED.load(Ordering::Relaxed),
         RESENT.load(Ordering::Relaxed),
-        FAILED.load(Ordering::Relaxed)
+        FAILED.load(Ordering::Relaxed),
+        START_WAITED.load(Ordering::Relaxed) // wave11 GK
     );
     state(|s| {
         for (i, v) in s.iter().enumerate() {

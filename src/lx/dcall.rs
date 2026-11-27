@@ -231,11 +231,15 @@ fn target_host(target: SvcId) -> Option<&'static svc::Host> {
 /// `-ENOSYS` (not a forwarded service, or not running and not restarting), `-EIO` (given
 /// up by the ladder, or not back within 30 s), `-EINTR` (a signal came while waiting).
 fn dcall_host(target: SvcId) -> Result<&'static svc::Host, i64> {
-    let x = svc::host(svc::host_of(target)).ok_or(ENOSYS)?;
+    // wave11 GK: a service in its first start whose process has not attached yet
+    let x = match svc::host(svc::host_of(target)) {
+        Some(x) => x,
+        None => return super::await_first_start(svc::host_of(target)),
+    };
     if x.is_online() {
         return Ok(x);
     }
-    if super::restart::restarting(x.id) {
+    if super::restart::waitable(x.id) { // wave11 GK: or in its first start
         wait_for(x)?;
         return Ok(x);
     }

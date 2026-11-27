@@ -1107,7 +1107,7 @@ pub static OFFLINE_WAITS: AtomicU64 = AtomicU64::new(0);
 /// wait failed (`ERESTARTSYS` on a signal, `EIO` after 30 s or if it went again): the
 /// caller's answer.
 fn offline_wait() -> Result<Option<&'static Host>, i64> {
-    if !super::restart::restarting(LXS_VFS) {
+    if !super::restart::waitable(LXS_VFS) { // wave11 GK: or in its first start
         return Ok(None);
     }
     OFFLINE_WAITS.fetch_add(1, Ordering::Relaxed);
