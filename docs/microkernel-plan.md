@@ -391,6 +391,13 @@ These are not group work yet, but should not be forgotten:
 - **The `lowmem` failure on q35:** the firmware loads the kernel where the test wants to map memory.
 - **A Wi-Fi driver is needed eventually** (user, 2026-11-24): the NUC uses a **USB Wi-Fi adapter: TP-Link Archer T2UB Nano** (Realtek RTL8821CU, Wi-Fi 5 AC600 + Bluetooth 4.2 combo; to be confirmed by its USB id in the NUC boot log). Linux's driver is `rtw88_8821cu` (mainline since 6.2) with firmware `rtw8821c_fw.bin`: the reference for a Hydra driver service. Bluetooth on the same device is a separate later item. Needs a USB driver for that chipset on Hydra's xHCI stack, firmware loading, an 802.11 layer and a WPA2 supplicant (or the Linux one through lx-net). Hydra has no Wi-Fi support today; wave 11's NUC run uses an Ethernet cable. Group H estimates the work; to be scheduled in a later wave.
 - **Live session copied to memory, chosen by RAM size** (user's idea, 2026-11-24; to do in a later wave, ~3–4 agent-days): at boot Hydra measures free RAM and picks a mode, shown on screen and in the boot log: **≥ 8 GB** copy the whole live pool's used blocks (~3.5 GB system + ~1 GB install set) into a RAM-backed disk for zfs-server, then "you can remove the stick now" (pulling it early is fully safe); **4–8 GB** copy only the install set (the installer finishes and restart works; desktop programs may still crash); **< 4 GB** run from the stick as today. Start-menu entries override it (from the stick / copy to memory / safe mode). Pieces: RAM-backed disk on memory objects, boot-time copy of used blocks with progress and fallback, the mode choice, tests pulling the stick at every phase. Today's protection is wave 11 Group H's restart timeout only.
+- **Hydra Live as a diagnostic and rescue stick, like Hiren's BootCD** (user, 2026-11-27): full plan in [diagnostics-live-plan.md](diagnostics-live-plan.md). About 13–16 agent-days. It needs SMART pass-through, an NVMe driver, sensors (hwmon), DMI/USB device information and raw disk access. Agreed order: finish wave 11, then FreeBSD (wave 12), then this.
+- **NUC run 16 follow-ups for 11-C** (user, 2026-11-27):
+  - the desktop slows while Firefox runs (pointer lag, slow start menu): give input, display and the compositor priority, and shorten the timeslice;
+  - KDE System Monitor: CPU stuck at 100%, network rates at 0 B/s, "Applications view unsupported" (cgroup v2 app scopes);
+  - Firefox's close button doesn't use the KDE (Breeze) style;
+  - one program aborts at power-off;
+  - AAAA lookups return v4-mapped answers.
 
 ## Merge order and testing
 
