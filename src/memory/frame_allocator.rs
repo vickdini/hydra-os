@@ -440,6 +440,15 @@ pub static FRAME_ALLOCATOR: Mutex<PhysicalMemoryManager> = Mutex::new(PhysicalMe
 /// Harvests usable `CONVENTIONAL` memory regions from the UEFI boot services memory map
 /// and initializes the global `FRAME_ALLOCATOR` and its per-frame reference count table.
 pub fn init_memory_from_uefi() {
+    // wave12 GV: the late path's floor (2 GiB when there is room above it)
+    if crate::arch::relocate::image_phys().is_none() && !crate::arch::relocate::off_word() {
+        if let Ok(memory_map) = uefi::boot::memory_map(uefi::boot::MemoryType::LOADER_DATA) {
+            let above = free_above(memory_map.entries().filter(|d| d.ty == uefi::boot::MemoryType::CONVENTIONAL).map(|d| (d.phys_start, d.page_count)), 2 << 30);
+            let floor = late_floor(above);
+            EARLY_FLOOR.store(floor, core::sync::atomic::Ordering::SeqCst);
+            crate::kprintln!("[mem] late path: {} MiB free above 2 GiB; frames before the direct map from {:#x}{}", above >> 20, floor, if floor < 2 << 30 { " (GiB slot 1 stays the kernel's)" } else { "" });
+        }
+    }
     // wave11 GH: the default (since NUC run 13): all free memory at once, as up to run 10;
     // the firmware-block way below only with the boot word fwmem=new
     if OLD_PATH.load(core::sync::atomic::Ordering::SeqCst) {
@@ -517,8 +526,47 @@ pub const EARLY_BLOCK_PAGES: u64 = 16 * 1024;
 /// is reached through the direct map), else the programs' low window (frames are reached
 /// at identity addresses).
 fn early_floor() -> u64 {
-    if crate::arch::relocate::image_phys().is_some() { 0x10_0000 } else { crate::memory::vm::LOW_USER_END }
+    if crate::arch::relocate::image_phys().is_some() {
+        return 0x10_0000;
+    }
+    // wave12 GV: the late path's choice (late_floor), else the programs' old 1 GiB window
+    match EARLY_FLOOR.load(core::sync::atomic::Ordering::SeqCst) {
+        0 => crate::memory::vm::LOW_USER_END,
+        f => f,
+    }
 }
+
+// wave12 GV begin
+/// The late path's floor (0: not chosen: the programs' old 1 GiB window).
+static EARLY_FLOOR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Free memory the late path needs above 2 GiB to keep every frame handed out before the
+/// direct map there (the heap, the page tables, the reference counts).
+pub const LATE_MIN_ABOVE_2G: u64 = 192 << 20;
+
+/// Bytes of the free `(start, pages)` regions above `floor` (pure).
+pub fn free_above(regions: impl Iterator<Item = (u64, u64)>, floor: u64) -> u64 {
+    regions.map(|(s, p)| (s + p * PAGE_SIZE).saturating_sub(s.max(floor))).sum()
+}
+
+/// The late path's floor for `above` free bytes above 2 GiB (pure): 2 GiB with enough room,
+/// so nothing the kernel reaches at its identity address before the direct map is on lies
+/// in programs' low 2 GiB (at QEMU 2.5 GB a frame in GiB slot 1 reached that way broke
+/// the login screen); else the 1 GiB window as before, and slot 1 stays the kernel's.
+pub fn late_floor(above: u64) -> u64 {
+    if above >= LATE_MIN_ABOVE_2G {
+        2 << 30
+    } else {
+        crate::memory::vm::LOW_USER_END
+    }
+}
+
+/// Whether frames before the direct map came from below 2 GiB (no late-path floor, or not
+/// enough room above it): then GiB slot 1 must stay the kernel's.
+pub fn early_frames_in_slot1() -> bool {
+    early_floor() < 2 << 30
+}
+// wave12 GV end
 
 /// Before `ExitBootServices`: one more block of [`EARLY_BLOCK_PAGES`] from the firmware
 /// added to `alloc` (false after it, or when the firmware has none).
@@ -556,7 +604,7 @@ pub const DESKTOP_MIN_MB: u64 = 1400;
 /// at their identity addresses, which lie in the programs' low window, so this memory was
 /// never used (a 2.5 GB machine had 1.5 GB). Kept here at `ExitBootServices`, added by
 /// [`add_low_late`] once every frame is reached through the direct map.
-static LOW_HELD: Mutex<([(u64, u64); 32], usize)> = Mutex::new(([(0, 0); 32], 0));
+static LOW_HELD: Mutex<([(u64, u64); 64], usize)> = Mutex::new(([(0, 0); 64], 0)); // (wave12 GV: 64, was 32)
 
 /// The lowest frame ever handed out (the real-mode area and the processors' start code
 /// below it).

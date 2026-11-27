@@ -226,7 +226,12 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
         let sp: u64;
         unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
         let fb = crate::video::get_video_info().map(|info| info.base_ptr as u64);
-        let ranges = kernel_low_ranges(memory_map.entries().map(|d| (d.ty, d.phys_start, d.page_count)), high, heap, sp, fb, image);
+        let mut ranges = kernel_low_ranges(memory_map.entries().map(|d| (d.ty, d.phys_start, d.page_count)), high, heap, sp, fb, image);
+        // wave12 GV: frames handed out before the direct map below 2 GiB (late path without
+        // room above 2 GiB): reached at identity addresses, so GiB slot 1 stays the kernel's
+        if path == crate::arch::relocate::HighPath::Late && crate::memory::frame_allocator::early_frames_in_slot1() {
+            ranges.push((1 << 30, 2 << 30));
+        }
         crate::memory::vm::init_low_layout(&ranges);
         let kept: alloc::vec::Vec<usize> = (1..512).filter(|&i| crate::memory::vm::kernel_low_slot(i)).collect();
         crate::kprintln!(
