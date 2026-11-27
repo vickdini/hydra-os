@@ -39,13 +39,27 @@ fn frame(nr: u64, args: [u64; 6]) -> SyscallFrame {
 #[test]
 fn exec_chooses_a_personality_or_refuses() {
     let _g = serial();
-    // The switch off (no fw_cfg file, no boot option)
+    // No switch (no fw_cfg file, no boot option): FreeBSD programs run (wave 12)
     personality::init();
     assert!(!personality::freebsd_stub());
     assert_eq!(personality::choose(&elf(0), "/bin/ls"), Ok(TaskPersonality::Linux));
     assert_eq!(personality::choose(&elf(3), "/bin/ls"), Ok(TaskPersonality::Linux));
+    assert_eq!(personality::choose(&elf(9), "/bsd/ls"), Ok(TaskPersonality::FreeBsd));
+    // persona=off (fw_cfg or the boot option): refused as before wave 12
+    fake::FWCFG.with_borrow_mut(|m| m.insert("opt/hydra/persona".into(), b"off
+".to_vec()));
+    personality::init();
+    assert!(fake::klog_take().contains("refused (persona=off)"));
     assert_eq!(personality::choose(&elf(9), "/bsd/ls"), Err(-8));
-    assert!(fake::klog_take().contains("/bsd/ls: a FreeBSD program (ELF OS/ABI 9): refused, ENOEXEC"));
+    assert!(fake::klog_take().contains("/bsd/ls: a FreeBSD program (ELF OS/ABI 9): refused, ENOEXEC (persona=off)"));
+    fake::FWCFG.with_borrow_mut(|m| m.clear());
+    personality::OFF_BY_BOOT_OPTION.store(true, std::sync::atomic::Ordering::Release);
+    personality::init();
+    assert_eq!(personality::choose(&elf(9), "/bsd/ls"), Err(-8));
+    personality::OFF_BY_BOOT_OPTION.store(false, std::sync::atomic::Ordering::Release);
+    personality::init();
+    assert_eq!(personality::choose(&elf(9), "/bsd/ls"), Ok(TaskPersonality::FreeBsd));
+    let _ = fake::klog_take();
     assert_eq!(personality::choose(&[0xCF, 0xFA, 0xED, 0xFE, 7, 0, 0, 1], "/mac/ls"), Err(-8));
     assert!(fake::klog_take().contains("Mach-O"));
     assert_eq!(personality::choose(&elf(6), "/sol/ls"), Err(-8));
@@ -148,9 +162,16 @@ fn indirect_and_unknown_calls() {
     let mut f = frame(198, [0, 0, 0, 0, 0, 0]);
     call(&freebsd::TABLE, &mut f);
     assert_eq!((f.rax, f.rflags & 1), (78, 1), "ENOSYS");
-    // An unknown number: ENOSYS and SIGSYS
+    // A live FreeBSD call not implemented yet (statfs 555): ENOSYS, a log line, no signal
     fake::POSTED.with_borrow_mut(|v| v.clear());
+    let _ = fake::klog_take();
     let mut f = frame(555, [0; 6]);
+    call(&freebsd::TABLE, &mut f);
+    assert_eq!((f.rax, f.rflags & 1), (78, 1));
+    assert_eq!(fake::POSTED.with_borrow(|v| v.len()), 0);
+    assert!(fake::klog_take().contains("statfs (555) not implemented yet"));
+    // A number FreeBSD does not have: ENOSYS and SIGSYS
+    let mut f = frame(999, [0; 6]);
     call(&freebsd::TABLE, &mut f);
     assert_eq!((f.rax, f.rflags & 1), (78, 1));
     assert_eq!(fake::POSTED.with_borrow(|v| v.last().map(|p| p.1)), Some(31));

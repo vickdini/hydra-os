@@ -71,6 +71,16 @@ chmod 1777 "$TARGET/tmp" "$TARGET/var/tmp"
 for f in resolv.conf hosts; do
     [ -f "/etc/$f" ] && cp -L "/etc/$f" "$TARGET/etc/$f"
 done
+# The basic device nodes (Linux numbers, as Hydra's kernel routes them; FreeBSD's devfs
+# would make its own)
+mkdir -p "$TARGET/dev/pts"
+for d in null zero full random urandom tty console ptmx; do
+    [ -e "/dev/$d" ] && { rm -f "$TARGET/dev/$d"; cp -a "/dev/$d" "$TARGET/dev/$d"; }
+done
+[ -e "$TARGET/dev/stdin" ] || ln -s /proc/self/fd/0 "$TARGET/dev/stdin"
+[ -e "$TARGET/dev/stdout" ] || ln -s /proc/self/fd/1 "$TARGET/dev/stdout"
+[ -e "$TARGET/dev/stderr" ] || ln -s /proc/self/fd/2 "$TARGET/dev/stderr"
+[ -e "$TARGET/dev/fd" ] || ln -s /proc/self/fd "$TARGET/dev/fd"
 
 mkdir -p /usr/local/bin
 cat > /usr/local/bin/freebsd <<EOF

@@ -20,6 +20,14 @@ extern crate alloc;
 pub mod fake;
 pub mod world;
 
+/// *stub* The personality hook: the personality word of a forwarded call (wave 12).
+pub mod personality {
+    /// Linux and native callers: 0.
+    pub fn lx_pers() -> u32 {
+        0
+    }
+}
+
 /// *stub* Kernel log: recorded in `fake::Rec::log`.
 #[macro_export]
 macro_rules! kprintln {

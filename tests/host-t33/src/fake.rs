@@ -157,6 +157,11 @@ pub struct Task {
 pub struct TaskId(pub u64);
 
 impl Task {
+    /// The executable's path (as the kernel's `Task::exe_path`).
+    pub fn exe_path(&self) -> &str {
+        self.exe.as_deref().unwrap_or(self.name)
+    }
+
     /// Another thread of the current process, for [`SIBLINGS`].
     pub fn sibling(tid: u64) -> Task {
         Task {
