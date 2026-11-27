@@ -177,6 +177,14 @@ fn main(args: &[&str]) {
         sys::sleep_ms(500);
         root = zfs::root();
     }
+    // wave11 GK: the claims before going online (were after it): a call made meanwhile
+    // waits for this instance (the kernel's first-start wait) instead of reaching the kernel
+    // wave7 G7-2: the calls go to vfs-server from now on (`calls=0`: none, `calls=4,6,..`: these)
+    println!("[vfs-server] {} file calls claimed", calls::claim_all(args));
+    // wave7 G7-3: the mount calls moved so far (`mcalls=0`: none)
+    println!("[vfs-server] {} mount calls claimed", mountcalls::claim_all(args));
+    // wave9 G6b-1 (`notify=0`: none)
+    println!("[vfs-server] {} inotify/fanotify calls claimed", notify::claim(args));
     if let Err(e) = svc.online() {
         println!("[vfs-server] cannot go online: {}", e);
         sys::exit_group(1);
@@ -195,12 +203,6 @@ fn main(args: &[&str]) {
         Ok(r) => println!("[vfs-server] online: {} workers, caches of {} entries, pool root {}", cfg.workers, CACHE.cap(), r),
         Err(e) => println!("[vfs-server] online ({} workers); zfs-server not answering yet ({})", cfg.workers, e),
     }
-    // wave7 G7-2: the calls go to vfs-server from now on (`calls=0`: none, `calls=4,6,..`: these)
-    println!("[vfs-server] {} file calls claimed", calls::claim_all(args));
-    // wave7 G7-3: the mount calls moved so far (`mcalls=0`: none)
-    println!("[vfs-server] {} mount calls claimed", mountcalls::claim_all(args));
-    // wave9 G6b-1 (`notify=0`: none)
-    println!("[vfs-server] {} inotify/fanotify calls claimed", notify::claim(args));
     loop {
         match svc.recv(100) {
             Event::Request(id, _req) => svc.reply(id, &hydra_rt::Message::new(MSG_LX_REPLY as u64, [ENOSYS as u64, 0, 0, 0])),

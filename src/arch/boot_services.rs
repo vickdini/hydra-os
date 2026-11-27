@@ -261,6 +261,7 @@ pub fn take_hardware_ownership() -> Result<HardwareTakeoverStats, &'static str> 
     crate::memory::paging::KERNEL_PML4.store(cr3_frame, core::sync::atomic::Ordering::SeqCst);
     // Hydra's tables hold the direct map of physical memory: use it from now on
     crate::memory::frame_allocator::enable_direct_map();
+    crate::memory::frame_allocator::add_low_late(); // wave11 GK: RAM under the low layout's floor
     mark(12, "direct map on; global pages next"); // wave11 GH
     // Global kernel pages (wave 4): the kernel half's TLB entries survive CR3 writes
     crate::arch::pcid::enable_global();

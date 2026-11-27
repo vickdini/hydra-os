@@ -292,3 +292,74 @@ fn device_programs_stay_while_lx_sec_restarts() {
     crate::lx::svc::tests::init_colocated(b"net=linux+ipc=linux");
 }
 // wave10 G10-C end
+
+// wave11 GK begin
+#[test]
+fn a_first_start_is_waited_for_and_is_not_a_restart() {
+    let sim = world();
+    configure(T, RestartClass::Transparent);
+    assert!(!starting(T) && !waitable(T));
+    first_start(T);
+    assert!(starting(T) && waitable(T) && !restarting(T));
+    // A caller waits for it (one log line), and goes on when it is online
+    let flag = StdArc::new(std::sync::atomic::AtomicBool::new(false));
+    let f2 = flag.clone();
+    sim.spawn(Task::linux(101, 101), move || {
+        f2.store(true, core::sync::atomic::Ordering::Release);
+        online(T);
+    });
+    let f3 = flag.clone();
+    assert_eq!(wait_online(T, &move || f3.load(core::sync::atomic::Ordering::Acquire)), Ok(()));
+    assert!(crate::fake::logged("which is still starting"));
+    assert_eq!(START_WAITED.load(core::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(WAITED.load(core::sync::atomic::Ordering::Relaxed), 0);
+    assert!(!starting(T));
+    // The ladder did not count it: the first crash after it is handled in the configured class
+    let d = gone(T);
+    assert!(d.restart && d.class == RestartClass::Transparent && !d.reset_kept);
+    assert!(state(|s| s[idx(T)].ladder.crashes) == 1);
+    // ... and a later first_start (the supervisor relaunching it) is no first start any more
+    online(T);
+    first_start(T);
+    assert!(!starting(T));
+}
+
+#[test]
+fn gone_during_the_first_start_is_not_counted_by_the_ladder() {
+    let _sim = world();
+    configure(T, RestartClass::EndLinux);
+    first_start(T);
+    let d = gone(T);
+    // Not EndLinux (no Linux program ends), no kept state reset, callers keep waiting
+    assert!(d.restart && d.class == RestartClass::FailObjects && !d.reset_kept);
+    assert!(crate::fake::logged("during its first start"));
+    assert!(starting(T) && !restarting(T) && !down(T) && may_restart(T));
+    assert_eq!(state(|s| s[idx(T)].ladder.crashes), 0);
+    assert_eq!(state(|s| s[idx(T)].ladder.last_restart_ms()), None);
+    // The supervisor starts it again: still its first start (deadline from now)
+    first_start(T);
+    assert!(starting(T));
+    online(T);
+    assert!(!starting(T));
+}
+
+#[test]
+fn a_failed_first_start_stops_the_waiting() {
+    let sim = world();
+    first_start(T);
+    sim.spawn(Task::linux(102, 102), || start_failed(T));
+    assert_eq!(wait_online(T, &|| false), Err(EIO));
+    assert!(!starting(T));
+    // start_failed of a service not starting: nothing
+    start_failed(T);
+    assert!(!starting(T));
+    // A signal ends a first-start wait with ERESTARTSYS
+    first_start(T);
+    crate::fake::set_signal(100, true);
+    assert_eq!(wait_online(T, &|| false), Err(crate::compat::linux::proc::ERESTARTSYS));
+    assert!(starting(T));
+    crate::fake::set_signal(100, false);
+    online(T);
+    assert!(summary().contains("waited for a first start"), "{}", summary());
+}
+// wave11 GK end

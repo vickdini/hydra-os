@@ -1079,6 +1079,11 @@ fn dispatch_exception(ctx: &mut ExceptionContext) {
                         // A file mapping with no page there (past the end of the file)
                         crate::kprintln!("[linux] SIGBUS: {} at {:#x}, rip {:#x}", if is_write { "write" } else { "read" }, fault_addr, ctx.rip);
                     }
+                    // wave11 GK: no frame for the page (or a shared-memory page refused because
+                    // memory is short): say so, with what is left
+                    if resolved == Some(Err(crate::memory::vm::FaultError::OutOfMemory)) || (sig == 7 && crate::memory::frame_allocator::memory_low()) {
+                        crate::memory::frame_allocator::log_out_of_memory(crate::compat::linux::proc::current_ids().1, if sig == 7 { "SIGBUS" } else { "SIGSEGV" });
+                    }
                     kill_or_signal(ctx, sig);
                     return;
                 }

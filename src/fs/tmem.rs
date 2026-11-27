@@ -185,7 +185,12 @@ impl TmemFile {
         // The reserve, page by page (no swap); frames held after truncations count against
         // the limit until their mappings go
         if memory_short() {
-            return None;
+            // wave11 GK: the page cache gives back files nothing maps first (it is the
+            // reclaimable part of what is used); refused only if memory is still short
+            crate::compat::linux::mm::cache_shrink(4096);
+            if memory_short() {
+                return None;
+            }
         }
         if !self.inst.take(1) {
             self.inst.reap();

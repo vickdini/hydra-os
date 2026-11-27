@@ -729,17 +729,36 @@ impl Supervisor {
         // restart; decided when its endpoint went, in `retire`)
         if svc.lx_svc != 0 && !crate::lx::restart::may_restart(svc.lx_svc) {
             svc.state = ServiceState::Faulted;
+            crate::lx::restart::start_failed(svc.lx_svc); // wave11 GK (review 2)
             crate::kprintln!("[supervisor] '{}' crashed three times within 30 s of its restarts; not restarting it (its calls fail with EIO)", svc.name);
             return Err("restart ladder: given up");
         }
         if svc.restart_count >= svc.max_restarts {
             svc.state = ServiceState::Faulted;
+            if svc.lx_svc != 0 {
+                crate::lx::restart::start_failed(svc.lx_svc); // wave11 GK (review 2)
+            }
             crate::kprintln!("[supervisor] '{}' failed {} times; not restarting it", svc.name, svc.restart_count);
             return Err("restart limit reached");
         }
         svc.restart_count += 1;
         svc.state = ServiceState::Restarting;
-        let id = self.launch(idx)?;
+        // wave11 GK: gone during its first start (never online): still its first start for
+        // its callers (they wait, counted from this start), not a restart for the ladder
+        if svc.lx_svc != 0 && crate::lx::restart::starting(svc.lx_svc) {
+            crate::lx::restart::first_start(svc.lx_svc);
+        }
+        // wave11 GK (review 2): a failed launch ends a first start's wait too
+        let id = match self.launch(idx) {
+            Ok(id) => id,
+            Err(e) => {
+                let lx = self.services[idx].lx_svc;
+                if lx != 0 {
+                    crate::lx::restart::start_failed(lx);
+                }
+                return Err(e);
+            }
+        };
         let svc = &self.services[idx];
         crate::kprintln!("[supervisor] restarted '{}' as process {} (restart {}/{})", svc.name, id.0, svc.restart_count, svc.max_restarts);
         Ok(id)
@@ -1002,6 +1021,14 @@ pub fn start_all() {
         }
         // wave8 GS end
         let t0 = crate::arch::pit::uptime_ms(); // wave11 GG: each service's start time (the NUC's boot)
+        // wave11 GK begin: a Linux service's first start: its callers wait for it to come
+        // online (a call made before it registered or claimed its numbers), and it is not a
+        // restart (`lx::restart::first_start`)
+        let lx = SUPERVISOR.lock().services[idx].lx_svc;
+        if lx != 0 {
+            crate::lx::restart::first_start(lx);
+        }
+        // wave11 GK end
         let launched = {
             let mut sup = SUPERVISOR.lock();
             let name = sup.services[idx].name;
@@ -1018,12 +1045,17 @@ pub fn start_all() {
                     let mut sup = SUPERVISOR.lock();
                     sup.retire(idx);
                     sup.services[idx].state = ServiceState::Stopped;
+                    crate::lx::restart::start_failed(lx); // wave11 GK: its callers stop waiting
                     crate::kprintln!("[supervisor] '{}' (process {}) exited without registering: no device", name, id.0);
                 } else {
+                    crate::lx::restart::start_failed(lx); // wave11 GK (review 2): callers stop waiting
                     crate::kprintln!("[supervisor] '{}' (process {}) did not register", name, id.0);
                 }
             }
-            Err((name, e)) => crate::kprintln!("[supervisor] not starting '{}': {}", name, e),
+            Err((name, e)) => {
+                crate::lx::restart::start_failed(lx); // wave11 GK
+                crate::kprintln!("[supervisor] not starting '{}': {}", name, e)
+            }
         }
     }
     crate::arch::usb_input::start();
@@ -1107,6 +1139,24 @@ pub fn supervisor_tick() {
         if !service::is_online(endpoint) {
             continue; // still starting up
         }
+        // wave11 GK begin: a Linux service registered but not online yet (its first start:
+        // it claims its numbers and takes back its kept state first) is not pinged: on a slow
+        // machine its start took longer than three heartbeats, and the watchdog restarted it
+        // (its first start counted as a restart). Bounded: after `START_WAIT_MS` from its
+        // start it is an ordinary service again (its callers stopped waiting).
+        let (lx, launched) = {
+            let sup = SUPERVISOR.lock();
+            (sup.services[idx].lx_svc, sup.services[idx].last_heartbeat_tick)
+        };
+        if lx != 0 && crate::lx::restart::starting(lx) {
+            let freq = crate::arch::pit::frequency_hz().max(1);
+            if crate::arch::pit::ticks().saturating_sub(launched) < crate::lx::restart::START_WAIT_MS * freq / 1000 {
+                continue;
+            }
+            crate::kprintln!("[supervisor] service on endpoint {:#x} (process {}) is not online {} s after its start", endpoint, id.0, crate::lx::restart::START_WAIT_MS / 1000);
+            crate::lx::restart::start_failed(lx);
+        }
+        // wave11 GK end
         let seq = crate::arch::pit::ticks();
         // A queued call: the watchdog holds no locks, and a heartbeat waits behind the
         // requests the driver already has (a busy driver is not a hung one)

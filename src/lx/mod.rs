@@ -134,7 +134,7 @@ pub mod procx;
 /// its callers wait for it (Transparent and FailObjects; never EndLinux).
 #[inline]
 fn usable(s: SvcId) -> bool {
-    svc::online(s) || restart::restarting(svc::host_of(s))
+    svc::online(s) || restart::waitable(svc::host_of(s)) // wave11 GK: or in its first start
 }
 
 /// wave10 G10-C: whether the IPC service can take calls now (online or restarting): the
@@ -146,8 +146,21 @@ pub fn ipc_usable() -> bool {
 /// [`usable`] for host `x`.
 #[inline]
 fn host_usable(x: &Host) -> bool {
-    x.is_online() || restart::restarting(x.id)
+    x.is_online() || restart::waitable(x.id) // wave11 GK: or in its first start
 }
+
+// wave11 GK begin
+/// Host `hid` for a call made before its process attached (its first start, `svc::host` is
+/// `None`): waits for it to come online (`restart::wait_online`, bounded, one log line).
+/// `-ENOSYS`: not starting (no such service, or its start failed).
+pub(crate) fn await_first_start(hid: SvcId) -> Result<&'static Host, i64> {
+    if hid == 0 || !restart::starting(hid) {
+        return Err(ENOSYS);
+    }
+    restart::wait_online(hid, &|| svc::host(hid).is_some_and(|h| h.is_online()))?;
+    svc::host(hid).ok_or(ENOSYS)
+}
+// wave11 GK end
 
 /// The internal answer of [`call_and_wait`] when the host is not online but restarting: the
 /// caller waits for it ([`restart::wait_online`]) and makes the call then. (-4100 is
@@ -658,6 +671,18 @@ pub fn forward(frame: &SyscallFrame) -> Option<i64> {
     let nr = frame.rax;
     let e = entry(nr);
     if e == 0 {
+        // wave11 GK begin: the only numbers claimed at run time are the file service's
+        // (`fileh::shape`; every other service's routes are fixed): a file call vfs-server has
+        // not claimed yet waits for vfs-server's first start (bounded), then is looked up
+        // again. Calls the kernel answers itself (mmap, futex, ...) never wait (review 1).
+        if fileh::claimable(nr) && restart::starting(svc::host_of(crate::ipc::protocol::LXS_VFS)) {
+            let vfs = svc::host_of(crate::ipc::protocol::LXS_VFS);
+            let _ = restart::wait_online(vfs, &|| svc::host(vfs).is_some_and(|h| h.is_online()) && fileh::claimed(nr));
+            if entry(nr) != 0 {
+                return forward(frame);
+            }
+        }
+        // wave11 GK end
         fileh::count_unclaimed(nr); // wave10 GV1: a file call vfs-server did not claim
         return if nr == LX_NULL_NR {
             Some(0)
@@ -1186,7 +1211,14 @@ fn call(frame: &SyscallFrame, s: SvcId, byfd: Option<HeldObj>) -> i64 {
     c.svc = s as u32;
     let bits = entry(c.nr);
     let hid = if byfd.is_some() { s } else { svc::host_of(s) };
-    let Some(x) = svc::host(hid) else { return ENOSYS };
+    // wave11 GK: (its process has not attached yet: wait for its first start)
+    let x = match svc::host(hid) {
+        Some(x) => x,
+        None => match await_first_start(hid) {
+            Ok(x) => x,
+            Err(e) => return e,
+        },
+    };
     // Group 9: the server object at args[0], held until the call is answered (a close on
     // another thread cannot overtake the call); Group 12: a T_BYFD call's, found already
     if bits & (T_FAMILY | T_BYFD) != 0 && crate::compat::linux::ns::net_isolated() {
@@ -1514,7 +1546,7 @@ fn place(x: &Host, s: &mut svc::Lx, me: u64, my_idx: usize, c: &mut LxCall, copi
     // lock, so a call placed here is either failed by it or refused now
     if !x.online.load(Ordering::Acquire) {
         // (wave6 G21: a restarting service's caller waits for it; one given up: EIO)
-        return Ok(Err(if restart::restarting(x.id) {
+        return Ok(Err(if restart::waitable(x.id) { // wave11 GK: or in its first start
             LX_OFFLINE
         } else if restart::down(x.id) {
             EIO

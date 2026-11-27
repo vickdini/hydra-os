@@ -35,6 +35,22 @@ pub const HEAP_SIZE: usize = 1024 * 1024 * 1024;
 /// Smallest heap accepted when memory is short.
 const MIN_HEAP_SIZE: usize = 128 * 1024 * 1024;
 
+// wave11 GK begin: the heap's share of memory
+/// The heap size aimed at for `usable` bytes of memory: a sixth of it, at least 256 MiB, at
+/// most [`HEAP_SIZE`] and half of the memory. (Was: half of the memory up to 1 GiB, which
+/// took 1 GiB of a 2.5 GB machine while KDE, Firefox and Dolphin use about 40 MiB of heap:
+/// the desktop's programs ran out of frames, and plasmashell died with SIGBUS on a page of
+/// a shared-memory file the kernel could not allocate.)
+pub const fn heap_target(usable: usize) -> usize {
+    let t = usable / 6;
+    let t = if t < 256 << 20 { 256 << 20 } else { t };
+    let t = if t > HEAP_SIZE { HEAP_SIZE } else { t };
+    let half = usable / 2;
+    let t = if t > half { half } else { t };
+    if t < MIN_HEAP_SIZE { MIN_HEAP_SIZE } else { t }
+}
+// wave11 GK end
+
 /// The linked-list heap behind [`KERNEL_HEAP`]: large blocks, and the memory the
 /// small-object lists are carved from.
 pub static HEAP_ALLOCATOR: LockedHeap = LockedHeap::empty();
@@ -292,7 +308,7 @@ pub fn init() -> Result<HeapStats, &'static str> {
 
     // Use at most half of usable RAM, halving down to the minimum if no region fits
     let usable = FRAME_ALLOCATOR.lock().total_usable_memory() as usize;
-    let mut size = HEAP_SIZE.min((usable / 2).max(MIN_HEAP_SIZE));
+    let mut size = heap_target(usable); // wave11 GK (was: HEAP_SIZE.min((usable / 2).max(MIN_HEAP_SIZE)))
     let mut heap_start_ptr: Option<*mut u8> = None;
 
     // Strategy 0: above 4 GiB, else above 2 GiB, down to half the size. The kernel reaches
@@ -386,7 +402,7 @@ fn init_direct() -> Result<HeapStats, &'static str> {
     let free = uefi::boot::memory_map(MemoryType::LOADER_DATA)
         .map(|m| m.entries().filter(|d| d.ty == MemoryType::CONVENTIONAL).map(|d| d.page_count * PAGE_SIZE).sum::<u64>())
         .unwrap_or(0) as usize;
-    let mut size = HEAP_SIZE.min((free / 2).max(MIN_HEAP_SIZE));
+    let mut size = heap_target(free); // wave11 GK
     let phys = loop {
         let pages = size.div_ceil(PAGE_SIZE as usize);
         if let Ok(p) = allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages) {

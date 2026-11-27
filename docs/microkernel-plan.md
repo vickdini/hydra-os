@@ -5,7 +5,7 @@ This plan turns the six recommendations in [microkernel-comparison.md](microkern
 - It was rewritten 2026-11-18 to cover every wave: what waves 1–3 delivered, what wave 4 is doing, and the planned waves after it.
 - Moving the Linux layer is planned step by step in [linux-server-design.md](linux-server-design.md). This document maps those steps onto waves.
 
-## Where things stand (2026-11-24, after wave 10)
+## Where things stand (2026-11-27, after wave 11)
 
 | Wave | Groups | Status | Kernel `src/` lines after |
 |---|---|---|---:|
@@ -20,7 +20,8 @@ This plan turns the six recommendations in [microkernel-comparison.md](microkern
 | 8 | Device services (display, input, sound, terminals), lx-net and lx-ipc split out, zfs-server durability, mount calls into vfs-server | Done, deployed 2026-11-22 | 112,746 (copies kept as switch-backs) |
 | 9 | The rest of the file service (FUSE, inotify/fanotify, Landlock/ACL/ABAC, io_uring/aio routing, tmpfs in memory objects), the process mechanism; the kernel's file-code copy deleted (9-C) | Done, deployed 2026-11-23 | 113,823 |
 | 10 | lx-proc (process calls, `/proc`, ptrace/perf policy), the change calls and `/dev` into vfs-server, SysV shm into lx-ipc, `tcp_connect`; then 10-C deleted every remaining in-kernel copy and switch-back word | Done 2026-11-24 (10-C: see "Wave 10") | 118,176 before 10-C → about 102,100 |
-| 11+ | FreeBSD, then macOS programs, on the shared services | Planned; step 0 done in wave 4 | |
+| 11 | Consolidation: restart robustness (R), the last walks and FUSE changes into vfs-server (F), the remaining `/proc` into lx-proc (P), the NUC (H, run 16 = success); 11-C: startup races, low-memory desktop, the send-back map | 11-C done 2026-11-27 | 107,571 (102,152 after wave 10; F/P/H added mechanism, 11-C +236 net) |
+| 12+ | FreeBSD, then macOS programs, on the shared services | Planned; step 0 done in wave 4 | |
 
 - **Why the line count rose in wave 3:** step 1 added the forwarding machinery (`src/lx`, 946 lines) and PCID (`src/arch/pcid.rs`, 365 lines). It also keeps the in-kernel copy of each moved piece, as the switch back to the kernel (`lx=kernel`), until a later step deletes it.
 - **2026-11-18:** the Linux layer (`src/compat/linux`) was 51,444 lines, still mostly in the kernel; the ring-3 drivers and servers (`userland/drivers`) 22,339 lines.
@@ -291,6 +292,12 @@ Chosen by the user over starting FreeBSD at once: close what waves 6–10 left o
 | **H** | Real hardware, prepared: a NUC checklist and a stick built from this tree; boot-log capture without a serial port (a log file on the stick's EFI partition, or netconsole); the drivers the NUC needs (AHCI, e1000e, xHCI, HDA, IOMMU/DMAR tables of a 2014 machine) checked against QEMU's q35 models; the power path: restart with the stick pulled early (the old hang), poweroff | 2–3 |
 
 **Stage 2:** the NUC run itself (the user boots the stick and installs; H's tools collect the logs), fixes for what it finds, and **11-C closing**: delete the kernel's walk and path calls that nothing sends back any more (keeping only what boot needs before vfs-server runs) and the kernel's `/proc` copy; line counts; the final budget and kill tests; the installer test (`MODE=prompt`).
+
+**11-C as done (Group K, 2026-11-27):**
+- **The leftover file code, measured** (KDE + Firefox + Dolphin, the `vfs to kernel by call` counter and a temporary print of every send-back): about 280 calls per session reach the kernel's walk, all path lookups (`openat`, `statx`, `access`, `readlink`), none a change; nothing is kept without asking and nothing is unclaimed, on the base and after 11-C. They are lx-proc's redirects (magic-link re-opens `/proc/self/fd/N`, walks through `/proc/N/root`, `oom_score_adj` writes), walks from kernel-made `/proc` directory descriptors, `cgroup.procs`, and by construction landlocked `/proc` opens, bubblewrap namespaces' named mounts and a given-up vfs-server. So the kernel walk, the path calls and the kernel's `/proc` text **stay**; only what is dead by construction was deleted (`notify_init_wait`). Details: `docs/src/linux-server.md`, "What the kernel is after wave 11".
+- **Startup races:** a service's first start is not a restart (not counted by the ladder, not pinged by the watchdog before it is online); a call made before a service is online waits for it (at most 60 s, one log line), also for numbers it has not claimed yet; vfs-server claims before it goes online. H's desktop wait is gone.
+- **Low memory:** the heap is a sixth of the memory (was half, up to 1 GiB; KDE uses 40-60 MiB), and when the image stays low (loaded into the 2-4 GiB slot) the RAM below 1 GiB is used once the direct map is on. QEMU 2.5 GB: 1,496 -> 2,503 MiB usable; KDE + Firefox + Dolphin + sound run. Out-of-memory kills get a `[mem]` log line.
+- **Carried to wave 12:** the higher-half move after `ExitBootServices` ("go_high option A") for an image the firmware loaded into the 2-4 GiB slot: today such a kernel stays low and keeps GiB slots 1-3, so programs get a 1 GiB low window and Wine (which needs `0x7ffe0000`) does not start (seen at QEMU 2.5 GB). Also: lx-proc following magic links and walking from kernel `/proc` directories, vfs-server deciding bubblewrap's named mounts and Landlock's lexical checks, after which the kernel walk and its `/proc` text can go.
 
 Also carried, if a group has room: lx-ipc's SysV `shmget`/`IPC_STAT` cost (+4 µs; per-segment kept records instead of the whole-table rewrite), the 1-CPU forwarded signal shortfall.
 

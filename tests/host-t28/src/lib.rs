@@ -45,6 +45,10 @@ pub mod arch {
     /// *stub*
     pub mod pit {
         pub use crate::fake::{frequency_hz, now_ns, ticks};
+        /// wave11 GK: *stub* ms since boot (the out-of-memory line's rate limit)
+        pub fn uptime_ms() -> u64 {
+            crate::fake::now_ns() / 1_000_000
+        }
     }
     /// *stub*
     pub mod rtc {
