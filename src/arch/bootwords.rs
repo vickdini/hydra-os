@@ -9,10 +9,11 @@
 pub const MAX: usize = 1024;
 
 /// The words of a safe start (start menu entry 2): one processor, no DMA remapping, no
-/// tagged TLB entries, the boot messages on screen instead of the logo.
-pub const SAFE: &str = "safe iommu=off pcid=off cpus=1 verbose";
+/// tagged TLB entries, the boot messages on screen instead of the logo (wave12 GV: and the
+/// way out of the low 2 GiB as before wave 12, `high=off`).
+pub const SAFE: &str = "safe iommu=off pcid=off cpus=1 high=off verbose";
 /// Start menu entry 3: a safe start that stays on the text console (no desktop).
-pub const SAFE_CONSOLE: &str = "safe iommu=off pcid=off cpus=1 verbose nodesktop";
+pub const SAFE_CONSOLE: &str = "safe iommu=off pcid=off cpus=1 high=off verbose nodesktop";
 // wave11 GG begin: one suspect at a time (the NUC's EFAULTs went away in safe mode)
 /// Start menu entry 4: one processor only.
 pub const ONLY_CPUS1: &str = "cpus=1 verbose";
@@ -165,6 +166,9 @@ pub const FW_MEMORY: &str = "fwmem=new verbose";
 /// Entry 9: both, as the run-11 to run-13 default.
 pub const RUN13_BOTH: &str = "fwidt=on fwmem=new verbose";
 // wave11 GH end
+/// wave12 GV: entry 0: the kernel's way out of the low 2 GiB as before wave 12 (no stack
+/// on the heap after ExitBootServices, every firmware region below 2 GiB kept).
+pub const HIGH_OFF: &str = "high=off verbose";
 
 /// The words a start menu key adds: `1`/Enter none, `2` [`SAFE`], `3` [`SAFE_CONSOLE`],
 /// `4`-`6` one safe-mode change, `7`-`9` the run-11 bisect; `None` for other keys.
@@ -179,6 +183,7 @@ pub fn menu_choice(key: char) -> Option<&'static str> {
         '7' => Some(FW_GATES),   // wave11 GH
         '8' => Some(FW_MEMORY),  // wave11 GH
         '9' => Some(RUN13_BOTH), // wave11 GH
+        '0' => Some(HIGH_OFF),   // wave12 GV
         _ => None,
     }
 }

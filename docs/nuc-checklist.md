@@ -124,6 +124,9 @@ after 60 seconds to save its log; choose the stick again with F10 so it can writ
 - Start menu: `\hydra\menu` (`timeout=N`) on the EFI partition; entry 2 adds the boot words
   `safe iommu=off pcid=off cpus=1 verbose`, entry 3 also `nodesktop`. Extra words can be
   put into `\hydra\options.txt` (one or more per line, `#` comments) from any computer.
+- wave 12: entry 0 adds `high=off verbose` (the memory layout before wave 12; safe mode has
+  `high=off` too). The boot log's line `[boot] higher half: ...` says which path ran
+  (`docs/src/memory/paging.md` section 6).
 - Boot log: `\logs\bootNNN.txt` (2,162,688 bytes each, the last 10 kept): created before
   `ExitBootServices` through the firmware, then rewritten in place every 20 s and at
   power-off/restart; after a kernel panic (or when the pool's disk never came) the log stays

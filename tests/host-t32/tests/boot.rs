@@ -69,7 +69,7 @@ fn boot_info() {
 #[test]
 fn kernel_low_ranges() {
     let map = [(T::CONVENTIONAL, 0x10_0000, 100), (T::LOADER_CODE, 0x20_0000, 16), (T::ACPI_RECLAIM, 0x7FF0_0000, 4), (T::MMIO, 0xFEC0_0000, 1), (T::RESERVED, 0x1_0000_0000, 8)];
-    let r = boot_services::kernel_low_ranges(map.iter().copied(), false, Some((0x4000_0000, 0x8000_0000)), 0x12_3456, Some(0xC000_0000));
+    let r = boot_services::kernel_low_ranges(map.iter().copied(), false, Some((0x4000_0000, 0x8000_0000)), 0x12_3456, Some(0xC000_0000), None);
     assert_eq!(
         r,
         vec![
@@ -84,8 +84,42 @@ fn kernel_low_ranges() {
         ]
     );
     // In the higher half: below 2 GiB only device memory counts; the heap is in the direct map
-    let r = boot_services::kernel_low_ranges(map.iter().copied(), true, None, 0xFFFF_FFFF_C000_8000, None);
-    assert_eq!(r, vec![(0xFEC0_0000, 0xFEC0_1000), (0x1_0000_0000, 0x1_0000_8000), (2 << 30, 4 << 30), (0xFFFF_FFFF_C000_0000, 0xFFFF_FFFF_C001_0000)]);
+    let r = boot_services::kernel_low_ranges(map.iter().copied(), true, None, 0xFFFF_FFFF_C000_8000, None, None);
+    assert_eq!(r, vec![(0xFEC0_0000, 0xFEC0_1000), (0x1_0000_0000, 0x1_0000_8000), (2 << 30, 4 << 30), (0xFFFF_FFFF_C000_0000, 0xFFFF_FFFF_C001_0000)]);
+    // wave12 GV: the late path (the image stayed where the firmware loaded it): as in the
+    // higher half, below 2 GiB only device memory; the image's range, the heap and the heap
+    // stack's 64 KiB are passed on. The 2.5 GB machine: a 2 MiB boot-log block of loader
+    // data at 0x7000_0000 kept GiB slot 1 before (programs had a 1 GiB low window)
+    let map = [
+        (T::CONVENTIONAL, 0x10_0000, 0x6FF00),
+        (T::LOADER_DATA, 0x7000_0000, 0x201),
+        (T::BOOT_SERVICES_DATA, 0x7100_0000, 16),
+        (T::LOADER_CODE, 0x9A00_0000, 0x800),
+        (T::ACPI_NON_VOLATILE, 0x9FF0_0000, 4),
+        (T::MMIO, 0xFEC0_0000, 1),
+    ];
+    let heap = Some((0x8BF5_D000, 0x8BF5_D000 + (208 << 20)));
+    let r = boot_services::kernel_low_ranges(map.iter().copied(), true, heap, 0x8C00_1234, None, Some((0x9A00_0000, 0x80_0000)));
+    assert_eq!(
+        r,
+        vec![
+            (0x9A00_0000, 0x9A80_0000),
+            (0x9FF0_0000, 0x9FF0_4000),
+            (0xFEC0_0000, 0xFEC0_1000),
+            (0x8BF5_D000, 0x8BF5_D000 + (208 << 20)),
+            (2 << 30, 4 << 30),
+            (0x8C00_0000, 0x8C01_0000),
+            (0x9A00_0000, 0x9A80_0000),
+        ]
+    );
+    assert!(r.iter().all(|&(s, e)| s >= 2 << 30 || e <= 1 << 30), "nothing in GiB slot 1: {r:x?}");
+    // An image loaded below 2 GiB that stays there (high=late, nohigh) stays reachable
+    let r = boot_services::kernel_low_ranges(map.iter().copied(), true, None, 0x9000_0000, None, Some((0x5000_0000, 0x80_0000)));
+    assert!(r.contains(&(0x5000_0000, 0x5080_0000)), "{r:x?}");
+    assert!(!r.iter().any(|&(s, _)| s == 0x7000_0000), "the boot-log block is reached through the direct map");
+    // high=off (the path before wave 12): every region below 2 GiB that is not free is kept
+    let r = boot_services::kernel_low_ranges(map.iter().copied(), false, heap, 0x8C00_1234, None, None);
+    assert!(r.contains(&(0x7000_0000, 0x7020_1000)) && r.contains(&(0x7100_0000, 0x7101_0000)), "{r:x?}");
 }
 
 #[test]

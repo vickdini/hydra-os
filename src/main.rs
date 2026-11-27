@@ -225,8 +225,11 @@ fn main() -> Status {
     arch::crumb::step("entry point (before the move to the higher half)");
     // wave11 GH: an image the firmware loaded into the kept 2-4 GiB slot stays there (option B)
     let kept_low = arch::relocate::load_range().is_some_and(|(start, size)| arch::relocate::in_kept_low_slot(start, size));
-    if kept_low {
-        arch::crumb::step("image in the kept 2-4 GiB range: staying low");
+    // wave12 GV: the boot words high=late / high=early (high=off and none: as before); an
+    // image that stays low takes the late path once the firmware is gone (relocate::HighPath)
+    let word = arch::relocate::entry_word();
+    if !arch::relocate::move_at_entry(word, kept_low) {
+        arch::crumb::step(if kept_low { "image in the kept 2-4 GiB range: staying low (late path after ExitBootServices)" } else { "boot word high=late: staying low until ExitBootServices" });
     } else if arch::crumb::want_high() {
         arch::relocate::go_high(boot);
     }
