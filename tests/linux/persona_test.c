@@ -8,12 +8,13 @@
  * tools/personality/build-fbhook.sh does; without it a bare Mach-O header stands in.
  *
  * Two modes, found by trying FreeBSD's rawsys:
- * - default (no switch): FreeBSD programs, Mach-O files and ELF files of other systems are
- *   refused with ENOEXEC; Linux programs (OS/ABI 0 and 3) run.
- * - the test switch persona=fbsd-stub: FreeBSD programs run on the FreeBSD stub table;
- *   rawsys and fbhook pass their own checks (carry flag, positive errno, rdx, FreeBSD
- *   numbers, signal numbers and frame), an unknown FreeBSD call ends the program with
- *   SIGSYS, and a FreeBSD program can exec a Linux one.
+ * - FreeBSD on (the default since wave 12's FreeBSD table; also the wave 5 stub table with
+ *   the test switch persona=fbsd-stub): rawsys and fbhook pass their own checks (carry
+ *   flag, positive errno, rdx, FreeBSD numbers, signal numbers and frame), a number that is
+ *   no FreeBSD call ends the program with SIGSYS, and a FreeBSD program can exec a Linux one.
+ * - boot option persona=off: FreeBSD programs are refused with ENOEXEC.
+ * Mach-O files and ELF files of other systems are refused with ENOEXEC in both; Linux
+ * programs (OS/ABI 0 and 3) run.
  * Prints "PERSONA-DONE mode=... fails=N"; exit status 0 when nothing failed.
  */
 #define _GNU_SOURCE
@@ -127,7 +128,7 @@ int main(int argc, char **argv)
     int st = run(path, rawargv, "/tmp/persona_rawsys.out");
     int stub = !(st & 0x10000);
     int raw_st = st;
-    printf("mode: %s (rawsys: %s)\n", stub ? "fbsd-stub" : "default", desc(st, b));
+    printf("mode: %s (rawsys: %s)\n", stub ? "freebsd-on" : "persona-off", desc(st, b));
 
     /* Linux programs: OS/ABI 0 (as built) and 3 (GNU) run */
     char *targv[] = { "true", NULL };
@@ -157,7 +158,7 @@ int main(int argc, char **argv)
     snprintf(path, sizeof path, "%s/fbinfo", dir);
     char *infoargv[] = { "fbsdinfo", NULL };
     if (!stub) {
-        printf("-- default mode: FreeBSD programs refused --\n");
+        printf("-- persona=off: FreeBSD programs refused --\n");
         CHECK(raw_st == (0x10000 | ENOEXEC), "static FreeBSD rawsys refused with ENOEXEC: %s", desc(raw_st, b));
         st = run(path, infoargv, NULL);
         CHECK(st == (0x10000 | ENOEXEC), "dynamic FreeBSD fbsdinfo refused with ENOEXEC (not ENOENT): %s", desc(st, b));
@@ -166,7 +167,7 @@ int main(int argc, char **argv)
         st = run(path, hookargv, NULL);
         CHECK(st == (0x10000 | ENOEXEC), "static FreeBSD fbhook refused with ENOEXEC: %s", desc(st, b));
     } else {
-        printf("-- stub mode: FreeBSD programs on the stub table --\n");
+        printf("-- FreeBSD on: FreeBSD programs run --\n");
         st = run(strcat(strcpy(path, dir), "/fbrawsys"), rawargv, "/tmp/persona_rawsys.out");
         CHECK(st == 0 && file_has("/tmp/persona_rawsys.out", "RAWSYS-DONE"), "rawsys: write, getpid/getppid by FreeBSD numbers, close(-1) = carry + EBADF 9: %s", desc(st, b));
         snprintf(path, sizeof path, "%s/fbinfo", dir);
@@ -205,6 +206,6 @@ int main(int argc, char **argv)
         st = run(path, execargv, "/tmp/persona_exec.out");
         CHECK(st == 0 && file_has("/tmp/persona_exec.out", "LINUX-AFTER-FREEBSD"), "FreeBSD program execs a Linux one (/bin/echo): %s", desc(st, b));
     }
-    printf("PERSONA-DONE mode=%s fails=%d\n", stub ? "fbsd-stub" : "default", fails);
+    printf("PERSONA-DONE mode=%s fails=%d\n", stub ? "freebsd-on" : "persona-off", fails);
     return fails != 0;
 }

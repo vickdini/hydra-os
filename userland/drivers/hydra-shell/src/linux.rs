@@ -97,6 +97,42 @@ pub fn linux(sh: &mut Shell, args: &[&str]) {
     }
 }
 
+/// Whether `path` exists in the pool.
+fn exists(path: &str) -> bool {
+    admin_rec::<StatRecord>(ADMIN_FILE_STAT, [0; 4], path.as_bytes()).is_ok()
+}
+
+/// `freebsd [program [args]]` (wave 12): a FreeBSD program in the FreeBSD root, as
+/// `linux chroot` runs one in the Ubuntu root. The root is the pool's `/freebsd`, else the
+/// Ubuntu root's (`/ubuntu/freebsd`, where `tools/personality/install-freebsd-root.sh` puts
+/// it); a name without a slash is looked up in its `/bin`, `/usr/bin`, `/sbin`, `/usr/sbin`
+/// and `/rescue`.
+pub fn freebsd(sh: &mut Shell, args: &[&str]) {
+    let root = if exists("/freebsd/libexec/ld-elf.so.1") {
+        "/freebsd"
+    } else if exists("/ubuntu/freebsd/libexec/ld-elf.so.1") {
+        "/ubuntu/freebsd"
+    } else {
+        color(LIGHT_RED);
+        println!("[!] freebsd: no FreeBSD root (/freebsd or /ubuntu/freebsd); install it with tools/personality/install-freebsd-root.sh");
+        color(WHITE);
+        sh.status = 1;
+        return;
+    };
+    let mut prog = alloc::string::String::from(args.first().copied().unwrap_or("/bin/sh"));
+    if !prog.contains('/') {
+        for d in ["/bin", "/usr/bin", "/sbin", "/usr/sbin", "/rescue"] {
+            if exists(&alloc::format!("{}{}/{}", root, d, prog)) {
+                prog = alloc::format!("{}/{}", d, prog);
+                break;
+            }
+        }
+    }
+    let mut words: Vec<&str> = alloc::vec![root, prog.as_str()];
+    words.extend_from_slice(args.get(1..).unwrap_or(&[]));
+    foreground(sh, RUN_CHROOT, &words, false);
+}
+
 /// `linux status`.
 fn status() {
     let s: LinuxStats = match admin_rec(ADMIN_LINUX_STATUS, [0; 4], &[]) {

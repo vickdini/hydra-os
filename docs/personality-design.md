@@ -797,6 +797,43 @@ area after each wave-11 step.
 **Not included** (as the plan says): FreeBSD's `zfs`/`zpool` tools (they talk to a kernel
 module), `ifconfig`'s write side, `mount`, `kldload`, `jail` beyond the stubs.
 
+### 4.7 As built in wave 12 stage 1 (Group FK), and where it differs
+
+The kernel side of the FreeBSD front end is in `src/personality/` (module page:
+[src/personality.md](src/personality.md)). Milestones 1–3 and `fbsdthr` pass (suite test
+`fbsdrun`); `/bin/sh -c 'echo $((1+2))'` prints 3. Where it differs from 2.x and 4.1–4.6:
+
+- **FreeBSD programs run by default**, with the full table; `persona=off` refuses them and
+  `persona=fbsd-stub` keeps wave 5's stub table (2.10's "refused by default" is gone).
+- **No `SERVER` route.** Decision 39 puts each translation into the service that owns the
+  object, keyed by `LxCall::pers`, which the kernel now fills for every forwarded call (in
+  `lx::place`); `LxCall::nr` stays the Linux number. So a FreeBSD call is either a Linux call
+  with the same arguments (`LINUX_AS`), a kernel-local translation onto one or more Linux calls
+  (constants and flags the kernel owns, and mechanism), or `ENOSYS` until stage 2.
+- **Unimplemented live calls are `ENOSYS` without `SIGSYS`** and log one line each
+  (`[persona] FreeBSD <prog>: <call> (<n>) not implemented yet`); only numbers FreeBSD does not
+  have keep `SIGSYS` (2.3's `NOSYS`). Otherwise every missing call would kill `sh`.
+- **Temporary in-kernel layouts** (allowed for milestone 3 only, all marked
+  `// wave12 FK temporary`): `struct stat` (`fstat`, `fstatat`), `struct dirent`
+  (`getdirentries`), `struct statfs` (`fstatfs`) for vfs-server, and a dozen `sysctl` names
+  (4.4's first set, reduced to what libc, libthr and rtld ask for) for lx-proc.
+- **Translated structures go through the caller's stack** (512 bytes below its stack pointer)
+  instead of kernel buffers: the Linux calls take user pointers.
+- **The shared page** keeps the trampoline at `FREEBSD_SIGCODE_ADDR` (2.10) and adds the
+  thread start of `thr_new` (`mov %r13,%rdi; xor %ebp,%ebp; jmp *%r12`); no `AT_TIMEKEEP`
+  or `AT_KPRELOAD` yet (libc falls back to `clock_gettime`).
+- **`_umtx_op`** has its own wait queue (not the Linux futex buckets), with FreeBSD's object
+  kinds; the kernel lock is FreeBSD's "busy" monitor. PI/PP mutexes as normal ones,
+  `UMTX_OP_SHM` `ENOSYS`, no robust-list walk at thread death.
+- **`sysarch(AMD64_SET_TLSBASE)`** is what FreeBSD 15's rtld and libthr use (osreldate ≥
+  `P_OSREL_TLSBASE`); it sets the FS base. `GET_TLSBASE` must answer, or libthr falls back to
+  `wrfsbase`, which faults on Hydra (CR4.FSGSBASE is off).
+- **The root is `/ubuntu/freebsd`**, not the pool's `/freebsd` (4.6): the install runs inside
+  the Ubuntu root, which cannot see the pool root; hydra-shell's `freebsd` command takes the
+  pool's `/freebsd` if one exists.
+- **What `rtld`, `echo` and `sh -c` still log** (stage 2): `rtprio_thread` and `exterrctl`
+  (FreeBSD 15's libc start; both harmless as `ENOSYS`).
+
 ## 5. macOS against the BSD core
 
 ### 5.1 The BSD calls

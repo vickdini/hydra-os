@@ -53,6 +53,15 @@ pub fn status() -> LinuxStats {
 pub fn spawn_in_root(root: &str, argv: &[&str], uid: u32, gid: u32) -> Result<crate::task::TaskId, String> {
     prepare_network_files(root);
     prepare_runtime_dir(root, uid, gid);
+    // wave12 FK begin: a FreeBSD root (hydra-shell's `freebsd`) gets no Linux device tree:
+    // its /sys is a link into its sources, and the tree's writer also takes the root it
+    // fills as "the Linux root" (UEFI variables, block devices, the access policy's first
+    // load). Its /dev nodes come from install-freebsd-root.sh.
+    let fbsd = crate::fs::ZfsClient::file_stat(&alloc::format!("{}/libexec/ld-elf.so.1", root.trim_end_matches('/'))).is_ok();
+    if fbsd {
+        return crate::task::spawn_linux_chroot(root, argv[0], argv, uid, gid);
+    }
+    // wave12 FK end
     if let Err(e) = crate::compat::linux::devices::populate(root) {
         crate::println!("[!] linux chroot: device files: {}", e);
     }

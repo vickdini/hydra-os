@@ -67,6 +67,10 @@ pub fn discover_with(fw: Option<&[u8]>, opts: Option<&[u8]>) {
     if say(b"persona=fbsd-stub") {
         crate::personality::STUB_BY_BOOT_OPTION.store(true, Ordering::Release);
     }
+    // wave12 FK: FreeBSD programs refused again (they run by default since wave 12)
+    if say(b"persona=off") {
+        crate::personality::OFF_BY_BOOT_OPTION.store(true, Ordering::Release);
+    }
     crate::personality::init();
     if let Some(by) = by {
         *EMERGENCY_BY.lock() = by;

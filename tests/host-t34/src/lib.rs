@@ -1542,6 +1542,7 @@ pub mod lx {
 pub mod personality {
     use core::sync::atomic::AtomicBool;
     pub static STUB_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
+    pub static OFF_BY_BOOT_OPTION: AtomicBool = AtomicBool::new(false);
     pub fn init() {
         crate::fake::log("personality_init");
     }

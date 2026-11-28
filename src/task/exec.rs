@@ -545,6 +545,9 @@ fn map_freebsd_sigcode(mm: &mut Mm) -> Result<(), ElfError> {
     mm.mmap(SIGCODE_ADDR, PAGE_SIZE, PROT_READ | PROT_WRITE, false, true, false, Backing::Anon)
         .map_err(|_| ElfError::AllocationFailed)?;
     mm.write_bytes(SIGCODE_ADDR, &SIGCODE).map_err(|_| ElfError::AllocationFailed)?;
+    // wave12 FK: thr_new's thread start, on the same page
+    use crate::personality::abi::{FREEBSD_THR_START, FREEBSD_THR_START_ADDR};
+    mm.write_bytes(FREEBSD_THR_START_ADDR, &FREEBSD_THR_START).map_err(|_| ElfError::AllocationFailed)?;
     mm.mprotect(SIGCODE_ADDR, PAGE_SIZE, PROT_READ | PROT_EXEC).map_err(|_| ElfError::AllocationFailed)?;
     mm.set_name(SIGCODE_ADDR, SIGCODE_ADDR + PAGE_SIZE, Some("[sigcode]"));
     Ok(())

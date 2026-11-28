@@ -104,7 +104,7 @@ void _start(long *ap)
     const char *mode = argc > 1 ? argv[1] : "";
 
     if (streq(mode, "nosys")) {
-        sys(555, 0, 0, 0, 0, 0);
+        sys(999, 0, 0, 0, 0, 0); /* (not a FreeBSD call; 555 is statfs since wave 12's table) */
         say("fbhook: still alive after an unknown call (expected SIGSYS)\n");
         die(90);
     }

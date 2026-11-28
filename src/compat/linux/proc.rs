@@ -1488,6 +1488,26 @@ pub fn sys_rt_sigprocmask(how: u64, set: u64, oset: u64, size: u64) -> i64 {
     0
 }
 
+// wave12 FK begin: the other personalities' sigprocmask/getcontext, without user memory
+/// Reads the calling thread's blocked mask and, with `new` = `(how, set)` (Linux's `how`:
+/// 0 block, 1 unblock, 2 set), changes it; answers the old mask.
+pub fn change_mask(new: Option<(u64, u64)>) -> Result<u64, i64> {
+    let (tid, pid) = current_ids();
+    let mut procs = PROCS.lock();
+    let Some(t) = procs.get_mut(&pid).and_then(|p| p.threads.get_mut(&tid)) else { return Ok(0) };
+    let old = t.mask;
+    if let Some((how, v)) = new {
+        t.mask = match how {
+            0 => t.mask | v,
+            1 => t.mask & !v,
+            2 => v,
+            _ => return Err(EINVAL),
+        } & !UNBLOCKABLE;
+    }
+    Ok(old)
+}
+// wave12 FK end
+
 /// Configures and/or queries the calling thread's alternate signal stack.
 ///
 /// # Arguments
