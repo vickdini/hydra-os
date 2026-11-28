@@ -221,7 +221,7 @@ fn deadline(ptr: u64, size: u64) -> Result<Option<u64>, i64> {
     if ptr == 0 {
         return Ok(None);
     }
-    let b = crate::compat::linux::vfs::copy_in(ptr, timeout_len(size)).map_err(|_| EFAULT)?;
+    let b = crate::compat::linux::vfs::copy_in(ptr, timeout_len(size).ok_or(EINVAL)?).map_err(|_| EFAULT)?;
     let t = parse_timeout(&b).map_err(|_| EINVAL)?;
     Ok(Some(abs_ns(t.sec, t.nsec, t.abs, clock_is_realtime(t.clock))))
 }
@@ -572,7 +572,7 @@ fn cv_broadcast(cv: u64) -> Result<i64, i64> {
 /// count.
 fn bump(rw: u64, off: u64, d: i32) -> Result<u32, i64> {
     let v = load32(rw + off)?;
-    store32(rw + off, (v as i32 + d) as u32)?;
+    store32(rw + off, v.wrapping_add(d as u32))?;
     Ok(v)
 }
 

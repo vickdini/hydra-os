@@ -316,6 +316,10 @@ fn mcontext_layout_and_round_trip() {
     assert_eq!(back.gprs, m.gprs);
     assert_eq!((back.rip, back.rsp, back.rflags, back.fsbase), (m.rip, m.rsp, m.rflags, m.fsbase));
     assert_eq!(f2.unwrap()[..], fx[..]);
+    // NT smuggled in through a context comes back cleared
+    let mut nt = out;
+    nt[176..184].copy_from_slice(&(0x246u64 | 0x4000).to_le_bytes());
+    assert_eq!(Mcontext::user_rflags(Mcontext::unpack(&nt).unwrap().0.rflags) & 0x4000, 0);
     // A wrong mc_len: EINVAL; no FPU state: none
     let mut bad = out;
     bad[200..208].copy_from_slice(&0u64.to_le_bytes());
@@ -331,6 +335,9 @@ fn mcontext_layout_and_round_trip() {
     // User flags: IF stays set, IOPL cleared
     assert_eq!(Mcontext::user_rflags(0x3000), 0x202);
     assert_eq!(Mcontext::user_rflags(0x1), 0x203, "carry kept");
+    assert_eq!(Mcontext::user_rflags(0x4000), 0x202, "NT cleared (iretq would fault)");
+    assert_eq!(Mcontext::user_rflags(0x1_0000), 0x202, "RF cleared");
+    assert_eq!(Mcontext::user_rflags(0x24_0400 | 0x100 | 0xD5), 0x24_0400 | 0x100 | 0xD5 | 0x202, "ID, AC, DF, TF and the arithmetic flags kept");
     assert_eq!((UC_MCONTEXT, UC_LINK, UC_STACK, UC_FLAGS, UC_LEN), (16, 816, 824, 848, 880));
 }
 
@@ -339,9 +346,12 @@ fn mcontext_layout_and_round_trip() {
 #[test]
 fn umtx_timeouts() {
     use umtx::*;
-    assert_eq!(timeout_len(0), 16);
-    assert_eq!(timeout_len(16), 16);
-    assert_eq!(timeout_len(24), 24);
+    assert_eq!(timeout_len(0), Some(16));
+    assert_eq!(timeout_len(16), Some(16));
+    assert_eq!(timeout_len(17), None, "EINVAL: a partial struct _umtx_time");
+    assert_eq!(timeout_len(23), None);
+    assert_eq!(timeout_len(24), Some(24));
+    assert_eq!(timeout_len(4096), Some(24));
     let mut b = [0u8; 24];
     b[0..8].copy_from_slice(&2i64.to_le_bytes());
     b[8..16].copy_from_slice(&500i64.to_le_bytes());

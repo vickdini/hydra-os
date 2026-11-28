@@ -404,7 +404,7 @@ fn sigreturn_restores_a_checked_context() {
     assert_eq!(r.regs.rip, 0x40_1234);
     assert_eq!(r.regs.rsp, 0x7FFF_0000);
     assert_eq!((r.regs.rdi, r.regs.r15), (0x100, 0x10E));
-    assert_eq!(r.regs.rflags, (0xFFFF_FFFF & 0x0025_4DD5) | 0x202, "only the user flags, IF set");
+    assert_eq!(r.regs.rflags, (0xFFFF_FFFF & 0x0024_0DD5) | 0x202, "only the user flags, IF set (NT and RF cleared)");
     assert_eq!(r.mxcsr, 0x1F80, "MXCSR's reserved bits cleared");
     assert!(r.fpu_written);
     assert_eq!(r.cs, 0x2b);

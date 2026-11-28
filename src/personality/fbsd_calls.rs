@@ -672,9 +672,19 @@ fn with_mask(f: &SyscallFrame, set: u64) -> Result<u64, i64> {
     Ok(s)
 }
 
+/// `ppoll(fds, nfds, ts, set)`: Linux's `ppoll` writes the time left back into its timeout,
+/// FreeBSD's is const: a copy goes (with the mask, through the caller's stack).
 fn ppoll(f: &SyscallFrame, a: [u64; 6]) -> Result<i64, i64> {
-    let s = if a[3] != 0 { with_mask(f, a[3])? } else { 0 };
-    Ok(lx(271, [a[0], a[1], a[2], s, 8, 0]))
+    let s = scratch(f, 32);
+    let mut b = [0u8; 32];
+    if a[3] != 0 {
+        b[0..8].copy_from_slice(&x::mask_from_freebsd(&get(a[3], 16)?).to_le_bytes());
+    }
+    if a[2] != 0 {
+        b[16..32].copy_from_slice(&get(a[2], 16)?);
+    }
+    put(s, &b)?;
+    Ok(lx(271, [a[0], a[1], if a[2] != 0 { s + 16 } else { 0 }, if a[3] != 0 { s } else { 0 }, 8, 0]))
 }
 
 /// `pselect(nd, in, ou, ex, ts, sigmask)`: Linux's `pselect6` takes the mask as
@@ -713,21 +723,19 @@ fn thr_kill(pid: u64, tid: u64, sig: u64) -> Result<i64, i64> {
     Ok(lx(234, [pid, tid, sig_in(sig)?, 0, 0, 0]))
 }
 
-fn sigprocmask(f: &SyscallFrame, how: u64, set: u64, oset: u64) -> Result<i64, i64> {
-    let s = scratch(f, 16);
-    let lhow = if set != 0 {
+/// `sigprocmask(how, set, oset)`: straight on the thread's mask (no stack copy).
+fn sigprocmask(_f: &SyscallFrame, how: u64, set: u64, oset: u64) -> Result<i64, i64> {
+    let new = if set != 0 {
         let h = x::sigprocmask_how(how).ok_or(EINVAL)?;
-        put(s, &x::mask_from_freebsd(&get(set, 16)?).to_le_bytes())?;
-        h
+        Some((h, x::mask_from_freebsd(&get(set, 16)?)))
     } else {
-        0
+        None
     };
-    let r = lx(14, [lhow, if set != 0 { s } else { 0 }, if oset != 0 { s + 8 } else { 0 }, 8, 0, 0]);
-    if r == 0 && oset != 0 {
-        let b = get(s + 8, 8)?;
-        put(oset, &x::mask_to_freebsd(u64_at(&b, 0)))?;
+    let old = crate::compat::linux::proc::change_mask(new)?;
+    if oset != 0 {
+        put(oset, &x::mask_to_freebsd(old))?;
     }
-    Ok(r)
+    Ok(0)
 }
 
 /// `sigtimedwait(set, info, timeout)`: the FreeBSD signal number taken, its `siginfo_t`.

@@ -20,10 +20,17 @@
 set -u
 SRC=${1:-/var/tmp/freebsd-root-15.1.tar.xz}
 SUM=${2:-$SRC.sha256}
-TARGET=${FREEBSD_TARGET:-/freebsd}
+TARGET=${FREEBSD_TARGET-/freebsd}   # (set but empty: refused below)
 WORK=/var/tmp/hydra-freebsd
 fail() { echo "FREEBSD-ROOT-FAILED: $*"; exit 1; }
 [ "$(id -u)" = 0 ] || fail "run as root"
+# The target gets replaced and removed: an absolute path below / with a name of its own
+case "$TARGET" in
+/*/*|/??*) ;;
+*) fail "FREEBSD_TARGET '$TARGET' is not a safe absolute path" ;;
+esac
+TARGET=${TARGET%/}
+[ "$TARGET" != / ] && [ ${#TARGET} -ge 4 ] || fail "FREEBSD_TARGET '$TARGET' is too short"
 mkdir -p "$WORK" || fail "cannot create $WORK"
 
 fetch() { # SRC DEST
@@ -40,10 +47,10 @@ http://*|https://*) echo "fetching $SRC"; fetch "$SRC" "$TAR" || fail "cannot fe
 *) [ -f "$SRC" ] || fail "no tarball at $SRC"; TAR=$SRC ;;
 esac
 fetch "$SUM" "$WORK/sum" || fail "cannot fetch $SUM"
-WANT=$(awk '{print $1; exit}' "$WORK/sum")
+WANT=$(awk '{print tolower($1); exit}' "$WORK/sum")
 [ ${#WANT} = 64 ] || fail "no SHA-256 in $SUM"
 echo "checking SHA-256"
-HAVE=$(sha256sum "$TAR" | awk '{print $1}')
+HAVE=$(sha256sum "$TAR" | awk '{print tolower($1)}')
 [ "$HAVE" = "$WANT" ] || fail "checksum mismatch ($HAVE, want $WANT)"
 
 STAMP=$TARGET/.hydra-installed
@@ -69,7 +76,7 @@ fi
 mkdir -p "$TARGET/dev" "$TARGET/tmp" "$TARGET/var/tmp" "$TARGET/proc"
 chmod 1777 "$TARGET/tmp" "$TARGET/var/tmp"
 for f in resolv.conf hosts; do
-    [ -f "/etc/$f" ] && cp -L "/etc/$f" "$TARGET/etc/$f"
+    [ -f "/etc/$f" ] && { rm -f "$TARGET/etc/$f"; cp -L "/etc/$f" "$TARGET/etc/$f"; }
 done
 # The basic device nodes (Linux numbers, as Hydra's kernel routes them; FreeBSD's devfs
 # would make its own)
@@ -88,6 +95,8 @@ cat > /usr/local/bin/freebsd <<EOF
 # Runs a FreeBSD program in the FreeBSD root ($TARGET): freebsd PROGRAM [ARGS]
 # (installed by Hydra's install-freebsd-root.sh). A name without a slash is looked up in the
 # root's /bin, /usr/bin, /sbin and /usr/sbin; no program starts the root's /bin/sh.
+# chroot needs root: other users go through sudo, and the program then runs as the caller
+# again (chroot --userspec with the caller's user and group ids), never as root.
 R=$TARGET
 [ \$# -gt 0 ] || set -- /bin/sh
 case "\$1" in
@@ -97,7 +106,7 @@ case "\$1" in
    done ;;
 esac
 if [ "\$(id -u)" = 0 ]; then exec chroot "\$R" "\$@"; fi
-exec sudo chroot "\$R" "\$@"
+exec sudo chroot --userspec="\$(id -u):\$(id -g)" "\$R" "\$@"
 EOF
 chmod 755 /usr/local/bin/freebsd
 echo "FreeBSD root: $TARGET; wrapper /usr/local/bin/freebsd"

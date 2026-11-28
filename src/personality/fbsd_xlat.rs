@@ -762,10 +762,11 @@ impl Mcontext {
         Ok((m, fpu))
     }
 
-    /// The flags user code may give itself back (arithmetic flags, TF, DF, AC, ID...): IF
-    /// stays set, IOPL and the rest clear.
+    /// The flags user code may give itself back (arithmetic flags, TF, DF, AC, ID): IF
+    /// stays set; IOPL, NT (0x4000: an `iretq` with it set would fault in ring 0) and RF
+    /// (0x10000) clear, as Linux's `sigreturn` does.
     pub fn user_rflags(r: u64) -> u64 {
-        (r & 0x0000_0000_0025_4DD5) | 0x202
+        (r & 0x0000_0000_0024_0DD5) | 0x202
     }
 }
 
@@ -857,11 +858,13 @@ pub mod umtx {
     }
 
     /// How many bytes [`Timeout`] reads for size argument `size`.
-    pub fn timeout_len(size: u64) -> usize {
-        if size <= 16 {
-            16
-        } else {
-            24
+    /// `None`: `EINVAL` (FreeBSD reads a `struct _umtx_time` only when the size says all
+    /// of it is there, so 17 to 23 bytes are refused).
+    pub fn timeout_len(size: u64) -> Option<usize> {
+        match size {
+            0..=16 => Some(16),
+            17..=23 => None,
+            _ => Some(24),
         }
     }
 

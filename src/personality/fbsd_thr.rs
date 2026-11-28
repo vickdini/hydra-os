@@ -25,14 +25,10 @@ const EINVAL: i64 = -22;
 /// 0), its signal mask, alternate stack and FPU state.
 pub fn getcontext(f: &SyscallFrame, ucp: u64) -> Result<i64, i64> {
     let mut uc = [0u8; UC_LEN];
-    // The mask: Linux's rt_sigprocmask(SIG_BLOCK, NULL, &old) through the caller's stack
-    let s = (f.rsp.wrapping_sub(512 + 16)) & !0xF;
-    let r = super::linux_call(14, [0, 0, s, 8, 0, 0]);
-    if r != 0 {
-        return Err(r);
-    }
-    let m = copy_in(s, 8).map_err(|_| EFAULT)?;
-    uc[0..16].copy_from_slice(&super::fbsd_xlat::mask_to_freebsd(u64::from_le_bytes(m[0..8].try_into().unwrap())));
+    // The mask, read straight from the thread (no stack copy: a thread near an unmapped
+    // stack page must not get EFAULT)
+    let m = crate::compat::linux::proc::change_mask(None)?;
+    uc[0..16].copy_from_slice(&super::fbsd_xlat::mask_to_freebsd(m));
     let (stack, on_alt) = super::freebsd::uc_stack(f.rsp);
     let regs = crate::compat::linux::proc::UserRegs {
         rdi: f.rdi,

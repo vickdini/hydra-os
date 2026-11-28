@@ -824,6 +824,19 @@ pub mod linux_stubs {
         pub fn set_current_mask(mask: u64) {
             MASK.set(mask);
         }
+        /// As the kernel's (wave 12): the old mask, the new one per Linux's `how`.
+        pub fn change_mask(new: Option<(u64, u64)>) -> Result<u64, i64> {
+            let old = MASK.get();
+            if let Some((how, v)) = new {
+                MASK.set(match how {
+                    0 => old | v,
+                    1 => old & !v,
+                    2 => v,
+                    _ => return Err(-22),
+                });
+            }
+            Ok(old)
+        }
         /// Records the delivery point; [`DELIVER_HOOK`] may change the frame (a handler).
         pub fn deliver_on_syscall_return(frame: &mut crate::arch::syscall::SyscallFrame, _fpu: *mut crate::arch::idt::FpuState, orig_nr: u64) {
             DELIVERED.with_borrow_mut(|v| v.push(orig_nr));
